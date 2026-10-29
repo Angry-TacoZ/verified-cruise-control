@@ -1,0 +1,5 @@
+dist/
+.output/
+.wxt/
+coverage/
+package-lock.json

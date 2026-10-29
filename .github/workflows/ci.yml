@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install dependencies
+        run: pip install -r backend/requirements-dev.lock
+      - name: Ruff lint + format
+        run: |
+          ruff check backend/
+          ruff format --check backend/
+      - name: Django checks + migrations check
+        run: |
+          python backend/manage.py check
+          python backend/manage.py makemigrations --check --dry-run
+      - name: Pytest
+        run: python -m pytest backend/ -q
+
+  mother:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/mother/package-lock.json
+      - name: Install dependencies
+        run: npm ci --prefix apps/mother
+      - name: Typecheck
+        run: npm run check --prefix apps/mother
+      - name: Lint
+        run: npm run lint --prefix apps/mother
+      - name: Unit tests
+        run: npm test --prefix apps/mother
+      - name: Production build
+        run: npm run build --prefix apps/mother
+
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/extension/package-lock.json
+      - name: Install dependencies
+        run: npm ci --prefix apps/extension
+      - name: Typecheck
+        run: npm run check --prefix apps/extension
+      - name: Lint
+        run: npm run lint --prefix apps/extension
+      - name: Unit tests
+        run: npm test --prefix apps/extension
+      - name: Production build
+        run: npm run build --prefix apps/extension
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        uses: gitleaks/gitleaks-action@v2

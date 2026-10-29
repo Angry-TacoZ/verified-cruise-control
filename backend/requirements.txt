@@ -1,0 +1,5 @@
+# Production dependencies (pinned). Regenerate requirements.lock after changes:
+#   pip install -r requirements.txt && pip freeze > requirements.lock
+Django==6.1.2
+django-ninja==1.7.2
+Pillow==13.0.0
