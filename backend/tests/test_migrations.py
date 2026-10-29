@@ -35,6 +35,7 @@ def test_migrate_from_scratch(tmp_path):
         assert {
             "listings_listing",
             "evidence_photograph",
+            "evidence_photofailure",
             "pairing_extensionpairing",
             "pairing_localoperator",
         } <= tables

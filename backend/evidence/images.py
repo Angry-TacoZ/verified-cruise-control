@@ -21,13 +21,13 @@ from pathlib import Path
 
 from django.conf import settings
 from django.db import IntegrityError, OperationalError, transaction
-from django.db.models import Sum
+from django.db.models import F, Sum
 from PIL import Image, ImageFile
 
 from config import limits
 from listings.models import Listing
 
-from .models import Photograph, Provenance
+from .models import PhotoFailure, Photograph, Provenance
 
 Image.MAX_IMAGE_PIXELS = limits.MAX_IMAGE_PIXELS
 ImageFile.LOAD_TRUNCATED_IMAGES = False
@@ -144,8 +144,19 @@ def _insert_photo_row(
     storage_ref: str,
 ) -> tuple[Photograph, bool]:
     """Single transactional insert attempt. Raises ImageRejected for limit
-    violations (not retried) and OperationalError on lock contention."""
+    violations (not retried) and OperationalError on lock contention.
+
+    Idempotency comes before capacity: an existing (listing, sha256) photo
+    is returned even when the listing is already at its count or byte
+    limits, so identical retries after a partial failure are not rejected.
+    """
     with transaction.atomic():
+        existing = Photograph.objects.filter(
+            listing=listing, sha256=validated.sha256
+        ).first()
+        if existing is not None:
+            return existing, True
+
         if (
             Photograph.objects.filter(listing=listing).count()
             >= limits.MAX_PHOTOS_PER_LISTING
@@ -159,12 +170,6 @@ def _insert_photo_row(
         )
         if total + len(data) > limits.MAX_LISTING_PHOTO_BYTES:
             raise ImageRejected("listing_too_large", "listing photo payload too large")
-
-        existing = Photograph.objects.filter(
-            listing=listing, sha256=validated.sha256
-        ).first()
-        if existing is not None:
-            return existing, True
 
         dest = original_path(storage_ref, validated.image_format)
         _write_original_atomically(data, dest)
@@ -226,6 +231,9 @@ def store_listing_photo(
             last_error = exc
             time.sleep(0.05 * (2**attempt) + random.uniform(0, 0.05))
             continue
+        resolve_failures_for_photo(
+            listing, sha256=validated.sha256, source_url=source_url
+        )
         listing.refresh_import_status()
         return photo, duplicate
     assert last_error is not None
@@ -236,12 +244,151 @@ def store_listing_photo(
     raise last_error
 
 
-def record_failed_upload(listing: Listing) -> None:
-    Listing.objects.filter(pk=listing.pk).update(
-        failed_upload_count=listing.failed_upload_count + 1
-    )
-    listing.failed_upload_count += 1
+def failure_key_for_sha(sha256: str) -> str:
+    """Failure key for bytes that reached the server (validation/upload)."""
+    return sha256
+
+
+def failure_key_for_url(source_url: str) -> str:
+    """Failure key for photos that never reached the server (download/
+    permission): derived from the URL since no bytes exist to hash."""
+    return "url:" + hashlib.sha256(source_url.encode("utf-8")).hexdigest()
+
+
+def record_failure(
+    listing: Listing,
+    *,
+    key: str,
+    kind: str,
+    detail: str = "",
+    source_url: str | None = None,
+) -> tuple[PhotoFailure, bool]:
+    """Idempotent per-photograph failure record. Returns (failure, created).
+
+    Only the first unresolved report for a (listing, key) increments
+    ``failed_upload_count`` — via an atomic ``F()`` update, never an
+    in-memory value — so concurrent and repeated reports cannot inflate the
+    count. Re-reporting a resolved failure reopens it (a genuine new
+    failure), which also increments exactly once.
+
+    Retries on lock contention like the photo insert path: concurrent
+    failure reports for one listing contend on SQLite, so each attempt
+    works from a fresh snapshot.
+    """
+    last_error: OperationalError | None = None
+    for attempt in range(WRITE_ATTEMPTS):
+        try:
+            with transaction.atomic():
+                failure, created = (
+                    PhotoFailure.objects.select_for_update().get_or_create(
+                        listing=listing,
+                        key=key,
+                        defaults={
+                            "kind": kind,
+                            "detail": detail,
+                            "source_url": source_url,
+                        },
+                    )
+                )
+                if created:
+                    Listing.objects.filter(pk=listing.pk).update(
+                        failed_upload_count=F("failed_upload_count") + 1
+                    )
+                    listing.refresh_from_db(fields=["failed_upload_count"])
+                else:
+                    updates: dict = {"detail": detail}
+                    if source_url is not None and failure.source_url != source_url:
+                        updates["source_url"] = source_url
+                    if failure.kind != kind:
+                        updates["kind"] = kind
+                    if failure.resolved:
+                        # A new failure after recovery reopens the record.
+                        updates["resolved"] = False
+                        Listing.objects.filter(pk=listing.pk).update(
+                            failed_upload_count=F("failed_upload_count") + 1
+                        )
+                        listing.refresh_from_db(fields=["failed_upload_count"])
+                    PhotoFailure.objects.filter(pk=failure.pk).update(**updates)
+                    failure.refresh_from_db()
+            listing.refresh_import_status()
+            return failure, created
+        except OperationalError as exc:
+            last_error = exc
+            time.sleep(0.05 * (2**attempt) + random.uniform(0, 0.05))
+            continue
+    assert last_error is not None
+    raise last_error
+
+
+def resolve_failures_for_photo(
+    listing: Listing,
+    *,
+    sha256: str,
+    source_url: str | None,
+) -> int:
+    """Mark failures resolved once the photo stores successfully. Matches
+    both the byte-hash key and the pre-upload URL key, so a photo that
+    previously failed to download resolves when it finally uploads."""
+    candidates = [failure_key_for_sha(sha256)]
+    if source_url:
+        candidates.append(failure_key_for_url(source_url))
+    last_error: OperationalError | None = None
+    resolved_count = 0
+    for attempt in range(WRITE_ATTEMPTS):
+        try:
+            with transaction.atomic():
+                matching = PhotoFailure.objects.select_for_update().filter(
+                    listing=listing, resolved=False, key__in=candidates
+                )
+                resolved_count = matching.update(resolved=True)
+                if resolved_count:
+                    Listing.objects.filter(pk=listing.pk).update(
+                        failed_upload_count=F("failed_upload_count") - resolved_count
+                    )
+                    listing.refresh_from_db(fields=["failed_upload_count"])
+                    # Clamp: concurrent writers each decrement for rows they
+                    # flipped, but a stale reopen must never drive the
+                    # counter negative.
+                    if listing.failed_upload_count < 0:
+                        Listing.objects.filter(pk=listing.pk).update(
+                            failed_upload_count=0
+                        )
+                        listing.refresh_from_db(fields=["failed_upload_count"])
+            break
+        except OperationalError as exc:
+            last_error = exc
+            time.sleep(0.05 * (2**attempt) + random.uniform(0, 0.05))
+            continue
+    else:
+        assert last_error is not None
+        raise last_error
     listing.refresh_import_status()
+    return resolved_count
+
+
+def read_bounded_upload(file, limit: int) -> bytes:
+    """Read an uploaded file with a hard byte cap. Raises ImageRejected for
+    oversize/empty payloads so callers keep one consistent error path.
+
+    The declared size is checked first to reject obvious oversize uploads
+    without reading; the chunked loop then enforces the cap even when size
+    metadata is missing or lies. Underlying I/O errors propagate to the
+    caller (mapped to HTTP 400 there), never masked as rejections.
+    """
+    declared = getattr(file, "size", None)
+    if declared is not None and declared > limit:
+        raise ImageRejected("too_large", "photograph exceeds size limit")
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in file.chunks(chunk_size=256 * 1024):
+        total += len(chunk)
+        if total > limit:
+            raise ImageRejected("too_large", "photograph exceeds size limit")
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    if not data:
+        raise ImageRejected("empty", "photograph is empty")
+    return data
 
 
 PROVENANCE_VALUES = {Provenance.EXTENSION, Provenance.MANUAL}

@@ -16,11 +16,16 @@
 page and returns JSON to the background worker (no tokens, no bytes cross
 runtime messaging). The worker validates the message + sender tab host,
 creates the listing (`POST /api/extension/listings`), then downloads each
-photo (allowlisted URLs, 16 MiB stream cap, 30 s timeout) and uploads it
-(`POST …/photos`, one multipart request each, concurrency 3, whole-image
-retries). Progress checkpoints to `session` storage after every photo, so a
-suspended worker resumes without duplicating evidence (server dedupes by
-`(listing, sha256)`).
+photo (allowlisted URLs with per-hop redirect revalidation, 16 MiB stream
+cap, 30 s timeout) and uploads it (`POST …/photos`, one multipart request
+each, concurrency 3, whole-image retries). Download failures that never
+reach the upload endpoint are reported explicitly
+(`POST …/failed-photos`). Progress checkpoints to `session` storage after
+every photo with an `active` / `partial` / `complete` / `failed` run status:
+an interrupted active run resumes under the same listing id, while a
+finished partial/failed run recovers only through an explicit retry that
+reuses the listing id and skips stored photos (server dedupes by
+`(listing, sha256)`, idempotency checked before capacity).
 
 **Mother app reads/writes.** The browser talks to Vite, which proxies
 `/api/*` to Django — same-origin, no CORS. Reads use the operator session
@@ -73,3 +78,6 @@ interfaces plus durable audit jobs:
 3. **Secrets stay server-side / in trusted contexts**: model keys in backend
    env only; pairing token in background/popup storage only, never content
    scripts or pages; verifiers (SHA-256) in SQLite, never plaintext.
+   `storage.local` is additionally restricted to `TRUSTED_CONTEXTS` at
+   worker startup, so untrusted content-script contexts cannot read the
+   token area (verified by a real-browser access-level test).

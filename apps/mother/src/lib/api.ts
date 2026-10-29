@@ -50,6 +50,17 @@ export interface Photo {
   created_at: string;
 }
 
+export interface PhotoFailure {
+  id: string;
+  listing_id: string;
+  key: string;
+  kind: 'download' | 'permission' | 'validation' | 'upload';
+  detail: string;
+  source_url: string | null;
+  resolved: boolean;
+  created_at: string;
+}
+
 export interface PairingInfo {
   id: string;
   label: string;
@@ -131,6 +142,8 @@ export const backend = {
   listListings: () => request<{ items: Listing[]; count: number }>('/api/listings'),
   getListing: (id: string) => request<Listing>(`/api/listings/${id}`),
   listPhotos: (listingId: string) => request<Photo[]>(`/api/listings/${listingId}/photos`),
+  listFailures: (listingId: string) =>
+    request<PhotoFailure[]>(`/api/listings/${listingId}/failed-photos`),
   createListing: (input: ListingInput) =>
     request<Listing>('/api/listings', { method: 'POST', json: input }),
   uploadPhoto: (listingId: string, file: File, sourceUrl?: string) => {

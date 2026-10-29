@@ -21,8 +21,34 @@ describe('security boundaries (static guards)', () => {
     const config = read('wxt.config.ts');
     expect(config).not.toContain('<all_urls>');
     expect(config).not.toContain('chrome-extension://*');
+    expect(config).not.toMatch(/['"]scripting['"]/);
     expect(config).toContain('http://127.0.0.1:8000/*');
     expect(config).toContain('http://127.0.0.1:8901/*');
+  });
+
+  it('background restricts storage.local before handling messages', () => {
+    const source = read('entrypoints/background.ts');
+    const restrictAt = source.indexOf('ensureTrustedStorage()');
+    const listenAt = source.indexOf('addListener');
+    expect(restrictAt).toBeGreaterThanOrEqual(0);
+    expect(listenAt).toBeGreaterThan(restrictAt);
+  });
+
+  it('pairing token reads gate on the storage restriction', () => {
+    const source = read('src/lib/store.ts');
+    expect(source).toContain('TRUSTED_CONTEXTS');
+    const getter = source.slice(source.indexOf('getPairingToken'));
+    expect(getter).toContain('await ensureTrustedStorage()');
+  });
+
+  it('pairing token never crosses the content-script boundary', () => {
+    const background = read('entrypoints/background.ts');
+    // The token travels only to localhost API calls, never in messages.
+    expect(background).not.toMatch(/sendMessage\([^)]*token/i);
+    const protocol = read('src/lib/protocol.ts');
+    // No message shape declares a credential field (the FORBIDDEN_KEYS list
+    // names them only to reject them).
+    expect(protocol).not.toMatch(/['"]?(pairingToken|extensionToken)['"]?\s*:/);
   });
 
   it('extractor registry has no wildcard hosts', () => {

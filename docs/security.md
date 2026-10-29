@@ -41,9 +41,41 @@ can read this repository and can serve arbitrary listing pages.
   decompression-bomb warnings as errors → `verify()` → reopen + `load()` →
   atomic write of original bytes. MIME/extension are never trusted.
 - Extension image fetches: public http(s) only, plus the explicit
-  `127.0.0.1:8901` fixture exception. Loopback, RFC 1918, link-local, and
-  non-http(s) targets are refused before any request is made; downloads
-  stream through a 16 MiB cap with a 30 s timeout.
+  `127.0.0.1:8901` fixture exception. The full IPv4 loopback `/8` (not just
+  `127.0.0.1`), private, link-local, unspecified, carrier-grade NAT,
+  documentation, benchmarking, multicast, and reserved ranges are refused,
+  as are non-public IPv6 literals (loopback, unspecified, link-local,
+  unique-local, multicast, documentation, mapped loopback) and non-http(s)
+  schemes. Redirects are followed manually (max 3): every hop is revalidated
+  against the same policy, and redirects toward disallowed targets are
+  refused before the second request. Downloads stream through a 16 MiB cap
+  with a 30 s timeout, and image requests never carry the pairing token.
+  Browser-enforced limitation: hostnames are checked as written — a name
+  that resolves to a private address is not re-checked after DNS, and
+  fetches to origins outside `host_permissions` fail at the browser layer
+  (surfaced as `permission`/`download` failure records, never silent).
+- Pairing-token storage: the extension sets `storage.local` to
+  `TRUSTED_CONTEXTS` at worker startup and gates token reads on that
+  restriction, so content-script (untrusted) contexts cannot read the
+  pairing-token area even if they guessed the key. Token reads stay limited
+  to the background worker and extension pages; runtime messages never
+  carry credentials (statically guarded). Chrome exposes no getter for the
+  level, so the extension E2E verifies the effect behaviorally: code
+  evaluated with content-script privileges in a real tab must not retrieve
+  the token through the storage API, and page scripts cannot reach `chrome`
+  at all.
+- Upload reads are bounded: the declared size is checked before reading and
+  the body is streamed with a hard cap, so a lying `Content-Length` cannot
+  force unbounded buffering. Read-level rejections (oversize on the wire,
+  empty) carry no stable photo identity and record nothing; fully-read
+  bytes that fail validation or capacity are recorded as idempotent
+  per-photo failures (see below).
+- Import failures are first-class records: per-photo `(listing, key)` rows
+  with `download` / `permission` / `validation` / `upload` kinds, reported
+  idempotently by the extension for photos that never reach the upload
+  endpoint. Counters use atomic `F()` updates with lock-contention retries,
+  repeated reports never double-count, and successful uploads resolve
+  matching rows so status reflects current evidence.
 
 ## Secrets & public-repo hygiene
 

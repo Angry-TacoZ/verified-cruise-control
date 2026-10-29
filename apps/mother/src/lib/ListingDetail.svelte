@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { ApiError, backend, type Listing, type Photo } from './api';
+  import { ApiError, backend, type Listing, type Photo, type PhotoFailure } from './api';
 
   let { id }: { id: string } = $props();
 
   let listing = $state<Listing | null>(null);
   let photos = $state<Photo[]>([]);
+  let failures = $state<PhotoFailure[]>([]);
   let loading = $state(true);
   let error = $state('');
 
@@ -13,12 +13,26 @@
     return [l.year, l.make, l.model, l.trim].filter(Boolean).join(' ') || 'Unknown vehicle';
   }
 
-  async function load() {
+  function kindLabel(kind: PhotoFailure['kind']): string {
+    switch (kind) {
+      case 'download':
+        return 'download failed';
+      case 'permission':
+        return 'host permission denied';
+      case 'validation':
+        return 'validation failed';
+      case 'upload':
+        return 'upload rejected';
+    }
+  }
+
+  async function load(listingId: string) {
     loading = true;
     error = '';
     try {
-      listing = await backend.getListing(id);
-      photos = await backend.listPhotos(id);
+      listing = await backend.getListing(listingId);
+      photos = await backend.listPhotos(listingId);
+      failures = await backend.listFailures(listingId);
     } catch (err) {
       error =
         err instanceof ApiError && err.status === 404
@@ -31,7 +45,15 @@
     }
   }
 
-  onMount(() => void load());
+  // Reload whenever the routed listing id changes: Svelte reuses this
+  // component instance across `#/listings/:id` navigations, so onMount alone
+  // would leave the previous listing (and its failures) on screen.
+  $effect(() => {
+    listing = null;
+    photos = [];
+    failures = [];
+    void load(id);
+  });
 </script>
 
 <section aria-labelledby="detail">
@@ -79,6 +101,35 @@
         </dd>
       </div>
     </dl>
+
+    {#if failures.length > 0}
+      {@const outstanding = failures.filter((f) => !f.resolved)}
+      <h2 class="mt-6 text-lg font-semibold">Import failures ({failures.length})</h2>
+      {#if outstanding.length === 0}
+        <p class="mt-2 text-sm text-emerald-800">
+          All reported failures recovered on retry — evidence is complete.
+        </p>
+      {/if}
+      <ul class="mt-2 space-y-2 text-sm">
+        {#each failures as failure (failure.id)}
+          <li
+            class="rounded-md border p-3 {failure.resolved
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+              : 'border-amber-200 bg-amber-50 text-amber-900'}"
+          >
+            <span class="font-medium"
+              >{kindLabel(failure.kind)}{failure.resolved ? ' (recovered)' : ''}</span
+            >
+            {#if failure.detail}
+              <span> — {failure.detail}</span>
+            {/if}
+            {#if failure.source_url}
+              <div class="mt-1 break-all font-mono text-xs">{failure.source_url}</div>
+            {/if}
+          </li>
+        {/each}
+      </ul>
+    {/if}
 
     <h2 class="mt-6 text-lg font-semibold">Advertised claims</h2>
     {#if listing.advertised_claims.length === 0}

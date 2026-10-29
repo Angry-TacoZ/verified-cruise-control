@@ -36,8 +36,22 @@ The extension token is **not** accepted on any of these (`401`).
 |--------|------|-------|
 | POST | `/api/extension/listings` | Create listing. `201` with real DB id. `422` malformed. |
 | POST | `/api/extension/listings/{id}/photos` | Multipart `file` (+ optional `source_url` form field). One photo per request. `201` with `{id, sha256, duplicate}`; `duplicate: true` on idempotent retry. `413` oversize, `422` invalid image, `404` unknown listing. |
+| POST | `/api/extension/listings/{id}/failed-photos` | Report a photo that never reached the upload endpoint: `{source_url?, key?, kind: download\|permission\|validation\|upload, detail?}`. Idempotent per `(listing, key)` — repeats return `201` without double-counting. `422` on unknown kind or missing identity. |
 
 Missing/invalid/revoked tokens return `401` and persist nothing.
+
+The mother-app session boundary additionally exposes
+`GET /api/listings/{id}/failed-photos`: all per-photo failure outcomes for
+the listing (resolved included, so recovery stays visible).
+
+## Import run states
+
+The extension tracks `active` → `partial` / `complete` / `failed`: an active
+run resumes after worker suspension (same listing id, stored photos skipped);
+a finished run never auto-resumes — recovery is an explicit
+`vcc:retry-failed` operation that reuses the original listing id and retries
+only failed photos. A fresh import intent after a finished run creates a new
+listing.
 
 ## Listing payload
 
@@ -63,8 +77,13 @@ upper-cased. `advertised_claims`: ≤200 items, ≤500 chars each.
 JPEG/PNG/WebP only (verified by decoding, not by extension/MIME); ≤15 MiB
 compressed; ≤40 MP decoded (header check before full decode;
 decompression-bomb warnings are errors); ≤40 photos and ≤300 MiB per
-listing. Failures increment `failed_upload_count` and flip the listing to
-`partial`; meeting `expected_photo_count` with no failures yields
+listing. Idempotency is checked before capacity: re-uploading stored bytes
+at a full listing returns the original record. The declared upload size is
+checked before reading and bodies stream under a hard cap. Validation and
+capacity rejections of fully-read bytes record idempotent per-photo
+failures; read-level rejections record nothing. Successful uploads resolve
+matching failure rows. Unresolved failures flip the listing to `partial`;
+meeting `expected_photo_count` with no outstanding failures yields
 `complete`.
 
 ## Future (not in PR #1)

@@ -280,6 +280,52 @@ def test_photo_list_endpoint(operator_client, client, ext_headers, png_bytes):
     )
 
 
+def test_duplicate_upload_allowed_at_photo_count_limit(
+    client, ext_headers, ext_listing, monkeypatch
+):
+    """Idempotency beats capacity: a stored photo re-uploaded when the
+    listing is full returns the original record; a new photo is refused."""
+    monkeypatch.setattr(limits, "MAX_PHOTOS_PER_LISTING", 1)
+    first_data = make_image_bytes("PNG", "A")
+    assert (
+        _upload(client, ext_headers, ext_listing["id"], first_data).status_code == 201
+    )
+    retry = _upload(
+        client, ext_headers, ext_listing["id"], first_data, name="renamed.png"
+    )
+    assert retry.status_code == 201, retry.content
+    assert retry.json()["duplicate"] is True
+    assert retry.json()["id"] == Photograph.objects.get().pk.__str__()
+    rejected = _upload(
+        client, ext_headers, ext_listing["id"], make_image_bytes("PNG", "B")
+    )
+    assert rejected.status_code == 422
+    assert Photograph.objects.count() == 1
+    # The original evidence is untouched by the duplicate retry.
+    stored = Photograph.objects.get()
+    assert images.original_path(
+        stored.storage_ref, stored.image_format
+    ).read_bytes() == (first_data)
+
+
+def test_duplicate_upload_allowed_at_byte_limit(
+    client, ext_headers, ext_listing, monkeypatch
+):
+    first_data = make_image_bytes("PNG", "A")
+    monkeypatch.setattr(limits, "MAX_LISTING_PHOTO_BYTES", len(first_data))
+    assert (
+        _upload(client, ext_headers, ext_listing["id"], first_data).status_code == 201
+    )
+    retry = _upload(client, ext_headers, ext_listing["id"], first_data)
+    assert retry.status_code == 201, retry.content
+    assert retry.json()["duplicate"] is True
+    distinct = _upload(
+        client, ext_headers, ext_listing["id"], make_image_bytes("PNG", "B")
+    )
+    assert distinct.status_code == 413
+    assert Photograph.objects.count() == 1
+
+
 def test_unknown_photo_is_404(operator_client, ext_listing):
     assert (
         operator_client.get(

@@ -162,6 +162,9 @@ Treat all dealership listing content as untrusted input.
   authenticated multipart uploads (one photo per request, bounded
   concurrency, progress in persistent extension storage, safe whole-image
   retries — never describe these as partial-byte resumable uploads).
+  `storage.local` must be restricted to `TRUSTED_CONTEXTS` at worker
+  startup and token reads must gate on that restriction; runtime messages
+  never carry credentials.
 - Mother-app operator auth is a separate boundary: a local-operator
   bootstrap/session mechanism, not the extension token. Never require the
   extension token on mother-app endpoints. Preserve host validation and CSRF
@@ -172,7 +175,17 @@ Treat all dealership listing content as untrusted input.
   server, specific site/CDN origins). No `<all_urls>` shortcut, no
   `chrome-extension://*` CORS wildcard. CORS never substitutes for token
   auth. Never route page-supplied URLs into privileged local/private-network
-  fetches; validate schemes, origins, redirects, and response sizes.
+  fetches; validate schemes, origins, every redirect destination (bounded
+  hop count), and response sizes. Image downloads never carry credentials.
+  Hostnames are checked as written: document the DNS-resolution limitation
+  rather than claiming post-resolution enforcement.
+- Import failures are backend-visible per-photo records (`download` /
+  `permission` / `validation` / `upload`), reported idempotently — never
+  extension-only state. Failure counters use atomic updates, never
+  in-memory values; successful retries resolve prior failures so status
+  reflects current evidence. Upload reads are bounded (declared size first,
+  then chunked with a hard cap). Idempotency is checked before capacity so
+  identical retries at a full listing return the original record.
 - Validate filenames, paths, image types, dimensions, sizes, URLs, and
   payloads. Prevent directory traversal and unrestricted SSRF of supplied
   image URLs. Apply request limits, timeouts, bounded retries.

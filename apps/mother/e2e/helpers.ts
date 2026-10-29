@@ -14,6 +14,7 @@ const fixPort = process.env.VCC_E2E_FIX_PORT ?? '8901';
 export const API = `http://127.0.0.1:${apiPort}`;
 export const MOTHER = `http://127.0.0.1:${webPort}`;
 export const FIXTURE = `http://127.0.0.1:${fixPort}/listing-1987-coupe.html`;
+export const PARTIAL_FIXTURE = `http://127.0.0.1:${fixPort}/listing-partial.html`;
 
 const venvPython = path.join(repoRoot, '.venv', 'Scripts', 'python.exe');
 

@@ -85,7 +85,7 @@ When another project owns a port, override without editing code:
 | Mother proxy target | `VCC_API_PROXY` | `http://127.0.0.1:8000` | Point at the moved backend |
 | Mother dev port | (CLI arg) | `5173` | `npx vite --host 127.0.0.1 --port 5174 --strictPort` in `apps/mother` |
 | Extension API base | `VCC_API_HOST` + `VITE_VCC_API_BASE` | `http://127.0.0.1:8000` | Rebuild the extension after setting both |
-| Fixture server | (CLI arg) | `8901` | `python fixtures/serve.py 8902` (extension matches stay on 8901 unless rebuilt) |
+| Fixture server | (CLI arg) | `8901` | Keep `8901` for E2E: the extension content-script matches and extractor are pinned to `127.0.0.1:8901` (see `listing.content.ts`, `extractors.ts`) |
 
 E2E runs accept `VCC_E2E_API_PORT` / `VCC_E2E_WEB_PORT` / `VCC_E2E_FIX_PORT`
 (the extension artifact must be rebuilt with matching overrides).
@@ -100,7 +100,10 @@ npx playwright test --prefix apps/mother   # browser smoke (after npm i)
 Manual extension E2E (also in `fixtures/README.md`): import the synthetic
 listing, verify photos/hashes/statuses in the mother app, restart Django,
 verify pairing + evidence persist, re-import and confirm no duplicate
-evidence. Zero Baseten/Meta calls by construction (adapters refuse in PR #1).
+evidence. The partial fixture (`listing-partial.html`) exercises the
+failed-photo path: one photo 404s, the failure is recorded server-side and
+shown in the mother app, and the popup's retry reuses the same listing.
+Zero Baseten/Meta calls by construction (adapters refuse in PR #1).
 
 ## Repository layout
 
@@ -121,10 +124,10 @@ committed. Copy `backend/.env.example` to `backend/.env` for local keys.
 
 | Area      | Command (repo root)                              | Coverage |
 |-----------|--------------------------------------------------|----------|
-| Backend   | `.venv/Scripts/python -m pytest backend/`        | 70+ tests: migrations, WAL, import, photos, pairing, CSRF, zero-inference |
-| Mother    | `npm test --prefix apps/mother`                  | API client, dashboard, import form |
-| Extension | `npm test --prefix apps/extension`               | Extractor, protocol, uploader, allowlists, boundary guards |
-| Browser   | `npx playwright test` in `apps/mother`           | Setup → dashboard → manual import smoke + screenshots |
+| Backend   | `.venv/Scripts/python -m pytest backend/`        | 90+ tests: migrations, WAL, import, photos, failure records, concurrency, pairing, CSRF, zero-inference |
+| Mother    | `npm test --prefix apps/mother`                  | API client, dashboard, import form, failure display |
+| Extension | `npm test --prefix apps/extension`               | Extractor, protocol, uploader, retry, URL/redirect policy, storage guards, popup UI |
+| Browser   | `npx playwright test` in `apps/mother`           | Setup → dashboard → manual import smoke + extension E2E (full + partial import, retry, storage restriction) + screenshots |
 
 CI (`.github/workflows/ci.yml`) runs lint, typecheck, tests, and production
 builds on every PR with mocked providers only — no model credentials exist

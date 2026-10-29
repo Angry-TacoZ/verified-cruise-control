@@ -1,11 +1,19 @@
 /** Import orchestration: listing create + bounded-concurrency photo uploads.
  *
- * Pure orchestration over injected dependencies (fetch, progress store) so
- * unit tests run without a browser. Progress is checkpointed after every
- * photo, so a suspended service worker resumes instead of restarting.
+ * Pure orchestration over injected dependencies (fetch, progress store,
+ * failure reporting) so unit tests run without a browser. Progress is
+ * checkpointed after every photo, so a suspended service worker resumes
+ * instead of restarting.
+ *
+ * Run states distinguish active, partially completed, failed, and
+ * successfully completed imports. A finished-with-failures run never
+ * auto-retries into a new listing: recovery goes through the explicit
+ * `retryFailedPhotos` operation, which reuses the original listing id and
+ * skips photos already stored.
  */
 
 import {
+  ExtensionApiError,
   MAX_DOWNLOAD_BYTES,
   createListing,
   downloadImageBytes,
@@ -20,6 +28,13 @@ export interface PhotoProgress {
   detail?: string;
 }
 
+/** Import run lifecycle: active runs accept checkpoints; partial/failed runs
+ * finish with failures outstanding; complete runs stored everything. */
+export type ImportRunStatus = 'active' | 'partial' | 'complete' | 'failed';
+
+/** Where a photo failed, matching the backend failure-kind vocabulary. */
+export type FailureKind = 'download' | 'permission' | 'validation' | 'upload';
+
 export interface ImportProgress {
   runId: string;
   listingId: string | null;
@@ -27,8 +42,14 @@ export interface ImportProgress {
   photos: PhotoProgress[];
   startedAt: number;
   updatedAt: number;
-  finished: boolean;
+  status: ImportRunStatus;
   error?: string;
+}
+
+export interface FailureReport {
+  sourceUrl: string | null;
+  kind: FailureKind;
+  detail: string;
 }
 
 export interface ProgressStore {
@@ -42,11 +63,13 @@ export interface ImportDeps {
   store: ProgressStore;
   /** Max simultaneous photo pipelines. */
   concurrency?: number;
-  /** Whole-image retries per photo (server dedupes by hash). */
+  /** Whole-image retries per photo (the server dedupes by hash). */
   maxAttempts?: number;
   onProgress?: (progress: ImportProgress) => void;
   /** Cooperative cancellation, checked between photos. */
   isCancelled?: () => boolean;
+  /** Best-effort backend failure report (never fails the run). */
+  reportFailure?: (report: FailureReport) => Promise<void>;
 }
 
 export function toListingPayload(listing: ExtractedListing): ListingPayload {
@@ -69,11 +92,38 @@ function summarize(progress: ImportProgress): void {
   progress.updatedAt = Date.now();
 }
 
+/** Map a terminal photo error to a backend failure kind. Auth/permission
+ * rejections are permission failures; upload-phase 422s are validation
+ * failures; everything else follows the phase it died in. */
+export function classifyFailure(err: unknown, phase: 'download' | 'upload'): FailureKind {
+  if (err instanceof ExtensionApiError) {
+    if (err.status === 401 || err.status === 403) return 'permission';
+    if (phase === 'upload' && err.status === 422) return 'validation';
+  }
+  return phase;
+}
+
+function finalize(active: ImportProgress): void {
+  const failures = active.photos.filter((p) => p.status === 'failed');
+  const stored = active.photos.filter((p) => p.status === 'done' || p.status === 'duplicate');
+  if (failures.length === 0) {
+    active.status = 'complete';
+    active.error = undefined;
+  } else if (stored.length === 0) {
+    active.status = 'failed';
+    active.error = `all ${failures.length} photos failed`;
+  } else {
+    active.status = 'partial';
+    active.error = `${failures.length} of ${active.photos.length} photos failed`;
+  }
+}
+
 async function runPhoto(
   token: string,
   listingId: string,
   photo: PhotoProgress,
-  deps: Required<Pick<ImportDeps, 'fetchImpl' | 'maxAttempts'>> & Pick<ImportDeps, 'isCancelled'>,
+  deps: Required<Pick<ImportDeps, 'fetchImpl' | 'maxAttempts'>> &
+    Pick<ImportDeps, 'isCancelled' | 'reportFailure'>,
   checkpoint: () => Promise<void>,
 ): Promise<void> {
   if (photo.status === 'done' || photo.status === 'duplicate') return;
@@ -84,13 +134,16 @@ async function runPhoto(
       photo.status = 'failed';
       photo.detail = 'cancelled';
       await checkpoint();
+      await reportTerminal(photo, 'upload', new Error('cancelled'), deps.reportFailure);
       return;
     }
+    let phase: 'download' | 'upload' = 'download';
     try {
       photo.status = 'downloading';
       await checkpoint();
       const { bytes, filename } = await downloadImageBytes(photo.url, deps.fetchImpl);
       if (bytes.size > MAX_DOWNLOAD_BYTES) throw new Error('image exceeds download size limit');
+      phase = 'upload';
       photo.status = 'uploading';
       await checkpoint();
       const uploaded = await uploadPhoto(
@@ -111,11 +164,30 @@ async function runPhoto(
         photo.status = 'failed';
         photo.detail = message;
         await checkpoint();
+        await reportTerminal(photo, phase, err, deps.reportFailure);
         return;
       }
       // Whole-image retry; the server dedupes by SHA-256, so a retry after a
       // half-finished attempt cannot duplicate evidence.
     }
+  }
+}
+
+async function reportTerminal(
+  photo: PhotoProgress,
+  phase: 'download' | 'upload',
+  err: unknown,
+  reportFailure: ImportDeps['reportFailure'],
+): Promise<void> {
+  if (!reportFailure) return;
+  try {
+    await reportFailure({
+      sourceUrl: photo.url,
+      kind: classifyFailure(err, phase),
+      detail: photo.detail ?? 'upload failed',
+    });
+  } catch {
+    // Failure reporting never fails the run.
   }
 }
 
@@ -131,9 +203,45 @@ async function runPool<T>(items: T[], concurrency: number, worker: (item: T) => 
   await Promise.all(lanes);
 }
 
+/** Read a stored checkpoint, tolerating the pre-remediation shape that used
+ * a `finished` boolean instead of a run status. Anything without a run id,
+ * source URL, and photo list is not a checkpoint. */
+export function normalizeProgress(raw: unknown): ImportProgress | null {
+  if (raw === null || typeof raw !== 'object') return null;
+  const progress = raw as ImportProgress & { finished?: boolean };
+  if (
+    typeof progress.runId !== 'string' ||
+    typeof progress.sourceUrl !== 'string' ||
+    !Array.isArray(progress.photos)
+  ) {
+    return null;
+  }
+  if (
+    progress.status === 'active' ||
+    progress.status === 'partial' ||
+    progress.status === 'complete' ||
+    progress.status === 'failed'
+  ) {
+    return progress as ImportProgress;
+  }
+  const failures = progress.photos.filter((p) => p.status === 'failed').length;
+  const stored = progress.photos.filter(
+    (p) => p.status === 'done' || p.status === 'duplicate',
+  ).length;
+  const status: ImportRunStatus = progress.finished
+    ? failures === 0
+      ? 'complete'
+      : stored === 0
+        ? 'failed'
+        : 'partial'
+    : 'active';
+  return { ...(progress as ImportProgress), status };
+}
+
 /** Start (or resume) an import run. Resuming reuses the stored listing id and
  * skips photos already done/duplicate, so retries never duplicate evidence.
- */
+ * Finished runs (partial/failed/complete) are never resumed: recovery uses
+ * `retryFailedPhotos`, and a fresh intent creates a fresh listing. */
 export async function runImport(
   token: string,
   listing: ExtractedListing,
@@ -143,9 +251,9 @@ export async function runImport(
   const maxAttempts = deps.maxAttempts ?? 2;
   const concurrency = deps.concurrency ?? 3;
 
-  const stored = await deps.store.load();
+  const stored = normalizeProgress(await deps.store.load());
   let active: ImportProgress;
-  if (stored !== null && !stored.finished && stored.sourceUrl === listing.sourceUrl) {
+  if (stored !== null && stored.status === 'active' && stored.sourceUrl === listing.sourceUrl) {
     active = stored;
   } else {
     const created = await createListing(token, toListingPayload(listing), fetchImpl);
@@ -156,7 +264,7 @@ export async function runImport(
       photos: listing.photos.map((p) => ({ url: p.url, status: 'pending' as const })),
       startedAt: Date.now(),
       updatedAt: Date.now(),
-      finished: false,
+      status: 'active',
     };
   }
   const checkpoint = async () => {
@@ -173,16 +281,61 @@ export async function runImport(
       token,
       listingId,
       photo,
-      { fetchImpl, maxAttempts, isCancelled: deps.isCancelled },
+      { fetchImpl, maxAttempts, isCancelled: deps.isCancelled, reportFailure: deps.reportFailure },
       checkpoint,
     ),
   );
 
-  active.finished = true;
-  const failures = active.photos.filter((p) => p.status === 'failed');
-  if (failures.length > 0) {
-    active.error = `${failures.length} of ${active.photos.length} photos failed`;
-  }
+  finalize(active);
   await checkpoint();
   return active;
+}
+
+/** Retry the failed photos of a finished partial/failed run. Reuses the
+ * original persisted listing id; photos already stored are never
+ * re-uploaded. Interrupted active runs resume through `runImport`, not here.
+ */
+export async function retryFailedPhotos(token: string, deps: ImportDeps): Promise<ImportProgress> {
+  const stored = normalizeProgress(await deps.store.load());
+  if (!stored || !stored.listingId) throw new Error('no import to retry');
+  if (stored.status === 'active') {
+    throw new Error('import is still running; wait for it to finish first');
+  }
+  const failed = stored.photos.filter((p) => p.status === 'failed');
+  if (failed.length === 0) return stored; // nothing outstanding: idempotent no-op
+  for (const photo of failed) {
+    photo.status = 'pending';
+    photo.detail = undefined;
+  }
+  stored.status = 'active';
+  stored.error = undefined;
+
+  const maxAttempts = deps.maxAttempts ?? 2;
+  const concurrency = deps.concurrency ?? 3;
+  const checkpoint = async () => {
+    summarize(stored);
+    await deps.store.save(stored);
+    deps.onProgress?.(stored);
+  };
+  await checkpoint();
+
+  const listingId = stored.listingId;
+  await runPool(failed, concurrency, (photo) =>
+    runPhoto(
+      token,
+      listingId,
+      photo,
+      {
+        fetchImpl: deps.fetchImpl,
+        maxAttempts,
+        isCancelled: deps.isCancelled,
+        reportFailure: deps.reportFailure,
+      },
+      checkpoint,
+    ),
+  );
+
+  finalize(stored);
+  await checkpoint();
+  return stored;
 }

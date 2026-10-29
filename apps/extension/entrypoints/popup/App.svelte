@@ -67,28 +67,40 @@
     pollTimer = null;
   }
 
-  async function startImport() {
+  async function runRemote(
+    message: { type: 'vcc:start-import'; tabId: number } | { type: 'vcc:retry-failed' },
+    failureLabel: string,
+  ) {
     error = '';
+    busy = true;
+    startPolling();
+    try {
+      const res = (await browser.runtime.sendMessage(message)) as {
+        ok: boolean;
+        error?: string;
+        progress?: ImportProgress;
+      };
+      if (!res?.ok) error = res?.error ?? failureLabel;
+      else if (res.progress) progress = res.progress;
+    } catch (err) {
+      error = err instanceof Error ? err.message : failureLabel;
+    } finally {
+      busy = false;
+      await refreshAll();
+      if (!progress || progress.status !== 'active') stopPolling();
+    }
+  }
+
+  async function startImport() {
     if (tabId === null) {
       error = 'No active tab.';
       return;
     }
-    busy = true;
-    startPolling();
-    try {
-      const res = (await browser.runtime.sendMessage({
-        type: 'vcc:start-import',
-        tabId,
-      })) as { ok: boolean; error?: string; progress?: ImportProgress };
-      if (!res?.ok) error = res?.error ?? 'Import failed.';
-      else if (res.progress) progress = res.progress;
-    } catch (err) {
-      error = err instanceof Error ? err.message : 'Import failed.';
-    } finally {
-      busy = false;
-      await refreshAll();
-      if (progress?.finished) stopPolling();
-    }
+    await runRemote({ type: 'vcc:start-import', tabId }, 'Import failed.');
+  }
+
+  async function retryFailed() {
+    await runRemote({ type: 'vcc:retry-failed' }, 'Retry failed.');
   }
 
   async function cancelImport() {
@@ -178,7 +190,7 @@
       {busy ? 'Importing…' : 'Import this listing'}
     </button>
 
-    {#if progress && !progress.finished}
+    {#if progress && progress.status === 'active'}
       {@const c = counts()}
       <div class="mt-2 text-xs" role="status">
         Uploading photos: {c.done}/{c.total}{c.failed > 0 ? ` (${c.failed} failed)` : ''}
@@ -187,13 +199,33 @@
         >
       </div>
     {/if}
-    {#if progress?.finished}
+    {#if progress && progress.status !== 'active'}
       {@const c = counts()}
       <div class="mt-2 rounded-md bg-slate-100 p-2 text-xs" role="status">
-        {#if c.failed === 0}
+        {#if progress.status === 'complete'}
           Import complete: {c.done}/{c.total} photos.
+        {:else if progress.status === 'partial'}
+          Import partially complete: {c.done}/{c.total} photos stored, {c.failed} failed.
+          <button
+            class="mt-2 w-full rounded-md bg-amber-600 px-3 py-1.5 text-white disabled:opacity-50"
+            type="button"
+            disabled={busy}
+            onclick={() => void retryFailed()}
+          >
+            {busy ? 'Retrying…' : `Retry ${c.failed} failed photo${c.failed === 1 ? '' : 's'}`}
+          </button>
         {:else}
-          Import finished with {c.failed} failed photo(s) ({c.done}/{c.total} stored).
+          Import failed: {progress.error ?? 'no photos stored.'}
+          {#if c.failed > 0}
+            <button
+              class="mt-2 w-full rounded-md bg-amber-600 px-3 py-1.5 text-white disabled:opacity-50"
+              type="button"
+              disabled={busy}
+              onclick={() => void retryFailed()}
+            >
+              {busy ? 'Retrying…' : `Retry ${c.failed} failed photo${c.failed === 1 ? '' : 's'}`}
+            </button>
+          {/if}
         {/if}
         {#if progress.listingId}
           <a

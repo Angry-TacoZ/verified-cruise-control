@@ -49,10 +49,15 @@ class Listing(models.Model):
         with no failures -> complete; otherwise photos_pending when an
         expectation exists, else importing.
 
-        Convergent under concurrency: concurrent uploads each recompute from
-        committed state, so a burst may briefly show a stale status until the
-        last writer's refresh lands. Photo rows and counts are always exact;
-        callers needing a settled status should refresh after quiescence.
+        The failure counter is re-read from the database on every refresh:
+        request handlers hold listing objects fetched before concurrent
+        writers commit, so a stale in-memory counter must never clobber a
+        concurrently recorded failure (or recovery) with a recomputed
+        status. Photo rows are always queried fresh for the same reason.
+        Convergent under concurrency: a burst may briefly show a stale
+        status until the last writer's refresh lands. Photo rows and counts
+        are always exact; callers needing a settled status should refresh
+        after quiescence.
         """
         import random
         import time
@@ -64,6 +69,7 @@ class Listing(models.Model):
         last_error: OperationalError | None = None
         for attempt in range(3):
             try:
+                self.refresh_from_db(fields=["failed_upload_count"])
                 return self._refresh_import_status_once(Photograph)
             except OperationalError as exc:
                 last_error = exc

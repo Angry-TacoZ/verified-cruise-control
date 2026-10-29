@@ -61,4 +61,28 @@ describe('api client', () => {
   it('builds photo URLs without exposing storage paths', () => {
     expect(backend.photoUrl('listing-1', 'photo-2')).toBe('/api/listings/listing-1/photos/photo-2');
   });
+
+  it('lists per-photo failure outcomes for a listing', async () => {
+    (fetch as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (url: string) => {
+      if (url === '/api/csrf') return jsonResponse({ csrf_token: 'csrf-123' });
+      if (url === '/api/listings/l1/failed-photos') {
+        return jsonResponse([
+          {
+            id: 'f1',
+            listing_id: 'l1',
+            key: 'url:abc',
+            kind: 'download',
+            detail: '404',
+            source_url: 'http://127.0.0.1:8901/photos/missing.jpg',
+            resolved: false,
+            created_at: '2026-10-29T00:00:00Z',
+          },
+        ]);
+      }
+      throw new Error(`unexpected ${url}`);
+    });
+    const failures = await backend.listFailures('l1');
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ kind: 'download', resolved: false });
+  });
 });

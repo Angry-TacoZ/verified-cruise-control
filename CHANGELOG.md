@@ -21,6 +21,25 @@ Public repo + working listing-import pipeline:
 - Docs: README, architecture, API contracts, security, ADR-001, eval
   methodology, synthetic fixtures + manual E2E guide.
 
+## Unreleased (PR #1 remediation — independent review findings)
+
+- Extension `storage.local` restricted to `TRUSTED_CONTEXTS` at worker
+  startup; token reads gate on the restriction (Finding 1, HIGH).
+- Photo idempotency checked before count/byte capacity, so identical
+  retries at a full listing return the original record (Finding 2).
+- Upload reads bounded (declared size first, chunked hard cap) even when
+  size metadata lies (Finding 3).
+- Explicit retry-failed-photographs operation reusing the original listing
+  id, with `active`/`partial`/`complete`/`failed` run states; popup retry
+  button (Finding 4).
+- Per-photo failure records (`download`/`permission`/`validation`/`upload`)
+  with atomic counters, idempotent reports, and resolve-on-success; mother
+  app shows outstanding and recovered failures (Finding 5).
+- Full IPv4/IPv6 non-public ranges rejected, redirects revalidated per hop
+  (max 3), no credentials on image fetches (Finding 6).
+- 90+ backend tests, 16 mother-app tests, 59 extension tests; extension E2E
+  covers full + partial imports, retry, and the storage restriction.
+
 Validation: full `./scripts/test.ps1` gates green; zero Baseten/Meta calls;
 no credentials in source, history, logs, or artifacts. See the PR
 description for evidence and screenshots.
