@@ -8,6 +8,7 @@ const {
   retryMock,
   abandonMock,
   setCancelledMock,
+  loadMock,
   storeState,
 } = vi.hoisted(() => ({
   mainHolder: { fn: null as ((message: unknown, sender: unknown) => Promise<unknown>) | null },
@@ -17,6 +18,7 @@ const {
   retryMock: vi.fn(),
   abandonMock: vi.fn(),
   setCancelledMock: vi.fn(),
+  loadMock: vi.fn(),
   storeState: {
     token: 'tok' as string | null,
     progress: null as unknown,
@@ -53,11 +55,15 @@ vi.mock('./api', () => ({
   reportFailure: vi.fn(async () => ({})),
 }));
 
-vi.mock('./uploader', () => ({
-  runImport: (...args: unknown[]) => runImportMock(...args),
-  retryFailedPhotos: (...args: unknown[]) => retryMock(...args),
-  abandonImport: (...args: unknown[]) => abandonMock(...args),
-}));
+vi.mock('./uploader', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./uploader')>();
+  return {
+    ...actual,
+    runImport: (...args: unknown[]) => runImportMock(...args),
+    retryFailedPhotos: (...args: unknown[]) => retryMock(...args),
+    abandonImport: (...args: unknown[]) => abandonMock(...args),
+  };
+});
 
 vi.mock('./store', () => ({
   getPairingToken: async () => storeState.token,
@@ -65,7 +71,7 @@ vi.mock('./store', () => ({
     storeState.token = token;
   },
   sessionProgressStore: () => ({
-    load: async () => storeState.progress,
+    load: (...args: unknown[]) => loadMock(...args),
     save: async (progress: unknown) => {
       storeState.progress = progress;
     },
@@ -103,6 +109,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   storeState.token = 'tok';
   storeState.progress = null;
+  loadMock.mockImplementation(async () => storeState.progress);
   tabsGet.mockResolvedValue({ url: 'http://127.0.0.1:8901/listing-1987-coupe.html' });
   tabsSend.mockResolvedValue({ type: 'vcc:extract-result', listing: validListing() });
   // The entrypoint module executes once (worker startup); later imports are
@@ -213,11 +220,89 @@ describe('background single-active-operation guard', () => {
     release({ status: 'partial' });
     await expect(first).resolves.toMatchObject({ ok: true });
 
-    // Idle path: no operation in flight, so cancel abandons the checkpoint.
+    // Idle path with an active checkpoint: cancel abandons it.
+    storeState.progress = {
+      runId: 'r1',
+      listingId: 'L1',
+      sourceUrl: 'http://127.0.0.1:8901/l/1',
+      photos: [{ url: 'http://127.0.0.1:8901/photos/a.jpg', status: 'pending' }],
+      startedAt: 1,
+      updatedAt: 1,
+      status: 'active',
+    };
     abandonMock.mockResolvedValueOnce({ status: 'failed', listingId: 'L1' });
     await expect(listener({ type: 'vcc:cancel-import' }, {})).resolves.toMatchObject({
       ok: true,
     });
     expect(abandonMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('idle cancel with no checkpoint succeeds as a no-op', async () => {
+    storeState.progress = null;
+    await expect(listener({ type: 'vcc:cancel-import' }, {})).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(abandonMock).not.toHaveBeenCalled();
+    expect(setCancelledMock).not.toHaveBeenCalled();
+  });
+
+  it('idle cancel surfaces storage failures instead of false success', async () => {
+    loadMock.mockRejectedValueOnce(new Error('db locked'));
+    await expect(listener({ type: 'vcc:cancel-import' }, {})).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/db locked/),
+    });
+    expect(abandonMock).not.toHaveBeenCalled();
+    // The guard was released: a later import proceeds normally.
+    runImportMock.mockResolvedValueOnce({ status: 'complete' });
+    await expect(listener({ type: 'vcc:start-import', tabId: 7 }, {})).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(runImportMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a start arriving during idle-cancel abandonment is rejected', async () => {
+    storeState.progress = {
+      runId: 'r1',
+      listingId: 'L1',
+      sourceUrl: 'http://127.0.0.1:8901/l/1',
+      photos: [{ url: 'http://127.0.0.1:8901/photos/a.jpg', status: 'pending' }],
+      startedAt: 1,
+      updatedAt: 1,
+      status: 'active',
+    };
+    let releaseAbandon!: (value: unknown) => void;
+    const gate = new Promise((resolve) => {
+      releaseAbandon = resolve;
+    });
+    abandonMock.mockReturnValueOnce(gate);
+    const cancelP = listener({ type: 'vcc:cancel-import' }, {});
+    // The idle cancel holds the guard while abandoning: a simultaneous
+    // start cannot interleave with the transition.
+    await expect(listener({ type: 'vcc:start-import', tabId: 7 }, {})).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/already running/),
+    });
+    expect(runImportMock).not.toHaveBeenCalled();
+    releaseAbandon({ status: 'failed', listingId: 'L1' });
+    await expect(cancelP).resolves.toMatchObject({ ok: true });
+    // Guard released afterward: a later import proceeds.
+    runImportMock.mockResolvedValueOnce({ status: 'complete' });
+    await expect(listener({ type: 'vcc:start-import', tabId: 7 }, {})).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(runImportMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('abandon handler surfaces transition failures and releases the guard', async () => {
+    abandonMock.mockRejectedValueOnce(new Error('save failed'));
+    await expect(listener({ type: 'vcc:abandon-import' }, {})).resolves.toMatchObject({
+      ok: false,
+      error: expect.stringMatching(/save failed/),
+    });
+    runImportMock.mockResolvedValueOnce({ status: 'complete' });
+    await expect(listener({ type: 'vcc:start-import', tabId: 7 }, {})).resolves.toMatchObject({
+      ok: true,
+    });
   });
 });

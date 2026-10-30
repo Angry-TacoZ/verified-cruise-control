@@ -137,6 +137,32 @@ describe('popup retry UI', () => {
     expect(await screen.findByText(/Import failed/)).toBeInTheDocument();
   });
 
+  it('surfaces cancellation failures instead of silently refreshing', async () => {
+    storeState.progress = {
+      runId: 'r1',
+      listingId: 'L1',
+      sourceUrl: 'http://127.0.0.1:8901/l/1',
+      photos: [
+        { url: 'http://127.0.0.1:8901/photos/front.jpg', status: 'done' },
+        { url: 'http://127.0.0.1:8901/photos/rear.jpg', status: 'uploading' },
+      ],
+      startedAt: 1,
+      updatedAt: 2,
+      status: 'active',
+    };
+    sendMessageMock.mockImplementation(async (message: unknown) => {
+      const type = (message as { type?: string }).type;
+      if (type === 'vcc:get-state') return { operationRunning: true };
+      if (type === 'vcc:cancel-import') return { ok: false, error: 'db locked' };
+      return { ok: true, progress: storeState.progress };
+    });
+    render(App);
+    const cancel = await screen.findByRole('button', { name: 'Cancel' });
+    await fireEvent.click(cancel);
+    expect(sendMessageMock).toHaveBeenCalledWith({ type: 'vcc:cancel-import' });
+    expect(await screen.findByText('db locked')).toBeInTheDocument();
+  });
+
   it('surfaces retry failures without losing the partial state', async () => {
     render(App);
     const retry = await screen.findByRole('button', { name: /Retry 1 failed photo/ });

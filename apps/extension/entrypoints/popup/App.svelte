@@ -136,8 +136,23 @@
   }
 
   async function cancelImport() {
-    await browser.runtime.sendMessage({ type: 'vcc:cancel-import' });
-    await refreshAll();
+    error = '';
+    try {
+      const res = (await browser.runtime.sendMessage({ type: 'vcc:cancel-import' })) as {
+        ok: boolean;
+        error?: string;
+        progress?: ImportProgress;
+      };
+      // Idle cancel may abandon the checkpoint and return its terminal
+      // state; a live cancel returns ok without progress. Either way,
+      // surface a real failure instead of silently refreshing.
+      if (!res?.ok) error = res?.error ?? 'Cancel failed.';
+      else if (res.progress) progress = res.progress;
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'Cancel failed.';
+    } finally {
+      await refreshAll();
+    }
   }
 
   async function abandonImport() {

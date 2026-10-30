@@ -39,7 +39,9 @@ different listing can be imported afterward and the original run can still
 be retried. Abandonment is refused while an operation is in flight; a
 live run is cancelled through the cancellation flag, which reports
 intentional cancellation as an upload-phase outcome, never a validation
-failure.
+failure. Idle cancel holds the same in-worker guard across the transition:
+a missing or terminal checkpoint is a no-op success, while persistence
+failures return an error that the popup surfaces instead of a false ok.
 
 **Mother app reads/writes.** The browser talks to Vite, which proxies
 `/api/*` to Django — same-origin, no CORS. Reads use the operator session

@@ -5,6 +5,7 @@ import { allowedContentHosts, extractorForUrl } from '../src/lib/extractors';
 import { isAllowedSender, isBackgroundRequest, isContentResponse } from '../src/lib/protocol';
 import {
   abandonImport,
+  normalizeProgress,
   retryFailedPhotos,
   runImport,
   type FailureReport,
@@ -100,14 +101,21 @@ export default defineBackground(() => {
 
     if (message.type === 'vcc:cancel-import') {
       if (!operationInFlight) {
-        // No live run to flag-cancel: the checkpoint (if any) is abandoned
-        // or already terminal, so a different listing can be imported.
+        // No live run to flag-cancel. Hold the guard across the transition
+        // so a simultaneous start/retry cannot interleave with it.
+        operationInFlight = true;
         try {
+          // A missing or already-terminal checkpoint is a genuine no-op:
+          // only a live abandonment can fail here.
+          const stored = normalizeProgress(await sessionProgressStore().load());
+          if (!stored || !stored.listingId || stored.status !== 'active') return { ok: true };
           const progress = await abandonImport({ store: sessionProgressStore() });
           await setImportCancelled(false);
           return { ok: true, progress };
-        } catch {
-          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : 'cancel failed' };
+        } finally {
+          operationInFlight = false;
         }
       }
       cancelFlag = true;
