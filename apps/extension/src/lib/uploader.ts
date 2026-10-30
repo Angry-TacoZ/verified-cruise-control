@@ -73,8 +73,11 @@ export interface ImportDeps {
   onProgress?: (progress: ImportProgress) => void;
   /** Cooperative cancellation, checked between photos. */
   isCancelled?: () => boolean;
-  /** Best-effort backend failure report (never fails the run). */
-  reportFailure?: (report: FailureReport) => Promise<void>;
+  /** Best-effort backend failure report (never fails the run). The run's
+   * own listing id is passed explicitly — never re-read from the shared
+   * store at report time, so an overlapping run cannot misattribute
+   * failures to the wrong listing. */
+  reportFailure?: (listingId: string, report: FailureReport) => Promise<void>;
 }
 
 export function toListingPayload(listing: ExtractedListing): ListingPayload {
@@ -139,7 +142,7 @@ async function runPhoto(
       photo.status = 'failed';
       photo.detail = 'cancelled';
       await checkpoint();
-      await reportTerminal(photo, 'upload', new Error('cancelled'), deps.reportFailure);
+      await reportTerminal(photo, 'upload', new Error('cancelled'), deps.reportFailure, listingId);
       return;
     }
     let phase: 'download' | 'upload' = 'download';
@@ -183,7 +186,7 @@ async function runPhoto(
             photoKey = undefined;
           }
         }
-        await reportTerminal(photo, phase, err, deps.reportFailure, photoKey);
+        await reportTerminal(photo, phase, err, deps.reportFailure, listingId, photoKey);
         return;
       }
       // Whole-image retry; the server dedupes by SHA-256, so a retry after a
@@ -197,11 +200,12 @@ async function reportTerminal(
   phase: 'download' | 'upload',
   err: unknown,
   reportFailure: ImportDeps['reportFailure'],
+  listingId: string,
   photoKey?: string,
 ): Promise<void> {
   if (!reportFailure) return;
   try {
-    await reportFailure({
+    await reportFailure(listingId, {
       sourceUrl: photo.url,
       key: photoKey,
       kind: classifyFailure(err, phase),
@@ -262,7 +266,13 @@ export function normalizeProgress(raw: unknown): ImportProgress | null {
 /** Start (or resume) an import run. Resuming reuses the stored listing id and
  * skips photos already done/duplicate, so retries never duplicate evidence.
  * Finished runs (partial/failed/complete) are never resumed: recovery uses
- * `retryFailedPhotos`, and a fresh intent creates a fresh listing. */
+ * `retryFailedPhotos`, and a fresh intent creates a fresh listing.
+ *
+ * Single-active-import policy: while a run is active, only that same run
+ * (same source URL, e.g. resuming after worker suspension) may proceed. A
+ * competing import for another listing is rejected before it can create a
+ * listing or overwrite the shared checkpoint. Terminal states release the
+ * guard, so a suspended worker never locks imports permanently. */
 export async function runImport(
   token: string,
   listing: ExtractedListing,
@@ -274,7 +284,12 @@ export async function runImport(
 
   const stored = normalizeProgress(await deps.store.load());
   let active: ImportProgress;
-  if (stored !== null && stored.status === 'active' && stored.sourceUrl === listing.sourceUrl) {
+  if (stored !== null && stored.status === 'active') {
+    if (stored.sourceUrl !== listing.sourceUrl) {
+      throw new Error(
+        'another import is already running; wait for it to finish or cancel it first',
+      );
+    }
     active = stored;
   } else {
     const created = await createListing(token, toListingPayload(listing), fetchImpl);

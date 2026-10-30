@@ -34,12 +34,24 @@ export default defineBackground(() => {
   // run with it; the popup resumes from checkpointed session progress.
   let cancelFlag = false;
 
+  // Single-active-operation guard for this worker lifetime. Set
+  // synchronously at message entry (before the first await) so two
+  // same-tick start/retry messages cannot both enter; the checkpoint-level
+  // guard in runImport/retryFailedPhotos covers races across worker
+  // restarts. Always released in a finally. State queries and cancel keep
+  // working while an operation holds the guard.
+  let operationInFlight = false;
+
   // Download/permission failures never reach the upload endpoint, so the
-  // worker reports them explicitly against the checkpointed listing id. The
-  // backend record is idempotent, and reporting never fails the run.
-  async function reportFailureFor(token: string, failure: FailureReport): Promise<void> {
-    const listingId = (await sessionProgressStore().load())?.listingId;
-    if (!listingId) return;
+  // worker reports them explicitly against the failing run's own listing
+  // id — passed in by the caller, never re-read from the shared checkpoint
+  // at report time. The backend record is idempotent, and reporting never
+  // fails the run.
+  async function reportFailureFor(
+    token: string,
+    listingId: string,
+    failure: FailureReport,
+  ): Promise<void> {
     await reportFailure(token, listingId, failure, fetch);
   }
 
@@ -50,7 +62,7 @@ export default defineBackground(() => {
       concurrency: 3,
       maxAttempts: 2,
       isCancelled: () => cancelFlag,
-      reportFailure: (failure) => reportFailureFor(token, failure),
+      reportFailure: (listingId, failure) => reportFailureFor(token, listingId, failure),
     };
   }
 
@@ -72,47 +84,63 @@ export default defineBackground(() => {
     }
 
     if (message.type === 'vcc:start-import') {
-      const token = await getPairingToken();
-      if (!token) return { ok: false, error: 'extension is not paired' };
-      let url: string;
-      try {
-        url = (await browser.tabs.get(message.tabId)).url ?? '';
-      } catch {
-        return { ok: false, error: 'tab is no longer available' };
+      if (operationInFlight) {
+        return { ok: false, error: 'another import operation is already running' };
       }
-      if (!extractorForUrl(url)) return { ok: false, error: 'no extractor for this page' };
-      let response: unknown;
+      operationInFlight = true;
       try {
-        response = await browser.tabs.sendMessage(message.tabId, {
-          type: 'vcc:extract-request',
-        });
-      } catch {
-        return { ok: false, error: 'content script unreachable (missing host permission?)' };
-      }
-      if (!isContentResponse(response) || response.type !== 'vcc:extract-result') {
-        return { ok: false, error: 'invalid extractor response' };
-      }
-      if (!response.listing) return { ok: false, error: 'no listing detected on this page' };
-      cancelFlag = false;
-      await setImportCancelled(false);
-      try {
-        const progress = await runImport(token, response.listing, importDeps(token));
-        return { ok: true, progress };
-      } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : 'import failed' };
+        const token = await getPairingToken();
+        if (!token) return { ok: false, error: 'extension is not paired' };
+        let url: string;
+        try {
+          url = (await browser.tabs.get(message.tabId)).url ?? '';
+        } catch {
+          return { ok: false, error: 'tab is no longer available' };
+        }
+        if (!extractorForUrl(url)) return { ok: false, error: 'no extractor for this page' };
+        let response: unknown;
+        try {
+          response = await browser.tabs.sendMessage(message.tabId, {
+            type: 'vcc:extract-request',
+          });
+        } catch {
+          return { ok: false, error: 'content script unreachable (missing host permission?)' };
+        }
+        if (!isContentResponse(response) || response.type !== 'vcc:extract-result') {
+          return { ok: false, error: 'invalid extractor response' };
+        }
+        if (!response.listing) return { ok: false, error: 'no listing detected on this page' };
+        cancelFlag = false;
+        await setImportCancelled(false);
+        try {
+          const progress = await runImport(token, response.listing, importDeps(token));
+          return { ok: true, progress };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : 'import failed' };
+        }
+      } finally {
+        operationInFlight = false;
       }
     }
 
     if (message.type === 'vcc:retry-failed') {
-      const token = await getPairingToken();
-      if (!token) return { ok: false, error: 'extension is not paired' };
-      cancelFlag = false;
-      await setImportCancelled(false);
+      if (operationInFlight) {
+        return { ok: false, error: 'another import operation is already running' };
+      }
+      operationInFlight = true;
       try {
-        const progress = await retryFailedPhotos(token, importDeps(token));
-        return { ok: true, progress };
-      } catch (err) {
-        return { ok: false, error: err instanceof Error ? err.message : 'retry failed' };
+        const token = await getPairingToken();
+        if (!token) return { ok: false, error: 'extension is not paired' };
+        cancelFlag = false;
+        await setImportCancelled(false);
+        try {
+          const progress = await retryFailedPhotos(token, importDeps(token));
+          return { ok: true, progress };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : 'retry failed' };
+        }
+      } finally {
+        operationInFlight = false;
       }
     }
 

@@ -20,12 +20,18 @@ photo (allowlisted URLs with per-hop redirect revalidation, 16 MiB stream
 cap, 30 s timeout) and uploads it (`POST …/photos`, one multipart request
 each, concurrency 3, whole-image retries). Download failures that never
 reach the upload endpoint are reported explicitly
-(`POST …/failed-photos`). Progress checkpoints to `session` storage after
+(`POST …/failed-photos`) against the failing run's own listing id (never
+re-read from shared state, so overlapping runs cannot misattribute
+failures). Progress checkpoints to `session` storage after
 every photo with an `active` / `partial` / `complete` / `failed` run status:
 an interrupted active run resumes under the same listing id, while a
 finished partial/failed run recovers only through an explicit retry that
 reuses the listing id and skips stored photos (server dedupes by
-`(listing, sha256)`, idempotency checked before capacity).
+`(listing, sha256)`, idempotency checked before capacity). Single-active
+policy for the local single-user architecture: a competing import for
+another listing is rejected while a run is active (in-worker guard plus a
+checkpoint-level guard, so suspension never locks imports permanently);
+terminal states release the guard.
 
 **Mother app reads/writes.** The browser talks to Vite, which proxies
 `/api/*` to Django — same-origin, no CORS. Reads use the operator session

@@ -63,19 +63,22 @@ consume:
 **Concrete illustrative example (planned behavior, not yet implemented).** A
 listing claims *adaptive cruise control*. Photo A (interior) shows
 steering-wheel distance-control buttons — Muse observes them, SAM segments the
-button cluster: that sub-check reads *supported*. Photo B (front grille) is too
-low-resolution to confirm or deny the radar sensor: *inconclusive*, not a
-contradiction. Reconciliation keeps the claim open and asks for a closer grille
-photo instead of guessing — a single-image caption would have answered from one
-photo and stopped.
+button cluster: that sub-check reads *visually supported*, never *verified*
+(buttons alone do not prove the feature works). Photo B (front grille) is too
+low-resolution to confirm or deny the radar sensor: *insufficient evidence*,
+not a contradiction — a photo's failure to show equipment never proves absence.
+Reconciliation keeps the claim open and asks for a closer grille photo instead
+of guessing — a single-image caption would have answered from one photo and
+stopped.
 
-**The five evidence states (PR #2 working taxonomy).** Each advertised claim ends
-in exactly one state: **supported** (photos show the feature), **contradicted**
-(photos show it absent or different), **partially supported** (some aspects
-verified, others not), **inconclusive** (relevant views exist but cannot settle
-it), or **missing evidence** (no photo covers the claim). Names are finalized
-with PR #2's first scored evals. PR #1 stores the photos and claims these
-states will be computed from.
+**The five evidence states (approved taxonomy, AGENTS.md Rule E).** Each
+advertised claim ends in exactly one state: **Verified** (authoritative
+vehicle-specific evidence establishes the feature), **Visually supported**
+(photos give meaningful but non-authoritative support), **Contradicted**
+(reliable evidence conflicts with the advertised feature),
+**Insufficient evidence** (available evidence cannot resolve the claim), or
+**Not visually verifiable** (confirmation needs another evidence form). PR #1
+stores the photos and claims these states will be computed from.
 
 **Status honesty.** Implemented in PR #1: listing capture, immutable
 original-photo preservation, pairing, local storage, dashboard, and tests — zero

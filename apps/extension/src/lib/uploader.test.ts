@@ -111,11 +111,16 @@ function mockBackend(
   });
 }
 
+interface ReportedFailure {
+  listingId: string;
+  report: FailureReport;
+}
+
 function depsFor(
   store: ProgressStore,
   fetchMock: ReturnType<typeof mockBackend>,
   extra: Partial<ImportDeps> = {},
-  reports?: FailureReport[],
+  reported?: ReportedFailure[],
 ): ImportDeps {
   return {
     fetchImpl: fetchMock as unknown as typeof fetch,
@@ -123,10 +128,10 @@ function depsFor(
     concurrency: 2,
     maxAttempts: 2,
     reportFailure:
-      reports === undefined
+      reported === undefined
         ? async () => {}
-        : async (report) => {
-            reports.push(report);
+        : async (listingId, report) => {
+            reported.push({ listingId, report });
           },
     ...extra,
   };
@@ -170,22 +175,23 @@ describe('runImport', () => {
   });
 
   it('marks persistent failures partial and reports them to the backend', async () => {
-    const reports: FailureReport[] = [];
+    const reported: ReportedFailure[] = [];
     const fetchMock = mockBackend({
-      reports,
       creates: { count: 0 },
       failDownloads: new Set(['https://cdn.example.test/bad.jpg']),
     });
     const progress = await runImport(
       'tok',
       listingWithPhotos(['https://cdn.example.test/good.jpg', 'https://cdn.example.test/bad.jpg']),
-      depsFor(memoryStore(), fetchMock, { maxAttempts: 1 }, reports),
+      depsFor(memoryStore(), fetchMock, { maxAttempts: 1 }, reported),
     );
     expect(progress.status).toBe('partial');
     expect(progress.photos.map((p) => p.status).sort()).toEqual(['done', 'failed']);
     expect(progress.error).toContain('1 of 2 photos failed');
-    expect(reports).toHaveLength(1);
-    expect(reports[0]).toMatchObject({
+    // The report carries the failing run's own listing id explicitly.
+    expect(reported).toHaveLength(1);
+    expect(reported[0].listingId).toBe('L1');
+    expect(reported[0].report).toMatchObject({
       sourceUrl: 'https://cdn.example.test/bad.jpg',
       kind: 'download',
     });
@@ -322,6 +328,141 @@ describe('runImport', () => {
   });
 });
 
+describe('single-active imports', () => {
+  const firstUrl = 'http://127.0.0.1:8901/l/1';
+  const secondUrl = 'http://127.0.0.1:8901/l/2';
+
+  function activeCheckpoint(listingId: string, sourceUrl: string): ImportProgress {
+    return {
+      runId: 'r-active',
+      listingId,
+      sourceUrl,
+      photos: [{ url: 'https://cdn.example.test/old.jpg', status: 'downloading' }],
+      startedAt: 1,
+      updatedAt: 1,
+      status: 'active',
+    };
+  }
+
+  it('rejects a competing import while one is active', async () => {
+    const creates = { count: 0 };
+    const fetchMock = mockBackend({ creates });
+    const store = memoryStore(activeCheckpoint('L1', firstUrl));
+    const other = {
+      ...listingWithPhotos(['https://cdn.example.test/new.jpg']),
+      sourceUrl: secondUrl,
+    };
+    await expect(runImport('tok', other, depsFor(store, fetchMock))).rejects.toThrow(
+      /already running/,
+    );
+    // Nothing was created and the active run's checkpoint is untouched.
+    expect(creates.count).toBe(0);
+    expect(await store.load()).toMatchObject({ listingId: 'L1', status: 'active' });
+  });
+
+  it('resumes an interrupted import for the same listing', async () => {
+    const done = 'https://cdn.example.test/done.jpg';
+    const pending = 'https://cdn.example.test/pending.jpg';
+    const uploads = new Map<string, number>();
+    const creates = { count: 0 };
+    const fetchMock = mockBackend({ uploads, creates });
+    const store = memoryStore({
+      runId: 'r1',
+      listingId: 'L1',
+      sourceUrl: firstUrl,
+      photos: [
+        { url: done, status: 'done' },
+        { url: pending, status: 'pending' },
+      ],
+      startedAt: 1,
+      updatedAt: 1,
+      status: 'active',
+    });
+    const outcome = await runImport('tok', listingWithPhotos([done, pending]), {
+      ...depsFor(store, fetchMock),
+      maxAttempts: 1,
+      concurrency: 1,
+    });
+    expect(outcome.listingId).toBe('L1');
+    expect(creates.count).toBe(0);
+    expect(outcome.status).toBe('complete');
+    // The stored photo was skipped, not re-uploaded.
+    expect(uploads.get(done)).toBeUndefined();
+    expect(uploads.get(pending)).toBe(1);
+  });
+
+  it('releases the guard when the run finishes', async () => {
+    const creates = { count: 0 };
+    const fetchMock = mockBackend({ creates });
+    const store = memoryStore();
+    const first = await runImport(
+      'tok',
+      listingWithPhotos(['https://cdn.example.test/a.jpg']),
+      depsFor(store, fetchMock),
+    );
+    expect(first.status).toBe('complete');
+    const second = await runImport(
+      'tok',
+      {
+        ...listingWithPhotos(['https://cdn.example.test/b.jpg']),
+        sourceUrl: secondUrl,
+      },
+      depsFor(store, fetchMock),
+    );
+    expect(second.status).toBe('complete');
+    expect(creates.count).toBe(2);
+  });
+
+  it('attributes failures to the failing run when the shared checkpoint is replaced', async () => {
+    const url = 'https://cdn.example.test/doomed.jpg';
+    const own: ImportProgress = {
+      runId: 'r-own',
+      listingId: 'L1',
+      sourceUrl: firstUrl,
+      photos: [{ url, status: 'pending' }],
+      startedAt: 1,
+      updatedAt: 1,
+      status: 'active',
+    };
+    const foreign: ImportProgress = {
+      runId: 'r-foreign',
+      listingId: 'L2',
+      sourceUrl: secondUrl,
+      photos: [{ url, status: 'downloading' }],
+      startedAt: 2,
+      updatedAt: 2,
+      status: 'active',
+    };
+    // The shared store is replaced by another import after this run starts
+    // (the race the checkpoint-level guard normally prevents).
+    let loads = 0;
+    const savedHolder: { progress: ImportProgress | null } = { progress: null };
+    const store: ProgressStore = {
+      load: async () => structuredClone(++loads === 1 ? own : foreign),
+      save: async (p) => {
+        savedHolder.progress = structuredClone(p);
+      },
+      clear: async () => {},
+    };
+    const reported: ReportedFailure[] = [];
+    const fetchMock = mockBackend({ failDownloads: new Set([url]) });
+    const outcome = await runImport('tok', listingWithPhotos([url]), {
+      ...depsFor(store, fetchMock),
+      maxAttempts: 1,
+      concurrency: 1,
+      reportFailure: async (listingId, report) => {
+        reported.push({ listingId, report });
+      },
+    });
+    expect(outcome.listingId).toBe('L1');
+    expect(reported).toHaveLength(1);
+    expect(reported[0].listingId).toBe('L1');
+    expect(reported[0].report.sourceUrl).toBe(url);
+    // Checkpoints written by this run kept its own listing id too.
+    expect(savedHolder.progress?.listingId).toBe('L1');
+  });
+});
+
 describe('retryFailedPhotos', () => {
   const urls = [
     'https://cdn.example.test/a.jpg',
@@ -355,19 +496,24 @@ describe('retryFailedPhotos', () => {
     const creates = { count: 0 };
     const failing = mockBackend({ uploads, creates, failUploadOnce: new Set([flaky]) });
     const store = memoryStore();
-    const reports: FailureReport[] = [];
+    const reported: ReportedFailure[] = [];
     const first = await runImport('tok', listingWithPhotos([flaky]), {
       ...depsFor(store, failing),
       maxAttempts: 1,
       concurrency: 1,
-      reportFailure: async (report) => {
-        reports.push(report);
+      reportFailure: async (listingId, report) => {
+        reported.push({ listingId, report });
       },
     });
     expect(first.status).toBe('failed');
-    expect(reports).toHaveLength(1);
+    expect(reported).toHaveLength(1);
+    expect(reported[0].listingId).toBe('L1');
     const expectedKey = await sha256HexBytes(new Blob([`fake-bytes-${flaky}`]));
-    expect(reports[0]).toMatchObject({ sourceUrl: flaky, kind: 'validation', key: expectedKey });
+    expect(reported[0].report).toMatchObject({
+      sourceUrl: flaky,
+      kind: 'validation',
+      key: expectedKey,
+    });
     const working = mockBackend({ uploads, creates });
     const retried = await retryFailedPhotos('tok', {
       ...depsFor(store, working),
@@ -399,7 +545,7 @@ describe('retryFailedPhotos', () => {
       store,
       maxAttempts: 1,
       concurrency: 1,
-      reportFailure: async (report) => {
+      reportFailure: async (_listingId, report) => {
         seen.push(report);
         throw new Error('backend down');
       },
