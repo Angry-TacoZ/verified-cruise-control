@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="data:," />
+    <title>1991 Test Sedan LX — Example Motors (synthetic)</title>
+    <style>
+      body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; }
+      img { max-width: 220px; margin: 0.25rem; border: 1px solid #ccc; }
+    </style>
+  </head>
+  <body>
+    <!-- Synthetic E2E fixture for the partial-import path. The third photo
+      URL intentionally 404s so the import finishes partial: the failure is
+      recorded server-side, the mother app shows it, and the retry operation
+      reuses the same listing. -->
+    <article
+      data-vcc-listing
+      data-vcc-title="1991 Test Sedan LX — synthetic partial fixture"
+      data-vcc-year="1991"
+      data-vcc-make="Test"
+      data-vcc-model="Sedan"
+      data-vcc-trim="LX"
+      data-vcc-vin=""
+    >
+      <h1 data-vcc-title>1991 Test Sedan LX — synthetic partial fixture</h1>
+      <span data-vcc-source-site="example-motors.test"></span>
+      <p data-vcc-description>
+        Synthetic demonstration listing for the partial-import E2E. One photo
+        URL is missing on purpose; no real vehicle is involved.
+      </p>
+      <h2>Advertised equipment</h2>
+      <ul>
+        <li data-vcc-claim>cruise control</li>
+        <li data-vcc-claim>lane keeping assist</li>
+      </ul>
+      <h2>Photos</h2>
+      <img data-vcc-photo src="/photos/front.jpg" alt="synthetic front view" />
+      <img data-vcc-photo src="/photos/interior.png" alt="synthetic interior" />
+      <img data-vcc-photo src="/photos/missing.jpg" alt="intentionally missing" />
+    </article>
+  </body>
+</html>

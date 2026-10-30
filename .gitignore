@@ -1,0 +1,83 @@
+# Verified Cruise Control — Python / Django
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+pip-wheel-metadata/
+*.egg-info/
+.eggs/
+
+# Django / SQLite runtime data (NEVER commit databases or imported photos)
+runtime-data/
+runtime-data-e2e/
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal
+db.sqlite3*
+.django-secret
+
+# Secrets and local env
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# Node / frontend
+node_modules/
+dist/
+.output/
+.wxt/
+dist-*/
+*.local
+
+# Svelte / Vite / WXT caches
+.vite/
+.svelte-kit/
+web-ext-artifacts/
+
+# Test / coverage artifacts
+.coverage
+coverage/
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+test-results/
+playwright-report/
+playwright/.cache/
+
+# Type checking
+*.tsbuildinfo
+.osx
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Playwright browsers (local only)
+~/.cache/ms-playwright
+
+# IDE / editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+*.swo
+*~
+
+# Build / packaging
+build/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+[Dd]esktop.ini
+$RECYCLE.BIN/
