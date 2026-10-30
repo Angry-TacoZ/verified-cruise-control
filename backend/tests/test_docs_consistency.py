@@ -54,5 +54,7 @@ def test_readme_has_no_retired_state_names():
 
 
 def test_readme_taxonomy_is_not_provisional():
-    unstable = re.search(r"working taxonomy|names are finalized|provisional", README, re.IGNORECASE)
-    assert unstable is None, f"README suggests the taxonomy is provisional: {unstable.group(0)!r}"
+    unstable = re.search(
+        r"working taxonomy|names are finalized|provisional", README, re.IGNORECASE
+    )
+    assert unstable is None, "README suggests the taxonomy is provisional"
