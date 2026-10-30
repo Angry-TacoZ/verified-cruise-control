@@ -100,6 +100,43 @@ describe('popup retry UI', () => {
     expect(screen.queryByLabelText(/Pairing token/)).not.toBeInTheDocument();
   });
 
+  it('offers resume or abandon for an interrupted import with no running operation', async () => {
+    storeState.progress = {
+      runId: 'r1',
+      listingId: 'L1',
+      sourceUrl: 'http://127.0.0.1:8901/l/1',
+      photos: [
+        { url: 'http://127.0.0.1:8901/photos/front.jpg', status: 'done' },
+        { url: 'http://127.0.0.1:8901/photos/missing.jpg', status: 'pending' },
+      ],
+      startedAt: 1,
+      updatedAt: 2,
+      status: 'active',
+    };
+    const failed = {
+      ...storeState.progress,
+      photos: (storeState.progress as ImportProgress).photos.map((p) =>
+        p.status === 'done' ? p : { ...p, status: 'failed' as const },
+      ),
+      status: 'failed' as const,
+      error: 'import abandoned by operator before completion',
+    };
+    sendMessageMock.mockImplementation(async (message: unknown) => {
+      const type = (message as { type?: string }).type;
+      if (type === 'vcc:get-state') return { operationRunning: false };
+      if (type === 'vcc:abandon-import') return { ok: true, progress: failed };
+      return { ok: true, progress: storeState.progress };
+    });
+    render(App);
+    expect(await screen.findByText(/no upload is running/)).toBeInTheDocument();
+    expect(screen.queryByText(/Uploading photos/)).not.toBeInTheDocument();
+    const abandon = await screen.findByRole('button', { name: 'Abandon import' });
+    expect(await screen.findByRole('button', { name: 'Resume import' })).toBeInTheDocument();
+    await fireEvent.click(abandon);
+    expect(sendMessageMock).toHaveBeenCalledWith({ type: 'vcc:abandon-import' });
+    expect(await screen.findByText(/Import failed/)).toBeInTheDocument();
+  });
+
   it('surfaces retry failures without losing the partial state', async () => {
     render(App);
     const retry = await screen.findByRole('button', { name: /Retry 1 failed photo/ });

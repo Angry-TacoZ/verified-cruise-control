@@ -327,6 +327,41 @@ export async function runImport(
   return active;
 }
 
+/** Abandon an inactive checkpoint: transition a stored `active` run to
+ * terminal `failed` so a different listing can be imported afterward.
+ * Unattempted photos (pending/downloading/uploading markers left behind by
+ * a terminated worker) become failed without filing backend failure
+ * records — nothing new was attempted, so the backend correctly has no row
+ * for them. Already-stored photos, failure details, and the listing itself
+ * are untouched, and a later `retryFailedPhotos` can still recover the run
+ * under the original listing id. Terminal checkpoints are returned
+ * unchanged; with no checkpoint it throws. This must only run when no
+ * operation is executing — the background worker checks its in-flight flag
+ * first, so abandonment can never interrupt a genuinely active run. */
+export async function abandonImport(
+  deps: Pick<ImportDeps, 'store'> & Pick<ImportDeps, 'onProgress'>,
+): Promise<ImportProgress> {
+  const stored = normalizeProgress(await deps.store.load());
+  if (!stored || !stored.listingId) throw new Error('no import to abandon');
+  if (stored.status !== 'active') return stored;
+  for (const photo of stored.photos) {
+    if (
+      photo.status === 'pending' ||
+      photo.status === 'downloading' ||
+      photo.status === 'uploading'
+    ) {
+      photo.status = 'failed';
+      photo.detail = 'not attempted (import abandoned)';
+    }
+  }
+  stored.status = 'failed';
+  stored.error = 'import abandoned by operator before completion';
+  summarize(stored);
+  await deps.store.save(stored);
+  deps.onProgress?.(stored);
+  return stored;
+}
+
 /** Retry the failed photos of a finished partial/failed run. Reuses the
  * original persisted listing id; photos already stored are never
  * re-uploaded. Interrupted active runs resume through `runImport`, not here.

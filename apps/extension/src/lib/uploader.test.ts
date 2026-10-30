@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ExtensionApiError, sha256HexBytes } from './api';
 import type { ExtractedListing } from './protocol';
 import {
+  abandonImport,
   classifyFailure,
   normalizeProgress,
   retryFailedPhotos,
@@ -268,6 +269,29 @@ describe('runImport', () => {
     expect(progress).not.toBe(seed);
   });
 
+  it('reports intentional cancellation as an upload-phase failure, not validation', async () => {
+    const reported: ReportedFailure[] = [];
+    let calls = 0;
+    const progress = await runImport(
+      'tok',
+      listingWithPhotos(['https://cdn.example.test/a.jpg', 'https://cdn.example.test/b.jpg']),
+      {
+        ...depsFor(memoryStore(), mockBackend({ creates: { count: 0 } }), {}, reported),
+        concurrency: 1,
+        maxAttempts: 1,
+        isCancelled: () => {
+          calls += 1;
+          return calls > 1;
+        },
+      },
+    );
+    expect(progress.status).toBe('partial');
+    expect(reported).toHaveLength(1);
+    expect(reported[0].listingId).toBe('L1');
+    expect(reported[0].report.kind).toBe('upload');
+    expect(reported[0].report.detail).toBe('cancelled');
+  });
+
   it('honours cancellation between photos', async () => {
     const fetchMock = mockBackend({ creates: { count: 0 } });
     let calls = 0;
@@ -460,6 +484,99 @@ describe('single-active imports', () => {
     expect(reported[0].report.sourceUrl).toBe(url);
     // Checkpoints written by this run kept its own listing id too.
     expect(savedHolder.progress?.listingId).toBe('L1');
+  });
+});
+
+describe('abandonImport', () => {
+  const firstUrl = 'http://127.0.0.1:8901/l/1';
+
+  function abandonedSeed(): ImportProgress {
+    return {
+      runId: 'r1',
+      listingId: 'L1',
+      sourceUrl: firstUrl,
+      photos: [
+        { url: 'https://cdn.example.test/done.jpg', status: 'done' },
+        { url: 'https://cdn.example.test/pending.jpg', status: 'pending' },
+        { url: 'https://cdn.example.test/stale.jpg', status: 'uploading' },
+      ],
+      startedAt: 1,
+      updatedAt: 1,
+      status: 'active',
+    };
+  }
+
+  it('abandons an inactive checkpoint without backend reports and keeps evidence', async () => {
+    const store = memoryStore(abandonedSeed());
+    const abandoned = await abandonImport({ store });
+    expect(abandoned.listingId).toBe('L1');
+    expect(abandoned.status).toBe('failed');
+    expect(abandoned.error).toContain('abandoned');
+    expect(abandoned.photos).toMatchObject([
+      { url: 'https://cdn.example.test/done.jpg', status: 'done' },
+      {
+        url: 'https://cdn.example.test/pending.jpg',
+        status: 'failed',
+        detail: 'not attempted (import abandoned)',
+      },
+      {
+        url: 'https://cdn.example.test/stale.jpg',
+        status: 'failed',
+        detail: 'not attempted (import abandoned)',
+      },
+    ]);
+    // The stored checkpoint transitioned terminally: a different listing
+    // can be imported afterward.
+    expect(await store.load()).toMatchObject({ listingId: 'L1', status: 'failed' });
+  });
+
+  it('recovers the abandoned run under its original listing id without duplicates', async () => {
+    const store = memoryStore(abandonedSeed());
+    await abandonImport({ store });
+    const uploads = new Map<string, number>();
+    const creates = { count: 0 };
+    const working = mockBackend({ uploads, creates });
+    const reported: ReportedFailure[] = [];
+    const retried = await retryFailedPhotos('tok', {
+      ...depsFor(store, working, { maxAttempts: 1, concurrency: 1 }, reported),
+    });
+    expect(retried.listingId).toBe('L1');
+    expect(creates.count).toBe(0);
+    expect(retried.status).toBe('complete');
+    expect(reported).toHaveLength(0);
+    // Stored photos were skipped; unattempted photos uploaded exactly once.
+    expect(uploads.get('https://cdn.example.test/done.jpg')).toBeUndefined();
+    expect(uploads.get('https://cdn.example.test/pending.jpg')).toBe(1);
+    expect(uploads.get('https://cdn.example.test/stale.jpg')).toBe(1);
+    // Guard released by the terminal state: a different listing imports fresh.
+    const second = await runImport(
+      'tok',
+      {
+        ...listingWithPhotos(['https://cdn.example.test/new.jpg']),
+        sourceUrl: 'http://127.0.0.1:8901/l/2',
+      },
+      depsFor(store, working),
+    );
+    expect(second.status).toBe('complete');
+    expect(creates.count).toBe(1);
+  });
+
+  it('leaves terminal checkpoints alone and throws with none', async () => {
+    const terminal: ImportProgress = {
+      runId: 'r9',
+      listingId: 'L9',
+      sourceUrl: firstUrl,
+      photos: [{ url: 'https://cdn.example.test/x.jpg', status: 'done' }],
+      startedAt: 1,
+      updatedAt: 1,
+      status: 'complete',
+    };
+    const store = memoryStore(terminal);
+    await expect(abandonImport({ store })).resolves.toMatchObject({
+      listingId: 'L9',
+      status: 'complete',
+    });
+    await expect(abandonImport({ store: memoryStore() })).rejects.toThrow(/no import to abandon/);
   });
 });
 

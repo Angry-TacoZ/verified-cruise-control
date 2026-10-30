@@ -4,6 +4,7 @@ import { reportFailure } from '../src/lib/api';
 import { allowedContentHosts, extractorForUrl } from '../src/lib/extractors';
 import { isAllowedSender, isBackgroundRequest, isContentResponse } from '../src/lib/protocol';
 import {
+  abandonImport,
   retryFailedPhotos,
   runImport,
   type FailureReport,
@@ -74,10 +75,41 @@ export default defineBackground(() => {
     if (message.type === 'vcc:get-state') {
       const token = await getPairingToken();
       const progress = await sessionProgressStore().load();
-      return { paired: token !== null, progress };
+      return { paired: token !== null, progress, operationRunning: operationInFlight };
+    }
+
+    if (message.type === 'vcc:abandon-import') {
+      // Never interrupt a genuinely active operation: abandonment is only
+      // safe when this worker has nothing in flight (the checkpoint-level
+      // state alone cannot prove that, so wall-clock heuristics are not
+      // used). A live run must go through the cancellation workflow.
+      if (operationInFlight) {
+        return { ok: false, error: 'an import operation is running; cancel it first' };
+      }
+      operationInFlight = true;
+      try {
+        const progress = await abandonImport({ store: sessionProgressStore() });
+        await setImportCancelled(false);
+        return { ok: true, progress };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : 'abandon failed' };
+      } finally {
+        operationInFlight = false;
+      }
     }
 
     if (message.type === 'vcc:cancel-import') {
+      if (!operationInFlight) {
+        // No live run to flag-cancel: the checkpoint (if any) is abandoned
+        // or already terminal, so a different listing can be imported.
+        try {
+          const progress = await abandonImport({ store: sessionProgressStore() });
+          await setImportCancelled(false);
+          return { ok: true, progress };
+        } catch {
+          return { ok: true };
+        }
+      }
       cancelFlag = true;
       await setImportCancelled(true);
       return { ok: true };

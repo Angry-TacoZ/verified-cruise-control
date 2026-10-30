@@ -28,6 +28,7 @@ describe('protocol validation', () => {
     expect(isBackgroundRequest({ type: 'vcc:get-state' })).toBe(true);
     expect(isBackgroundRequest({ type: 'vcc:start-import', tabId: 7 })).toBe(true);
     expect(isBackgroundRequest({ type: 'vcc:retry-failed' })).toBe(true);
+    expect(isBackgroundRequest({ type: 'vcc:abandon-import' })).toBe(true);
     expect(isBackgroundRequest({ type: 'vcc:cancel-import' })).toBe(true);
   });
 

@@ -30,8 +30,16 @@ reuses the listing id and skips stored photos (server dedupes by
 `(listing, sha256)`, idempotency checked before capacity). Single-active
 policy for the local single-user architecture: a competing import for
 another listing is rejected while a run is active (in-worker guard plus a
-checkpoint-level guard, so suspension never locks imports permanently);
-terminal states release the guard.
+checkpoint-level guard); terminal states release the guard. A checkpoint
+left `active` by a terminated worker is recovered explicitly, never by
+timeout: the popup shows Resume (same listing, original id) or Abandon;
+abandon transitions unattempted photos to failed without filing backend
+failure records and without touching the listing or stored photos, so a
+different listing can be imported afterward and the original run can still
+be retried. Abandonment is refused while an operation is in flight; a
+live run is cancelled through the cancellation flag, which reports
+intentional cancellation as an upload-phase outcome, never a validation
+failure.
 
 **Mother app reads/writes.** The browser talks to Vite, which proxies
 `/api/*` to Django — same-origin, no CORS. Reads use the operator session

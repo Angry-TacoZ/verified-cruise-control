@@ -29,6 +29,7 @@ export type BackgroundRequest =
   | { type: 'vcc:get-state' }
   | { type: 'vcc:start-import'; tabId: number }
   | { type: 'vcc:retry-failed' }
+  | { type: 'vcc:abandon-import' }
   | { type: 'vcc:cancel-import' };
 
 export type ContentResponse =
@@ -50,6 +51,7 @@ export function isBackgroundRequest(value: unknown): value is BackgroundRequest 
     case 'vcc:extract-request':
     case 'vcc:get-state':
     case 'vcc:retry-failed':
+    case 'vcc:abandon-import':
     case 'vcc:cancel-import':
       return true;
     case 'vcc:start-import':

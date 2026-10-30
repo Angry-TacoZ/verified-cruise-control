@@ -17,6 +17,11 @@
   let busy = $state(false);
   let error = $state('');
   let progress = $state<ImportProgress | null>(null);
+  // Whether the background worker currently has an import operation in
+  // flight. Null means unknown (e.g. worker unreachable). An `active`
+  // checkpoint with no running operation is a stalled import the operator
+  // can resume or abandon.
+  let operationRunning = $state<boolean | null>(null);
   let pollTimer: ReturnType<typeof setInterval> | null = null;
 
   async function refreshTab() {
@@ -42,6 +47,15 @@
       return;
     }
     progress = await sessionProgressStore().load();
+    try {
+      const state = (await browser.runtime.sendMessage({ type: 'vcc:get-state' })) as {
+        operationRunning?: unknown;
+      };
+      operationRunning =
+        typeof state?.operationRunning === 'boolean' ? state.operationRunning : null;
+    } catch {
+      operationRunning = null;
+    }
     await refreshTab();
   }
 
@@ -124,6 +138,25 @@
   async function cancelImport() {
     await browser.runtime.sendMessage({ type: 'vcc:cancel-import' });
     await refreshAll();
+  }
+
+  async function abandonImport() {
+    error = '';
+    busy = true;
+    try {
+      const res = (await browser.runtime.sendMessage({ type: 'vcc:abandon-import' })) as {
+        ok: boolean;
+        error?: string;
+        progress?: ImportProgress;
+      };
+      if (!res?.ok) error = res?.error ?? 'Abandon failed.';
+      else if (res.progress) progress = res.progress;
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'Abandon failed.';
+    } finally {
+      busy = false;
+      await refreshAll();
+    }
   }
 
   function counts(): { done: number; total: number; failed: number } {
@@ -210,12 +243,41 @@
 
     {#if progress && progress.status === 'active'}
       {@const c = counts()}
-      <div class="mt-2 text-xs" role="status">
-        Uploading photos: {c.done}/{c.total}{c.failed > 0 ? ` (${c.failed} failed)` : ''}
-        <button class="ml-2 underline" type="button" onclick={() => void cancelImport()}
-          >Cancel</button
-        >
-      </div>
+      {#if operationRunning === false}
+        <div class="mt-2 rounded-md bg-amber-50 p-2 text-xs" role="status">
+          Import interrupted — no upload is running. Stored photos and the listing are kept.
+          <div class="mt-2 flex gap-2">
+            <button
+              class="rounded-md bg-blue-600 px-3 py-1.5 text-white disabled:opacity-50"
+              type="button"
+              disabled={busy || !supported}
+              onclick={() => void startImport()}
+            >
+              Resume import
+            </button>
+            <button
+              class="rounded-md border border-slate-300 px-3 py-1.5 disabled:opacity-50"
+              type="button"
+              disabled={busy}
+              onclick={() => void abandonImport()}
+            >
+              Abandon import
+            </button>
+          </div>
+          {#if !supported}
+            <p class="mt-1 text-slate-500">
+              Reopen the listing page to resume; abandoning works without it.
+            </p>
+          {/if}
+        </div>
+      {:else}
+        <div class="mt-2 text-xs" role="status">
+          Uploading photos: {c.done}/{c.total}{c.failed > 0 ? ` (${c.failed} failed)` : ''}
+          <button class="ml-2 underline" type="button" onclick={() => void cancelImport()}
+            >Cancel</button
+          >
+        </div>
+      {/if}
     {/if}
     {#if progress && progress.status !== 'active'}
       {@const c = counts()}
