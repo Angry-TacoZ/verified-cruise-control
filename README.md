@@ -15,6 +15,78 @@ reviewable evidence packets for a human reviewer.
 Image Storage → Svelte Mother App`. Live AI inference ships in PR #2; PR #1
 defines the provider contracts but makes zero model calls.
 
+## Why this is more than an image describer (hackathon context)
+
+**The real-world problem.** Used-car listings routinely advertise driver-assistance
+features — adaptive cruise control, lane-keeping, blind-spot monitoring — that
+the photos may or may not support. Checking a listing means testing each
+advertised claim against the visual evidence, not admiring one photo.
+
+**Why several photographs matter.** One photo rarely settles a claim: the
+steering-wheel buttons may be visible in an interior shot while the radar sensor
+is only checkable in a front-grille close-up. Verification tests every
+advertised claim against *each* relevant photo and records what each photo does
+and does not show.
+
+**How Meta models do substantive work here (planned for PR #2).** PR #1 makes
+zero model calls by design — it builds the evidence pipeline the models will
+consume:
+
+- **Muse Spark Open 1026** (Baseten) provides visual understanding of every
+  listing photo: which assistance controls, sensors, and indicators are visible,
+  and where.
+- **SAM 3.1** (Meta) localizes and segments the named parts — the steering-wheel
+  button cluster, the grille sensor window — so verdicts rest on precise regions
+  instead of vague whole-image captions.
+- Uncertain regions trigger **conditional crop re-analysis**: Muse looks again
+  at the zoomed crop before anything is recorded.
+- **Deterministic reconciliation** (rules, not model judgment) compares the
+  per-photo observations against the advertised claims and assigns each claim
+  one of five evidence states.
+- **Source evidence is preserved**: original bytes are immutable and
+  SHA-256-verified, so every verdict links back to the exact pixels a reviewer
+  can re-open.
+- The output is a **discrepancy report** — claim-by-claim states with supporting
+  crops — built for a human reviewer. The system never certifies a disputed
+  feature on its own.
+
+| | Simple image analyzer | Verified Cruise Control |
+|---|---|---|
+| Input | one image + one prompt | whole listing: all photos + advertised claims |
+| Model role | caption the picture | per-photo observation, then localized re-checks |
+| Claim linkage | none | every verdict tied to a specific advertised claim |
+| Localization | none | SAM segmentation + crop re-analysis |
+| Conflicting photos | last answer wins | deterministic reconciliation per claim |
+| Output | a description | discrepancy report with five evidence states |
+| Human review | n/a | required: reports are advisory evidence |
+
+**Concrete illustrative example (planned behavior, not yet implemented).** A
+listing claims *adaptive cruise control*. Photo A (interior) shows
+steering-wheel distance-control buttons — Muse observes them, SAM segments the
+button cluster: that sub-check reads *supported*. Photo B (front grille) is too
+low-resolution to confirm or deny the radar sensor: *inconclusive*, not a
+contradiction. Reconciliation keeps the claim open and asks for a closer grille
+photo instead of guessing — a single-image caption would have answered from one
+photo and stopped.
+
+**The five evidence states (PR #2 working taxonomy).** Each advertised claim ends
+in exactly one state: **supported** (photos show the feature), **contradicted**
+(photos show it absent or different), **partially supported** (some aspects
+verified, others not), **inconclusive** (relevant views exist but cannot settle
+it), or **missing evidence** (no photo covers the claim). Names are finalized
+with PR #2's first scored evals. PR #1 stores the photos and claims these
+states will be computed from.
+
+**Status honesty.** Implemented in PR #1: listing capture, immutable
+original-photo preservation, pairing, local storage, dashboard, and tests — zero
+paid model calls. Planned for PR #2: live Meta inference, multimodal analysis,
+conditional rechecks, deterministic reconciliation, initial evals. Later: full
+human review workflows and discrepancy-report export. The organizers clarified
+that the Simple Image Analyzers exclusion targets generic one-prompt projects,
+and that applications reconciling listing claims across several images into
+reviewable discrepancy reports fit the intended larger-workflow pattern; that is
+guidance, not a guarantee of acceptance.
+
 ## Architecture
 
 ```

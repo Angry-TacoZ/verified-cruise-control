@@ -57,13 +57,16 @@ can read this repository and can serve arbitrary listing pages.
 - Pairing-token storage: the extension sets `storage.local` to
   `TRUSTED_CONTEXTS` at worker startup and gates token reads on that
   restriction, so content-script (untrusted) contexts cannot read the
-  pairing-token area even if they guessed the key. Token reads stay limited
-  to the background worker and extension pages; runtime messages never
-  carry credentials (statically guarded). Chrome exposes no getter for the
-  level, so the extension E2E verifies the effect behaviorally: code
-  evaluated with content-script privileges in a real tab must not retrieve
-  the token through the storage API, and page scripts cannot reach `chrome`
-  at all.
+  pairing-token area even if they guessed the key. The restriction is
+  fail-closed: browsers without `setAccessLevel`, or a rejected call, raise
+  `StorageRestrictionError`, which blocks pairing and authenticated imports
+  and is shown as a popup error (never logged with the credential). Token
+  reads stay limited to the background worker and extension pages; runtime
+  messages never carry credentials (statically guarded). Chrome exposes no
+  getter for the level, so the extension E2E verifies the effect
+  behaviorally: code evaluated with content-script privileges in a real tab
+  must not retrieve the token through the storage API, and page scripts
+  cannot reach `chrome` at all.
 - Upload reads are bounded: the declared size is checked before reading and
   the body is streamed with a hard cap, so a lying `Content-Length` cannot
   force unbounded buffering. Read-level rejections (oversize on the wire,

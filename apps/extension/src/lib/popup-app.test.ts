@@ -10,6 +10,7 @@ const { sendMessageMock, queryMock, storeState } = vi.hoisted(() => ({
   storeState: {
     token: 'tok' as string | null,
     progress: null as ImportProgress | null,
+    tokenFailure: null as string | null,
   },
 }));
 
@@ -22,8 +23,12 @@ vi.mock('wxt/browser', () => ({
 }));
 
 vi.mock('./store', () => ({
-  getPairingToken: async () => storeState.token,
+  getPairingToken: async () => {
+    if (storeState.tokenFailure) throw new Error(storeState.tokenFailure);
+    return storeState.token;
+  },
   setPairingToken: async (token: string | null) => {
+    if (storeState.tokenFailure) throw new Error(storeState.tokenFailure);
     storeState.token = token;
   },
   sessionProgressStore: () => ({
@@ -61,6 +66,7 @@ function partialProgress(): ImportProgress {
 describe('popup retry UI', () => {
   beforeEach(() => {
     storeState.token = 'tok';
+    storeState.tokenFailure = null;
     storeState.progress = partialProgress();
     queryMock.mockResolvedValue([{ id: 7, url: 'http://127.0.0.1:8901/l/1' }]);
     sendMessageMock.mockResolvedValue({ ok: true, progress: storeState.progress });
@@ -84,6 +90,14 @@ describe('popup retry UI', () => {
     await fireEvent.click(retry);
     expect(sendMessageMock).toHaveBeenCalledWith({ type: 'vcc:retry-failed' });
     expect(await screen.findByText(/Import complete: 2\/2 photos/)).toBeInTheDocument();
+  });
+
+  it('shows a storage-restriction error instead of pairing when trusted storage fails', async () => {
+    storeState.tokenFailure = 'pairing-token storage is unavailable: no setAccessLevel';
+    storeState.progress = null;
+    render(App);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/storage is unavailable/);
+    expect(screen.queryByLabelText(/Pairing token/)).not.toBeInTheDocument();
   });
 
   it('surfaces retry failures without losing the partial state', async () => {

@@ -253,6 +253,84 @@ def test_stale_upload_refresh_does_not_clobber_partial(
     assert settled.import_status == "partial"
 
 
+def test_validation_failure_merges_with_extension_report_and_resolves_on_retry(
+    client, ext_headers, listing_payload, png_bytes
+):
+    """One photograph, one unresolved failure: the backend records the
+    rejected upload keyed by SHA-256; the extension's follow-up report
+    carries the same bytes' hash and merges into that row instead of
+    opening a second one. A corrected re-upload from the same URL (new
+    bytes, new hash) resolves the old record while keeping it as history,
+    and the listing completes."""
+    import hashlib
+
+    listing_payload["expected_photo_count"] = 1
+    created = client.post(
+        "/api/extension/listings",
+        data=json.dumps(listing_payload),
+        content_type="application/json",
+        headers=ext_headers,
+    )
+    assert created.status_code == 201, created.content
+    listing_id = created.json()["id"]
+    bad_bytes = b"not an image at all"
+    bad_sha = hashlib.sha256(bad_bytes).hexdigest()
+    rejected = client.post(
+        f"/api/extension/listings/{listing_id}/photos",
+        data={
+            "file": _photo_file("bad.png", bad_bytes),
+            "source_url": DOWNLOAD["source_url"],
+        },
+        headers=ext_headers,
+    )
+    assert rejected.status_code == 422
+    listing = Listing.objects.get(pk=listing_id)
+    assert listing.photo_failures.count() == 1
+    assert listing.photo_failures.get().key == bad_sha
+    assert listing.failed_upload_count == 1
+
+    # Extension processes the 422 and reports the same bytes' hash: merged,
+    # not duplicated.
+    reported = _report(
+        client,
+        ext_headers,
+        listing_id,
+        {
+            "source_url": DOWNLOAD["source_url"],
+            "key": bad_sha,
+            "kind": "validation",
+            "detail": "format: cannot identify image file",
+        },
+    )
+    assert reported.status_code == 201, reported.content
+    listing = Listing.objects.get(pk=listing_id)
+    assert listing.photo_failures.count() == 1
+    assert listing.failed_upload_count == 1
+    assert listing.photo_failures.get().kind == "validation"
+
+    # Retry with corrected bytes at the same URL reuses the listing, clears
+    # the count, keeps the resolved row, and completes the listing.
+    good_sha = hashlib.sha256(png_bytes).hexdigest()
+    assert good_sha != bad_sha
+    uploaded = client.post(
+        f"/api/extension/listings/{listing_id}/photos",
+        data={
+            "file": _photo_file("fixed.png", png_bytes),
+            "source_url": DOWNLOAD["source_url"],
+        },
+        headers=ext_headers,
+    )
+    assert uploaded.status_code == 201, uploaded.content
+    listing = Listing.objects.get(pk=listing_id)
+    assert listing.failed_upload_count == 0
+    assert listing.photo_failures.count() == 1
+    failure = listing.photo_failures.get()
+    assert failure.resolved is True
+    assert failure.key == bad_sha
+    assert listing.import_status == "complete"
+    assert Photograph.objects.filter(listing=listing).count() == 1
+
+
 def test_failure_endpoints_enforce_trust_boundaries(
     client, ext_headers, ext_listing, operator_client
 ):

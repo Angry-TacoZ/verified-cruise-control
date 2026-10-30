@@ -31,20 +31,37 @@ function localArea(): StorageAreaWithAccessLevel | null {
 
 let restrictionReady: Promise<void> | null = null;
 
+/** Raised when `storage.local` cannot be restricted to trusted contexts.
+ * Callers treat this as fatal for pairing and authenticated imports: the
+ * extension must not silently operate with content scripts able to read the
+ * pairing-token area. The message names the browser incompatibility; it
+ * never carries the credential. */
+export class StorageRestrictionError extends Error {
+  constructor(reason: string) {
+    super(`pairing-token storage is unavailable: ${reason}`);
+    this.name = 'StorageRestrictionError';
+  }
+}
+
+const STORAGE_UNAVAILABLE_HINT =
+  'this browser does not expose chrome.storage.local.setAccessLevel; ' +
+  'pairing and authenticated imports stay disabled until a compatible Chromium build is used.';
+
 /** Restrict `storage.local` to trusted extension contexts (the background
  * worker and extension pages). Content scripts run in untrusted contexts, so
  * after this resolves they can no longer read the pairing-token area. The
- * call is idempotent; on Chromium builds without the API it resolves without
- * doing anything (the module-import boundary remains the backstop, and the
- * browser-level E2E asserts the live access level). */
+ * call is idempotent and fail-closed: when the browser lacks the API or
+ * rejects the call, the returned promise rejects with
+ * StorageRestrictionError and every pairing-token read/write rejects too, so
+ * pairing and authenticated imports cannot proceed. The module-import
+ * boundary and the browser-level E2E remain backstops, not substitutes. */
 export function ensureTrustedStorage(): Promise<void> {
   if (!restrictionReady) {
     restrictionReady = (async () => {
-      try {
-        await localArea()?.setAccessLevel?.({ accessLevel: 'TRUSTED_CONTEXTS' });
-      } catch {
-        // Older Chromium without the API: leave the default level in place.
-      }
+      const area = localArea();
+      const setAccessLevel = area?.setAccessLevel;
+      if (!area || !setAccessLevel) throw new StorageRestrictionError(STORAGE_UNAVAILABLE_HINT);
+      await setAccessLevel.call(area, { accessLevel: 'TRUSTED_CONTEXTS' });
     })();
   }
   return restrictionReady;

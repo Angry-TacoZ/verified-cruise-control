@@ -198,8 +198,19 @@ export async function createListing(
 
 export interface FailureReportPayload {
   sourceUrl: string | null;
+  /** SHA-256 of the rejected bytes when the reporter holds them. Lets the
+   * backend merge this report with the validation record it already stored
+   * for the same upload instead of opening a second row. */
+  key?: string;
   kind: 'download' | 'permission' | 'validation' | 'upload';
   detail: string;
+}
+
+/** SHA-256 hex of downloaded bytes (extension secure context). Used only as
+ * a failure-record identity key, never as evidence. */
+export async function sha256HexBytes(bytes: Blob): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', await bytes.arrayBuffer());
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 export interface ReportedFailure {
@@ -225,6 +236,7 @@ export async function reportFailure(
       headers: { ...authHeaders(token), 'Content-Type': 'application/json' },
       body: JSON.stringify({
         source_url: failure.sourceUrl,
+        key: failure.key,
         kind: failure.kind,
         detail: failure.detail,
       }),

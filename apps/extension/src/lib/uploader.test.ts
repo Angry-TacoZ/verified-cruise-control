@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ExtensionApiError } from './api';
+import { ExtensionApiError, sha256HexBytes } from './api';
 import type { ExtractedListing } from './protocol';
 import {
   classifyFailure,
@@ -54,6 +54,7 @@ function mockBackend(
   hooks: {
     failDownloads?: Set<string>;
     failOnce?: Set<string>;
+    failUploadOnce?: Set<string>;
     uploads?: Map<string, number>;
     reports?: FailureReport[];
     creates?: { count: number };
@@ -62,6 +63,7 @@ function mockBackend(
   const uploads = hooks.uploads ?? new Map<string, number>();
   const creates = hooks.creates ?? { count: 0 };
   const seenFailOnce = new Set<string>();
+  const seenFailUploadOnce = new Set<string>();
   return vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
     const href = String(typeof url === 'string' ? url : ((url as Request).url ?? url));
     if (href.endsWith('/api/extension/listings') && init?.method === 'POST') {
@@ -69,6 +71,16 @@ function mockBackend(
       return new Response(JSON.stringify({ id: 'L1', import_status: 'importing' }), {
         status: 201,
       });
+    }
+    if (href.includes('/photos') && init?.method === 'POST') {
+      const form = init.body as FormData;
+      const source = String(form.get('source_url') ?? '');
+      if (hooks.failUploadOnce?.has(source) && !seenFailUploadOnce.has(source)) {
+        seenFailUploadOnce.add(source);
+        return new Response(JSON.stringify({ detail: 'format: cannot identify image file' }), {
+          status: 422,
+        });
+      }
     }
     if (href.endsWith('/failed-photos') && init?.method === 'POST') {
       const body = JSON.parse(String(init.body)) as {
@@ -336,6 +348,69 @@ describe('retryFailedPhotos', () => {
     expect(first.status).toBe('partial');
     return { store, uploads, reports, creates };
   }
+
+  it('upload rejection sends the rejected bytes hash so the backend merges rows', async () => {
+    const flaky = 'https://cdn.example.test/flaky-upload.jpg';
+    const uploads = new Map<string, number>();
+    const creates = { count: 0 };
+    const failing = mockBackend({ uploads, creates, failUploadOnce: new Set([flaky]) });
+    const store = memoryStore();
+    const reports: FailureReport[] = [];
+    const first = await runImport('tok', listingWithPhotos([flaky]), {
+      ...depsFor(store, failing),
+      maxAttempts: 1,
+      concurrency: 1,
+      reportFailure: async (report) => {
+        reports.push(report);
+      },
+    });
+    expect(first.status).toBe('failed');
+    expect(reports).toHaveLength(1);
+    const expectedKey = await sha256HexBytes(new Blob([`fake-bytes-${flaky}`]));
+    expect(reports[0]).toMatchObject({ sourceUrl: flaky, kind: 'validation', key: expectedKey });
+    const working = mockBackend({ uploads, creates });
+    const retried = await retryFailedPhotos('tok', {
+      ...depsFor(store, working),
+      maxAttempts: 1,
+      concurrency: 1,
+    });
+    expect(retried.listingId).toBe('L1');
+    expect(creates.count).toBe(1);
+    expect(retried.status).toBe('complete');
+    // The 422 rejection stored nothing, so the retry is the one counted upload.
+    expect(uploads.get(flaky)).toBe(1);
+  });
+
+  it('backend outage still finishes partial without losing import state', async () => {
+    const seen: FailureReport[] = [];
+    const outage = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const href = String(typeof url === 'string' ? url : ((url as Request).url ?? url));
+      if (href.endsWith('/api/extension/listings') && init?.method === 'POST') {
+        return new Response(JSON.stringify({ id: 'L1', import_status: 'importing' }), {
+          status: 201,
+        });
+      }
+      throw new TypeError('fetch failed');
+    });
+    const url = 'https://cdn.example.test/a.jpg';
+    const store = memoryStore();
+    const outcome = await runImport('tok', listingWithPhotos([url]), {
+      fetchImpl: outage as unknown as typeof fetch,
+      store,
+      maxAttempts: 1,
+      concurrency: 1,
+      reportFailure: async (report) => {
+        seen.push(report);
+        throw new Error('backend down');
+      },
+    });
+    expect(outcome.listingId).toBe('L1');
+    expect(outcome.status).toBe('failed');
+    expect(outcome.photos[0]).toMatchObject({ url, status: 'failed' });
+    expect(seen).toHaveLength(1);
+    // Import state survived the outage: a retry can resume from the store.
+    expect(await store.load()).not.toBeNull();
+  });
 
   it('retries one failed photo, reuses the listing, stores all three', async () => {
     const { store, uploads, creates } = await partialRun();

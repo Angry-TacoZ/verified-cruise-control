@@ -32,7 +32,15 @@
 
   async function refreshAll() {
     backendOk = await checkHealth();
-    paired = (await getPairingToken()) !== null;
+    try {
+      paired = (await getPairingToken()) !== null;
+    } catch (err) {
+      // Fail-closed storage restriction: without trusted-context storage the
+      // popup cannot pair, so it shows the browser error instead of a form.
+      paired = null;
+      error = err instanceof Error ? err.message : 'Secure token storage is unavailable.';
+      return;
+    }
     progress = await sessionProgressStore().load();
     await refreshTab();
   }
@@ -45,13 +53,23 @@
       error = 'Paste the pairing token from the mother app.';
       return;
     }
-    await setPairingToken(value);
+    try {
+      await setPairingToken(value);
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'Secure token storage is unavailable.';
+      return;
+    }
     tokenInput = '';
     paired = true;
   }
 
   async function unpair() {
-    await setPairingToken(null);
+    try {
+      await setPairingToken(null);
+    } catch (err) {
+      error = err instanceof Error ? err.message : 'Secure token storage is unavailable.';
+      return;
+    }
     await sessionProgressStore().clear();
     paired = false;
     progress = null;

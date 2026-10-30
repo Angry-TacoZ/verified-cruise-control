@@ -41,6 +41,14 @@ describe('security boundaries (static guards)', () => {
     expect(getter).toContain('await ensureTrustedStorage()');
   });
 
+  it('storage restriction fails closed instead of silently falling back', () => {
+    const source = read('src/lib/store.ts');
+    expect(source).toContain('StorageRestrictionError');
+    // No silent swallow: every failure path rejects.
+    expect(source).not.toMatch(/catch\s*\{\s*}/);
+    expect(source).not.toMatch(/without the API.*resolves without/i);
+  });
+
   it('pairing token never crosses the content-script boundary', () => {
     const background = read('entrypoints/background.ts');
     // The token travels only to localhost API calls, never in messages.

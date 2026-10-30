@@ -21,7 +21,7 @@ from pathlib import Path
 
 from django.conf import settings
 from django.db import IntegrityError, OperationalError, transaction
-from django.db.models import F, Sum
+from django.db.models import F, Q, Sum
 from PIL import Image, ImageFile
 
 from config import limits
@@ -327,18 +327,25 @@ def resolve_failures_for_photo(
     source_url: str | None,
 ) -> int:
     """Mark failures resolved once the photo stores successfully. Matches
-    both the byte-hash key and the pre-upload URL key, so a photo that
-    previously failed to download resolves when it finally uploads."""
+    the byte-hash key, the pre-upload URL key, and any unresolved row for
+    the same source URL: a corrected re-upload carries different bytes
+    (new hash) for the same photo slot, and recovery must resolve the old
+    validation record too. Resolved rows are kept as history."""
     candidates = [failure_key_for_sha(sha256)]
     if source_url:
         candidates.append(failure_key_for_url(source_url))
+    query = Q(key__in=candidates)
+    if source_url:
+        query |= Q(source_url=source_url)
     last_error: OperationalError | None = None
     resolved_count = 0
     for attempt in range(WRITE_ATTEMPTS):
         try:
             with transaction.atomic():
-                matching = PhotoFailure.objects.select_for_update().filter(
-                    listing=listing, resolved=False, key__in=candidates
+                matching = (
+                    PhotoFailure.objects.select_for_update()
+                    .filter(listing=listing, resolved=False)
+                    .filter(query)
                 )
                 resolved_count = matching.update(resolved=True)
                 if resolved_count:

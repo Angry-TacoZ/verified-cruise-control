@@ -19,9 +19,16 @@ import {
 export default defineBackground(() => {
   // Restrict storage.local to trusted contexts before any message can be
   // handled (event dispatch cannot interleave this synchronous task). Token
-  // reads gate on the same promise, so sensitive operations always run after
-  // the restriction is requested.
-  void ensureTrustedStorage();
+  // reads gate on the same promise, so if the restriction cannot be
+  // established every pairing-token access rejects and pairing plus
+  // authenticated imports stay disabled. The worker itself stays alive to
+  // report that state; the logged message never carries the credential.
+  void ensureTrustedStorage().catch((err: unknown) => {
+    console.warn(
+      'storage restriction failed; pairing is disabled:',
+      err instanceof Error ? err.message : err,
+    );
+  });
 
   // In-memory cancel flag for the active run. A suspended worker drops the
   // run with it; the popup resumes from checkpointed session progress.

@@ -17,6 +17,7 @@ import {
   MAX_DOWNLOAD_BYTES,
   createListing,
   downloadImageBytes,
+  sha256HexBytes,
   uploadPhoto,
   type ListingPayload,
 } from './api';
@@ -48,6 +49,10 @@ export interface ImportProgress {
 
 export interface FailureReport {
   sourceUrl: string | null;
+  /** SHA-256 of the rejected bytes when the reporter holds them, so the
+   * backend merges with the validation record it already stored for the
+   * same upload instead of opening a second row. */
+  key?: string;
   kind: FailureKind;
   detail: string;
 }
@@ -138,11 +143,13 @@ async function runPhoto(
       return;
     }
     let phase: 'download' | 'upload' = 'download';
+    let downloaded: Blob | null = null;
     try {
       photo.status = 'downloading';
       await checkpoint();
       const { bytes, filename } = await downloadImageBytes(photo.url, deps.fetchImpl);
       if (bytes.size > MAX_DOWNLOAD_BYTES) throw new Error('image exceeds download size limit');
+      downloaded = bytes;
       phase = 'upload';
       photo.status = 'uploading';
       await checkpoint();
@@ -164,7 +171,19 @@ async function runPhoto(
         photo.status = 'failed';
         photo.detail = message;
         await checkpoint();
-        await reportTerminal(photo, phase, err, deps.reportFailure);
+        // Upload-phase failures carry the bytes' SHA-256 so the backend
+        // merges this report with the validation record it already stored
+        // for the same rejected upload. Best-effort: a hashing failure must
+        // not suppress the report.
+        let photoKey: string | undefined;
+        if (phase === 'upload' && downloaded) {
+          try {
+            photoKey = await sha256HexBytes(downloaded);
+          } catch {
+            photoKey = undefined;
+          }
+        }
+        await reportTerminal(photo, phase, err, deps.reportFailure, photoKey);
         return;
       }
       // Whole-image retry; the server dedupes by SHA-256, so a retry after a
@@ -178,11 +197,13 @@ async function reportTerminal(
   phase: 'download' | 'upload',
   err: unknown,
   reportFailure: ImportDeps['reportFailure'],
+  photoKey?: string,
 ): Promise<void> {
   if (!reportFailure) return;
   try {
     await reportFailure({
       sourceUrl: photo.url,
+      key: photoKey,
       kind: classifyFailure(err, phase),
       detail: photo.detail ?? 'upload failed',
     });

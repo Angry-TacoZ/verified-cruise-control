@@ -298,4 +298,30 @@ describe('localhost API client', () => {
       kind: 'download',
     });
   });
+
+  it('passes the rejected-bytes hash through failure reports', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ id: 'F1', key: 'k', kind: 'validation', resolved: false }), {
+          status: 201,
+        }),
+    );
+    await reportFailure(
+      'tok',
+      'L1',
+      {
+        sourceUrl: 'https://cdn.example.test/bad.jpg',
+        key: 'abc123',
+        kind: 'validation',
+        detail: 'format: cannot identify image file',
+      },
+      fetchMock as unknown as typeof fetch,
+    );
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toMatchObject({
+      source_url: 'https://cdn.example.test/bad.jpg',
+      key: 'abc123',
+      kind: 'validation',
+    });
+  });
 });
