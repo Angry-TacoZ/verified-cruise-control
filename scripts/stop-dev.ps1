@@ -2,7 +2,7 @@
 # Matches only our own command lines; never kills by port alone.
 $ErrorActionPreference = 'Stop'
 
-$patterns = @('manage\.py runserver', 'fixtures.serve', 'vite.*--port 5173|vite preview')
+$patterns = @('manage\.py runserver', 'manage\.py run_audit_worker', 'fixtures.serve', 'vite.*--port 5173|vite preview')
 $killed = 0
 foreach ($proc in Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='node.exe'") {
   $cmd = $proc.CommandLine

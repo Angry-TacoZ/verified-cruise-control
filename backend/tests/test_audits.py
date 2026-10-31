@@ -1810,3 +1810,142 @@ def test_full_pipeline_completes_with_findings(listing, photos, enabled):
         Decimal("0.0000"),
     )
     assert done.spend_usd == ledger_sum
+
+
+# --- standalone worker lifecycle (F3) ------------------------------------
+
+
+def _two_photo_scripts(photos):
+    return [
+        [
+            _obs(str(photos[0].id), "c1"),
+            _obs(str(photos[0].id), "c2", visible_object="none"),
+        ],
+        [
+            _obs(str(photos[1].id), "c1"),
+            _obs(str(photos[1].id), "c2", visible_object="none"),
+        ],
+    ]
+
+
+def test_worker_restart_reclaims_and_resumes(listing, photos, enabled):
+    from audits import worker
+
+    job, created = services.queue_audit(listing.pk, requested_by="operator")
+    assert created
+    services.claim_job("w-old")
+    screened = pipeline.run_screening(job.pk, "w-old")
+    first = ScriptedMuseAdapter(_two_photo_scripts(photos))
+    assert pipeline.run_muse(job.pk, "w-old", screened, first) == 4
+    assert first.calls == 2
+    before = set(Observation.objects.filter(job=job).values_list("pk", flat=True))
+    assert len(before) == 4
+    # Crash: the lease goes stale with Muse results durable but no
+    # SAM/reconcile work done.
+    AuditJob.objects.filter(pk=job.pk).update(
+        heartbeat_at=timezone.now() - timedelta(hours=2)
+    )
+    resumed_muse = ScriptedMuseAdapter([])
+    resumed_sam = FakeSamAdapter(records=[_segment()])
+    settled = worker.run_claimed_job("w-new", resumed_muse, resumed_sam)
+    assert settled is not None
+    assert settled.status == JobStatus.COMPLETE
+    assert settled.worker_id == "w-new"
+    # Completed Muse batches are never re-fired after the restart.
+    assert resumed_muse.calls == 0
+    after = set(Observation.objects.filter(job=job).values_list("pk", flat=True))
+    assert before < after
+    assert settled.findings.count() == 2
+
+
+def test_completed_job_never_reexecutes(listing, photos, enabled):
+    from audits import worker
+
+    services.queue_audit(listing.pk, requested_by="operator")
+    muse = ScriptedMuseAdapter(_two_photo_scripts(photos))
+    sam = FakeSamAdapter(records=[_segment()])
+    settled = worker.run_claimed_job("w-first", muse, sam)
+    assert settled is not None
+    assert settled.status == JobStatus.COMPLETE
+    executions = AuditExecution.objects.filter(job_id=settled.pk).count()
+    findings = list(
+        settled.findings.order_by("claim_key").values_list("claim_key", "state")
+    )
+    idle_muse = ScriptedMuseAdapter(_two_photo_scripts(photos))
+    idle_sam = FakeSamAdapter(records=[_segment()])
+    assert worker.run_claimed_job("w-late", idle_muse, idle_sam) is None
+    assert idle_muse.calls == 0
+    assert idle_sam.calls == 0
+    settled.refresh_from_db()
+    assert AuditExecution.objects.filter(job_id=settled.pk).count() == executions
+    assert (
+        list(settled.findings.order_by("claim_key").values_list("claim_key", "state"))
+        == findings
+    )
+
+
+def test_cancelled_queued_job_never_claimed(listing, enabled):
+    from audits import worker
+
+    job, _ = services.queue_audit(listing.pk, requested_by="operator")
+    assert services.cancel_job(job.pk) is True
+    assert worker.run_claimed_job("w-x") is None
+    job.refresh_from_db()
+    assert job.status == JobStatus.CANCELLED
+
+
+def test_stale_worker_cannot_overwrite_completed(listing, photos, enabled):
+    from audits import worker
+
+    services.queue_audit(listing.pk, requested_by="operator")
+    muse = ScriptedMuseAdapter(_two_photo_scripts(photos))
+    sam = FakeSamAdapter(records=[_segment()])
+    settled = worker.run_claimed_job("w-first", muse, sam)
+    assert settled is not None
+    assert settled.status == JobStatus.COMPLETE
+    before = list(
+        settled.findings.order_by("claim_key").values_list(
+            "claim_key", "state", "summary"
+        )
+    )
+    with pytest.raises(services.StaleWorkerError):
+        pipeline.run_stages(settled.pk, "w-intruder", muse, sam)
+    settled.refresh_from_db()
+    assert settled.status == JobStatus.COMPLETE
+    assert (
+        list(
+            settled.findings.order_by("claim_key").values_list(
+                "claim_key", "state", "summary"
+            )
+        )
+        == before
+    )
+
+
+def test_run_audit_worker_once_processes_job(listing, photos, enabled, monkeypatch):
+    import io
+
+    from django.core.management import call_command
+
+    muse = ScriptedMuseAdapter(_two_photo_scripts(photos))
+    sam = FakeSamAdapter(records=[_segment()])
+    monkeypatch.setattr(pipeline, "BasetenMuseAdapter", lambda model_id="": muse)
+    monkeypatch.setattr(pipeline, "MetaSamAdapter", lambda model_id="": sam)
+    services.queue_audit(listing.pk, requested_by="operator")
+    out = io.StringIO()
+    call_command("run_audit_worker", once=True, worker_id="w-cmd", stdout=out)
+    job = AuditJob.objects.get(listing=listing)
+    assert job.status == JobStatus.COMPLETE
+    assert job.worker_id == "w-cmd"
+    assert muse.calls == 2
+    assert "w-cmd" in out.getvalue()
+
+
+def test_run_audit_worker_once_empty_queue(enabled):
+    import io
+
+    from django.core.management import call_command
+
+    out = io.StringIO()
+    call_command("run_audit_worker", once=True, stdout=out)
+    assert "started" in out.getvalue()

@@ -14,7 +14,7 @@ from ninja.errors import HttpError
 from listings.models import Listing
 from pairing.auth import operator_auth
 
-from . import pipeline, services, worker
+from . import pipeline, services
 from .models import (
     AuditCrop,
     AuditExecution,
@@ -144,14 +144,13 @@ def _serialize_job(job: AuditJob) -> dict:
 @app_router.post("/listings/{listing_id}/audits", response={202: QueueOut})
 def app_queue_audit(request, listing_id: uuid.UUID):
     """Queue an audit (manual activation). Reuses an in-flight job for the
-    same listing; spawns a worker pass only for a fresh job."""
+    same listing. Only persists the queued job; the standalone
+    ``run_audit_worker`` process picks it up (no in-request threads)."""
     get_object_or_404(Listing, pk=listing_id)
     try:
         job, created = services.queue_audit(listing_id, requested_by="operator")
     except services.InferenceDisabledError as exc:
         raise HttpError(403, str(exc)) from exc
-    if created:
-        worker.spawn_worker()
     return Status(202, {"job": _serialize_job(job), "created": created})
 
 
@@ -281,6 +280,4 @@ def app_retry_audit(request, job_id: uuid.UUID):
         fresh, created = services.queue_audit(job.listing_id, requested_by="operator")
     except services.InferenceDisabledError as exc:
         raise HttpError(403, str(exc)) from exc
-    if created:
-        worker.spawn_worker()
     return Status(202, {"job": _serialize_job(fresh), "created": created})

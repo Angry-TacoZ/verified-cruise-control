@@ -45,28 +45,29 @@ def listing():
 
 
 @pytest.fixture()
-def no_spawn(monkeypatch):
-    """Queue endpoints must not launch real inference threads in tests."""
-    calls: list = []
-    monkeypatch.setattr(
-        worker, "spawn_worker", lambda *a, **k: calls.append((a, k)) or "w-test"
-    )
-    return calls
+def no_spawn():
+    """Queue endpoints must not launch worker threads: the standalone
+    ``run_audit_worker`` process owns all inference."""
+    import threading
+
+    before = set(threading.enumerate())
+    yield
+    assert set(threading.enumerate()) <= before
 
 
 def _queue(operator_client, listing_id):
     return post_json(operator_client, f"/api/listings/{listing_id}/audits", {})
 
 
-def test_queue_creates_job_and_spawns(operator_client, listing, enabled, no_spawn):
+def test_queue_persists_without_spawning(operator_client, listing, enabled, no_spawn):
     response = _queue(operator_client, listing.pk)
     assert response.status_code == 202, response.content
     body = response.json()
     assert body["created"] is True
     assert body["job"]["status"] == "queued"
+    assert body["job"]["worker_id"] == ""
     assert body["job"]["listing_id"] == str(listing.pk)
     assert Decimal(body["job"]["spend_cap_usd"]) == Decimal("2.00")
-    assert len(no_spawn) == 1
 
 
 def test_queue_reuses_in_flight_without_respawn(
@@ -78,7 +79,7 @@ def test_queue_reuses_in_flight_without_respawn(
     body = second.json()
     assert body["created"] is False
     assert body["job"]["id"] == first["job"]["id"]
-    assert len(no_spawn) == 1
+    assert body["job"]["worker_id"] == ""
     assert AuditJob.objects.count() == 1
 
 
@@ -86,7 +87,6 @@ def test_queue_refuses_when_disabled(operator_client, listing, settings, no_spaw
     settings.AUDIT_INFERENCE_ENABLED = False
     response = _queue(operator_client, listing.pk)
     assert response.status_code == 403
-    assert len(no_spawn) == 0
 
 
 def test_queue_unknown_listing(operator_client, enabled, no_spawn):
