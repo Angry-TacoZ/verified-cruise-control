@@ -99,6 +99,10 @@ def run_muse_live(max_spend: float) -> dict:
         user_text=build_user_text(claims, truth["photos"]),
         photo_ids=tuple(truth["photos"]),
         images=tuple(attachments),
+        # Six (claim, photo) observations with descriptions do not fit the
+        # 2048-token default; the first live attempt truncated and was
+        # correctly quarantined as malformed.
+        max_output_tokens=4096,
     )
     result = adapter.analyze(request)
     usage = result.usage
@@ -107,11 +111,12 @@ def run_muse_live(max_spend: float) -> dict:
         raise SystemExit(f"refusing: live cost {cost} exceeds bound ${max_spend}")
     scored = []
     for item in result.observations:
-        verdict = (
-            "unclear"
-            if item["ambiguous"]
-            else ("present" if item["visible_object"] else "absent")
-        )
+        if item["ambiguous"]:
+            verdict = "unclear"
+        elif str(item["visible_object"]).strip().lower() == "none":
+            verdict = "absent"
+        else:
+            verdict = "present"
         scored.append(
             {
                 "photo_id": item["photo_id"],

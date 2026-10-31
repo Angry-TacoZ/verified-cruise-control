@@ -347,7 +347,7 @@ def _obs(photo_id, concept, **overrides):
     item = {
         "photo_id": photo_id,
         "claim_concept": concept,
-        "visible_object": True,
+        "visible_object": "button cluster",
         "description": "button cluster visible",
         "supports_localization": True,
         "ambiguous": False,
@@ -367,7 +367,7 @@ def test_muse_persists_verdicts(listing, photos, enabled):
             _obs(
                 str(photos[1].id),
                 "adaptive cruise control",
-                visible_object=False,
+                visible_object="none",
             ),
             _obs(str(photos[0].id), "lane keeping assist", ambiguous=True),
         ]
@@ -684,7 +684,7 @@ def test_recheck_confirms_crop(listing, photos, enabled):
             _obs(
                 str(photos[0].id),
                 "lane keeping assist",
-                visible_object=False,
+                visible_object="none",
             ),
         ]
     )
@@ -841,10 +841,10 @@ def test_full_pipeline_completes_with_findings(listing, photos, enabled):
             _obs(
                 str(photos[1].id),
                 "adaptive cruise control",
-                visible_object=False,
+                visible_object="none",
             ),
-            _obs(str(photos[0].id), "lane keeping assist", visible_object=False),
-            _obs(str(photos[1].id), "lane keeping assist", visible_object=False),
+            _obs(str(photos[0].id), "lane keeping assist", visible_object="none"),
+            _obs(str(photos[1].id), "lane keeping assist", visible_object="none"),
         ]
     )
     sam = FakeSamAdapter(records=[_segment()])

@@ -43,7 +43,8 @@ SYSTEM_INSTRUCTIONS = (
     "photo shows: never guess from the listing text, never verify a "
     "feature from one unclear view, and flag ambiguity explicitly. "
     "Respond with a JSON object containing an 'observations' array; each "
-    "item has photo_id, claim_concept, visible_object (boolean), "
+    "item has photo_id, claim_concept, visible_object (a short string "
+    'naming the visible object, or the literal string "none"), '
     "description, supports_localization (boolean), ambiguous (boolean), "
     "needs_crop (boolean), needs_other_view (boolean)."
 )
@@ -113,11 +114,17 @@ def run_screening(job_id, worker_id: str) -> ScreenedJob:
 
 
 def _verdict(item: dict) -> str:
+    """Map a validated observation to PRESENT/ABSENT/UNCLEAR.
+
+    The validator contract makes ``visible_object`` a descriptive string;
+    the model writes the literal ``"none"`` when nothing relevant is
+    visible (spelled out in the prompt, mirroring the smoke prompt).
+    """
     if item.get("ambiguous"):
         return Verdict.UNCLEAR
-    if item.get("visible_object"):
-        return Verdict.PRESENT
-    return Verdict.ABSENT
+    if str(item.get("visible_object", "")).strip().lower() == "none":
+        return Verdict.ABSENT
+    return Verdict.PRESENT
 
 
 def run_muse(
@@ -442,7 +449,8 @@ RECHECK_SYSTEM_INSTRUCTIONS = (
     "each advertised claim: never guess from the listing text, and flag "
     "ambiguity explicitly. Respond with a JSON object containing an "
     "'observations' array; each item has photo_id (the source photo), "
-    "claim_concept, visible_object (boolean), description, "
+    "claim_concept, visible_object (a short string naming the visible "
+    'object, or the literal string "none"), description, '
     "supports_localization (boolean), ambiguous (boolean), needs_crop "
     "(boolean), needs_other_view (boolean)."
 )
