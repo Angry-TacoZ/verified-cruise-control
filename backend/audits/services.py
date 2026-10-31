@@ -17,6 +17,7 @@ from django.utils import timezone
 from .models import AuditExecution, AuditJob, JobStatus
 
 IN_FLIGHT = (JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.PAUSED)
+REUSABLE = (JobStatus.QUEUED, JobStatus.RUNNING)
 
 
 class AuditError(Exception):
@@ -55,7 +56,7 @@ def queue_audit(listing_id, requested_by: str = "") -> tuple[AuditJob, bool]:
             "Inference is disabled; set VCC_INFERENCE_ENABLED=1 to queue audits."
         )
     existing = (
-        AuditJob.objects.filter(listing_id=listing_id, status__in=IN_FLIGHT)
+        AuditJob.objects.filter(listing_id=listing_id, status__in=REUSABLE)
         .order_by("-created_at")
         .first()
     )

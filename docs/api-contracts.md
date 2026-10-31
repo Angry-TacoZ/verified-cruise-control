@@ -27,6 +27,15 @@ as relative `/api/*` paths. All JSON unless noted. Auth failures return
 | GET | `/api/pairing/status` | Pairing metadata (never tokens/verifiers). |
 | POST | `/api/pairing/rotate` | Revokes all active, returns new `{pairing_id, extension_token}` once. |
 | POST | `/api/pairing/{id}/revoke` | Revokes one pairing. `404` if already revoked. |
+| POST | `/api/listings/{id}/audits` | Queue an audit (manual activation). Reuses a queued/running job (`created: false`). `202`. `403` when inference is disabled. |
+| GET | `/api/listings/{id}/audits` | Audit history, newest first. |
+| GET | `/api/audits/{job_id}` | Job + stage + counts + budget + error blockers. |
+| GET | `/api/audits/{job_id}/findings` | Reconciled per-claim findings (five states). |
+| GET | `/api/audits/{job_id}/evidence` | Observations + crops + execution ledger (null cost = unknown). |
+| GET | `/api/audits/{job_id}/crops/{crop_id}` | Derived crop bytes (`image/png`). `404`/`410`. |
+| GET | `/api/audits/{job_id}/masks/{ref}` | Derived mask bytes (`image/png`). Hex ref only. `404`/`410`. |
+| POST | `/api/audits/{job_id}/cancel` | Cancels a queued/running/paused job. `409` when terminal. |
+| POST | `/api/audits/{job_id}/retry` | Queues a fresh audit for terminal or paused jobs. `409` while in flight. |
 
 The extension token is **not** accepted on any of these (`401`).
 
@@ -89,4 +98,6 @@ meeting `expected_photo_count` with no outstanding failures yields
 ## Future (not in PR #1)
 
 `POST /api/listings/{id}/audit` will enqueue a durable audit job and return
-`202 Accepted`. It is intentionally absent here — no fake audit success.
+`202 Accepted`. PR #2 implements this as `POST /api/listings/{id}/audits`
+(plural; see the Mother app table). The singular path was never shipped,
+so no compatibility shim exists.

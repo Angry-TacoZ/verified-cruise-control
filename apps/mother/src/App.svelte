@@ -93,8 +93,8 @@
       <Dashboard gateSetup={initialized === false} />
     {/if}
     <footer class="mt-12 border-t border-slate-200 pt-4 text-xs text-slate-500">
-      PR #1 foundation: listings and original photos are imported evidence. No AI audit has run —
-      nothing here is AI-verified.
+      Listings and original photos are imported evidence. Audits run only when you start one — photo
+      support is never labeled AI-verified.
     </footer>
   </main>
 </div>
