@@ -8,6 +8,7 @@ zero provider calls.
 """
 
 from .base import (
+    ImageAttachment,
     PriceTable,
     ProviderAdapter,
     ProviderAuthError,
@@ -28,6 +29,7 @@ __all__ = [
     "META_API_BASE",
     "SAM31_MODEL_ID",
     "BasetenMuseAdapter",
+    "ImageAttachment",
     "MetaSamAdapter",
     "PriceTable",
     "ProviderAdapter",

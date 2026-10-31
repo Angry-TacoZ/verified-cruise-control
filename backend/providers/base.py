@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -49,6 +50,7 @@ class UsageRecord:
     input_tokens: int | None = None
     output_tokens: int | None = None
     estimated_cost_usd: float | None = None
+    pricing_version: str | None = None
     error: str | None = None
     audit_job_id: str | None = None
 
@@ -87,6 +89,35 @@ class RetryPolicy:
     max_backoff_s: float = 10.0
 
 
+MIME_ALLOWLIST = frozenset({"image/jpeg", "image/png", "image/webp"})
+
+
+@dataclass(frozen=True)
+class ImageAttachment:
+    """One preserved-evidence image for a provider request.
+
+    Providers receive backend-validated bytes only (never uploader-supplied
+    paths or external URLs). Transport is a base64 data URL so local
+    originals never need public hosting.
+    """
+
+    photo_id: str
+    mime_type: str
+    data: bytes
+
+    def __post_init__(self) -> None:
+        if not self.photo_id:
+            raise ValueError("photo_id is required")
+        if self.mime_type not in MIME_ALLOWLIST:
+            raise ValueError(f"unsupported image MIME type: {self.mime_type}")
+        if not self.data:
+            raise ValueError("image data is empty")
+
+    def data_url(self) -> str:
+        encoded = base64.b64encode(self.data).decode("ascii")
+        return f"data:{self.mime_type};base64,{encoded}"
+
+
 class ProviderAdapter(ABC):
     """Interface every model provider implements. No network in PR #1."""
 
@@ -102,11 +133,14 @@ class ProviderAdapter(ABC):
         api_key: str | None = None,
         *,
         ledger: UsageLedger | None = None,
+        model_id: str | None = None,
     ) -> None:
         self._api_key = (
             api_key if api_key is not None else os.environ.get(self.env_key_name, "")
         )
         self.ledger = ledger or UsageLedger()
+        if model_id is not None:
+            self.model_id = model_id
         self.live_calls_attempted = 0
 
     @property
@@ -117,7 +151,7 @@ class ProviderAdapter(ABC):
         if not self.is_configured:
             raise ProviderNotConfigured(
                 f"{self.provider_name} adapter has no {self.env_key_name}; "
-                "live inference is disabled (PR #1 performs zero model calls)."
+                "set it to enable live inference."
             )
 
     @abstractmethod
