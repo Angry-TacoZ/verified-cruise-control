@@ -93,6 +93,17 @@ class AuditJob(models.Model):
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [
+            # One reusable (queued/running) audit per listing, enforced by
+            # the database so concurrent submissions cannot duplicate paid
+            # work. Paused/terminal jobs leave the index, allowing history
+            # and fresh retries.
+            models.UniqueConstraint(
+                fields=["listing"],
+                condition=models.Q(status__in=("queued", "running")),
+                name="unique_active_audit_per_listing",
+            )
+        ]
 
     @property
     def current_stage(self) -> str:

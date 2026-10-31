@@ -10,7 +10,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import F
 from django.utils import timezone
 
@@ -49,26 +49,50 @@ def queue_audit(listing_id, requested_by: str = "") -> tuple[AuditJob, bool]:
     """Queue an audit, reusing an in-flight job for the same listing.
 
     Returns ``(job, created)``. Refuses to queue when inference is not
-    explicitly enabled.
+    explicitly enabled. The partial unique index is the backstop: a
+    submission that loses a creation race returns the winner.
     """
     if not settings.AUDIT_INFERENCE_ENABLED:
         raise InferenceDisabledError(
             "Inference is disabled; set VCC_INFERENCE_ENABLED=1 to queue audits."
         )
-    existing = (
-        AuditJob.objects.filter(listing_id=listing_id, status__in=REUSABLE)
-        .order_by("-created_at")
-        .first()
-    )
-    if existing is not None:
-        return existing, False
-    job = AuditJob.objects.create(
-        listing_id=listing_id,
-        requested_by=requested_by,
-        max_calls=settings.AUDIT_MAX_CALLS_PER_JOB,
-        spend_cap_usd=settings.AUDIT_SPEND_CAP_USD,
-    )
-    return job, True
+    import random
+    import time
+
+    from django.db import OperationalError
+
+    last_error: OperationalError | None = None
+    for attempt in range(4):
+        try:
+            with transaction.atomic():
+                existing = (
+                    AuditJob.objects.filter(listing_id=listing_id, status__in=REUSABLE)
+                    .order_by("-created_at")
+                    .first()
+                )
+                if existing is not None:
+                    return existing, False
+                job = AuditJob.objects.create(
+                    listing_id=listing_id,
+                    requested_by=requested_by,
+                    max_calls=settings.AUDIT_MAX_CALLS_PER_JOB,
+                    spend_cap_usd=settings.AUDIT_SPEND_CAP_USD,
+                )
+                return job, True
+        except IntegrityError:
+            winner = (
+                AuditJob.objects.filter(listing_id=listing_id, status__in=REUSABLE)
+                .order_by("-created_at")
+                .first()
+            )
+            if winner is None:
+                raise
+            return winner, False
+        except OperationalError as exc:
+            last_error = exc
+            time.sleep(0.05 * (2**attempt) + random.uniform(0, 0.05))
+    assert last_error is not None
+    raise last_error
 
 
 def _claim_filter(worker_id: str, now):

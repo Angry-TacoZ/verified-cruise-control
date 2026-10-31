@@ -104,6 +104,41 @@ def test_queue_new_job_after_terminal(listing, enabled):
     assert job2.pk != job.pk
 
 
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_queue_single_job(listing, enabled):
+    """Simultaneous submissions converge on one active audit: losers get
+    the winner instead of creating duplicate paid work."""
+    import threading
+
+    barrier = threading.Barrier(8)
+    results: list = []
+    errors: list[Exception] = []
+
+    def _queue() -> None:
+        from django.db import connections
+
+        try:
+            barrier.wait(timeout=10)
+            results.append(services.queue_audit(listing.pk))
+        except Exception as exc:  # noqa: BLE001 - collected for assertion
+            errors.append(exc)
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=_queue) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert len(results) == 8
+    ids = {str(job.pk) for job, _ in results}
+    assert ids == {str(AuditJob.objects.get().pk)}
+    assert sum(1 for _, created in results if created) == 1
+    listing.delete()
+
+
 # --- claim -------------------------------------------------------------
 
 
@@ -433,6 +468,8 @@ def test_run_stages_rejects_stale_worker(listing, photos, enabled):
 def test_current_stage_defaults(listing):
     queued = AuditJob.objects.create(listing=listing)
     assert queued.current_stage == JobStatus.QUEUED
+    queued.status = JobStatus.COMPLETE
+    queued.save()
     running = _running_job(listing)
     assert running.current_stage == Stage.SCREENING
 
