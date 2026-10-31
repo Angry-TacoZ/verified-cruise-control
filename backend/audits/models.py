@@ -80,10 +80,15 @@ class AuditJob(models.Model):
         max_digits=10, decimal_places=4, default=Decimal("2.0000")
     )
     calls_made = models.PositiveIntegerField(default=0)
+    model_calls_made = models.PositiveIntegerField(default=0)
     spend_usd = models.DecimalField(
         max_digits=10, decimal_places=4, default=Decimal("0.0000")
     )
     unknown_cost_calls = models.PositiveIntegerField(default=0)
+    reserved_calls = models.PositiveIntegerField(default=0)
+    reserved_spend_usd = models.DecimalField(
+        max_digits=10, decimal_places=4, default=Decimal("0.0000")
+    )
     worker_id = models.CharField(max_length=64, blank=True, default="")
     leased_at = models.DateTimeField(null=True, blank=True)
     heartbeat_at = models.DateTimeField(null=True, blank=True)
@@ -130,6 +135,7 @@ class AuditExecution(models.Model):
     model_id = models.CharField(max_length=255, blank=True, default="")
     photo_ids = models.JSONField(default=list)
     ok = models.BooleanField(default=True)
+    attempts = models.PositiveIntegerField(default=1)
     latency_ms = models.PositiveIntegerField(null=True, blank=True)
     usage = models.JSONField(default=dict)
     cost_usd = models.DecimalField(

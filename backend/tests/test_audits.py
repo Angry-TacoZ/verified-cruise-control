@@ -226,90 +226,108 @@ def test_cancel_terminal_job_is_noop(listing):
 def test_record_local_stage_not_charged(listing):
     job = _running_job(listing)
     services.record_execution(
-        job.pk, "w1", stage=Stage.SCREENING, provider=Provider.LOCAL
+        job.pk,
+        "w1",
+        stage=Stage.SCREENING,
+        provider=Provider.LOCAL,
+        attempts=3,
     )
     job.refresh_from_db()
-    assert job.calls_made == 1
+    assert job.model_calls_made == 0
     assert job.spend_usd == Decimal("0.0000")
     assert job.unknown_cost_calls == 0
     assert job.status == JobStatus.RUNNING
 
 
-def test_record_known_cost_accumulates(listing):
+def test_reserve_then_settle_known_cost(listing):
     job = _running_job(listing)
-    services.record_execution(
-        job.pk,
-        "w1",
-        stage=Stage.Muse,
-        provider=Provider.BASETEN,
-        cost_usd=Decimal("0.0201"),
-    )
+    services.reserve_call(job.pk, "w1", max_attempts=3, reserve_usd=Decimal("0.15"))
     job.refresh_from_db()
-    assert job.spend_usd == Decimal("0.0201")
-    assert job.status == JobStatus.RUNNING
+    assert job.reserved_calls == 3
+    assert job.reserved_spend_usd == Decimal("0.15")
+    assert job.model_calls_made == 0
+    settled = services.settle_call(job.pk, "w1", attempts=1, cost_usd=Decimal("0.0201"))
+    assert settled.model_calls_made == 1
+    assert settled.spend_usd == Decimal("0.0201")
+    assert settled.reserved_calls == 0
+    assert settled.reserved_spend_usd == Decimal("0.0000")
+    assert settled.status == JobStatus.RUNNING
 
 
 def test_unknown_cost_pauses_job(listing):
     job = _running_job(listing)
-    with pytest.raises(services.BudgetExceededError):
-        services.record_execution(
-            job.pk,
-            "w1",
-            stage=Stage.Muse,
-            provider=Provider.BASETEN,
-            cost_usd=None,
-        )
-    job.refresh_from_db()
-    assert job.status == JobStatus.PAUSED
-    assert job.error_code == "unknown_cost"
-    assert job.unknown_cost_calls == 1
+    services.reserve_call(job.pk, "w1", max_attempts=3, reserve_usd=Decimal("0.15"))
+    settled = services.settle_call(job.pk, "w1", attempts=1, cost_usd=None)
+    assert settled.status == JobStatus.PAUSED
+    assert settled.error_code == "unknown_cost"
+    assert settled.unknown_cost_calls == 1
+    assert settled.reserved_calls == 0
     # Spend never absorbs the unknown call as zero.
-    assert job.spend_usd == Decimal("0.0000")
+    assert settled.spend_usd == Decimal("0.0000")
 
 
-def test_spend_cap_pauses_job(listing):
+def test_reserve_over_spend_cap_fails_closed(listing):
     job = _running_job(listing, spend_cap_usd=Decimal("0.05"))
-    services.record_execution(
-        job.pk,
-        "w1",
-        stage=Stage.Muse,
-        provider=Provider.BASETEN,
-        cost_usd=Decimal("0.06"),
-    )
+    with pytest.raises(services.BudgetExceededError) as excinfo:
+        services.reserve_call(job.pk, "w1", max_attempts=1, reserve_usd=Decimal("0.15"))
+    assert excinfo.value.code == "spend_cap"
     job.refresh_from_db()
     assert job.status == JobStatus.PAUSED
     assert job.error_code == "spend_cap"
+    assert job.model_calls_made == 0
+    assert job.reserved_calls == 0
 
 
-def test_call_cap_blocks_next_call(listing):
-    job = _running_job(listing, max_calls=1)
-    services.record_execution(
-        job.pk, "w1", stage=Stage.SCREENING, provider=Provider.LOCAL
-    )
-    with pytest.raises(services.BudgetExceededError):
-        services.check_budget(AuditJob.objects.get(pk=job.pk), "w1")
+def test_reserve_retry_headroom_consumes_call_cap(listing):
+    job = _running_job(listing, max_calls=2)
+    with pytest.raises(services.BudgetExceededError) as excinfo:
+        services.reserve_call(job.pk, "w1", max_attempts=3, reserve_usd=Decimal("0.01"))
+    assert excinfo.value.code == "call_cap"
     job.refresh_from_db()
     assert job.status == JobStatus.PAUSED
     assert job.error_code == "call_cap"
+    assert job.model_calls_made == 0
+
+
+def test_settle_retry_within_allowance(listing):
+    job = _running_job(listing, max_calls=4)
+    services.reserve_call(job.pk, "w1", max_attempts=3, reserve_usd=Decimal("0.15"))
+    settled = services.settle_call(job.pk, "w1", attempts=3, cost_usd=Decimal("0.0400"))
+    assert settled.model_calls_made == 3
+    assert settled.spend_usd == Decimal("0.0400")
+    assert settled.status == JobStatus.RUNNING
+    # Headroom for a second logical call no longer fits.
+    with pytest.raises(services.BudgetExceededError) as excinfo:
+        services.reserve_call(job.pk, "w1", max_attempts=3, reserve_usd=Decimal("0.01"))
+    assert excinfo.value.code == "call_cap"
 
 
 def test_stale_worker_cannot_write(listing):
     job = _running_job(listing)
-    with pytest.raises(services.StaleWorkerError):
-        services.record_execution(
-            job.pk, "intruder", stage=Stage.SCREENING, provider=Provider.LOCAL
-        )
-    assert AuditExecution.objects.count() == 0
+    # Provenance rows are append-only: a stale worker's row lands, but the
+    # job ledger and lifecycle are untouched (results stay first-wins).
+    services.record_execution(
+        job.pk, "intruder", stage=Stage.SCREENING, provider=Provider.LOCAL
+    )
+    job.refresh_from_db()
+    assert job.status == JobStatus.RUNNING
+    assert job.model_calls_made == 0
+    assert job.spend_usd == Decimal("0.0000")
     with pytest.raises(services.StaleWorkerError):
         services.complete_job(job.pk, "intruder")
 
 
 def test_paused_job_rejects_writes(listing):
     job = _running_job(listing, status=JobStatus.PAUSED)
+    # Provenance rows still land (settle pauses, then the stage records),
+    # but reservations and lifecycle transitions are rejected.
+    services.record_execution(
+        job.pk, "w1", stage=Stage.SCREENING, provider=Provider.LOCAL
+    )
     with pytest.raises(services.JobNotRunningError):
-        services.record_execution(
-            job.pk, "w1", stage=Stage.SCREENING, provider=Provider.LOCAL
-        )
+        services.reserve_call(job.pk, "w1", max_attempts=1, reserve_usd=Decimal("0.01"))
+    with pytest.raises(services.StaleWorkerError):
+        services.complete_job(job.pk, "w1")
 
 
 # --- screening -----------------------------------------------------------
@@ -351,6 +369,7 @@ def test_screening_no_claims_fails(listing, photos):
 
 class FakeMuseAdapter:
     model_id = "fake-muse"
+    last_attempts = 1
 
     def __init__(self, observations=None, error=None, cost=0.0123):
         self._observations = observations or []
@@ -477,7 +496,17 @@ def test_muse_unknown_cost_pauses(listing, photos, enabled):
     job.refresh_from_db()
     assert job.status == JobStatus.PAUSED
     assert job.error_code == "unknown_cost"
-    assert Observation.objects.filter(job=job).count() == 0
+    assert job.unknown_cost_calls == 1
+    assert job.spend_usd == Decimal("0.0000")
+    assert job.reserved_calls == 0
+    # The validated observations are kept: the call may already have been
+    # billed server-side, and a resumed audit must never re-pay for them.
+    assert Observation.objects.filter(job=job).count() == 2
+    row = AuditExecution.objects.filter(
+        job=job, stage=Stage.Muse, provider=Provider.BASETEN
+    ).get()
+    assert row.cost_usd is None
+    assert row.attempts == 1
 
 
 def test_run_stages_rejects_stale_worker(listing, photos, enabled):
@@ -507,6 +536,7 @@ def test_complete_job(listing):
 
 class FakeSamAdapter:
     model_id = "fake-sam"
+    last_attempts = 1
 
     def __init__(self, records=None, error=None, cost=0.0025):
         self._records = records or []
@@ -1453,6 +1483,275 @@ def test_muse_resume_skips_complete_batches(listing, photos, enabled):
     assert pipeline.run_muse(job.pk, "w1", screened, adapter) == 2
     assert adapter.calls == 1
     assert adapter.requests[0].photo_ids == (str(photos[1].id),)
+
+
+# --- budget reservation (Finding 4) ----------------------------------------
+
+
+def test_reserve_blocks_overspend(listing):
+    job = _running_job(listing, spend_usd=Decimal("1.80"))
+    with pytest.raises(services.BudgetExceededError):
+        services.reserve_call(job.pk, "w1", max_attempts=3, reserve_usd=Decimal("0.50"))
+    job.refresh_from_db()
+    assert job.status == JobStatus.PAUSED
+    assert job.error_code == "spend_cap"
+    assert job.model_calls_made == 0
+    assert job.reserved_calls == 0
+
+
+def test_reserve_blocks_retry_over_call_cap(listing):
+    job = _running_job(listing, max_calls=60, model_calls_made=58)
+    with pytest.raises(services.BudgetExceededError):
+        services.reserve_call(job.pk, "w1", max_attempts=3, reserve_usd=Decimal("0.50"))
+    job.refresh_from_db()
+    assert job.status == JobStatus.PAUSED
+    assert job.error_code == "call_cap"
+
+
+def test_reserve_at_exact_cap_fails(listing):
+    job = _running_job(listing, spend_cap_usd=Decimal("2.00"))
+    job.spend_usd = Decimal("2.00")
+    job.save()
+    with pytest.raises(services.BudgetExceededError):
+        services.reserve_call(job.pk, "w1", max_attempts=1, reserve_usd=Decimal("0.50"))
+    job.refresh_from_db()
+    assert job.status == JobStatus.PAUSED
+
+
+def test_local_rows_ignore_model_allowance(listing):
+    job = _running_job(listing, max_calls=1)
+    services.record_execution(
+        job.pk, "w1", stage=Stage.SCREENING, provider=Provider.LOCAL
+    )
+    services.record_execution(job.pk, "w1", stage=Stage.CROP, provider=Provider.LOCAL)
+    job.refresh_from_db()
+    assert job.calls_made == 2
+    assert job.model_calls_made == 0
+    assert job.status == JobStatus.RUNNING
+    services.reserve_call(job.pk, "w1", max_attempts=1, reserve_usd=Decimal("0.50"))
+    services.settle_call(job.pk, "w1", attempts=1, cost_usd=Decimal("0.0100"))
+    job.refresh_from_db()
+    assert job.model_calls_made == 1
+
+
+def test_settle_unknown_cost_pauses(listing):
+    job = _running_job(listing)
+    services.reserve_call(job.pk, "w1", max_attempts=3, reserve_usd=Decimal("0.50"))
+    services.settle_call(job.pk, "w1", attempts=2, cost_usd=None)
+    job.refresh_from_db()
+    assert job.status == JobStatus.PAUSED
+    assert job.error_code == "unknown_cost"
+    assert job.unknown_cost_calls == 1
+    assert job.model_calls_made == 2
+    assert job.spend_usd == Decimal("0.0000")
+    assert job.reserved_calls == 0
+
+
+def test_settle_books_over_terminal_status(listing):
+    """A call in flight during cancel still books its spend; the cancel
+    stands and no pause overwrites it."""
+    job = _running_job(listing)
+    services.reserve_call(job.pk, "w1", max_attempts=1, reserve_usd=Decimal("0.50"))
+    services.cancel_job(job.pk)
+    services.settle_call(job.pk, "w1", attempts=1, cost_usd=Decimal("0.0100"))
+    job.refresh_from_db()
+    assert job.status == JobStatus.CANCELLED
+    assert job.spend_usd == Decimal("0.0100")
+    assert job.model_calls_made == 1
+    assert job.reserved_calls == 0
+
+
+def test_stale_worker_cannot_reserve(listing):
+    job = _running_job(listing)
+    with pytest.raises(services.StaleWorkerError):
+        services.reserve_call(
+            job.pk, "intruder", max_attempts=1, reserve_usd=Decimal("0.50")
+        )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_reserve_single_winner(listing):
+    import threading
+
+    job = _running_job(listing)
+    barrier = threading.Barrier(6)
+    won: list = []
+    lost: list = []
+
+    def _reserve() -> None:
+        from django.db import connections
+
+        try:
+            barrier.wait(timeout=10)
+            services.reserve_call(
+                job.pk, "w1", max_attempts=1, reserve_usd=Decimal("0.50")
+            )
+            won.append(1)
+        except services.BudgetExceededError:
+            lost.append(1)
+        finally:
+            connections.close_all()
+
+    threads = [threading.Thread(target=_reserve) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(won) == 1
+    assert len(lost) == 5
+    job.refresh_from_db()
+    assert job.status == JobStatus.RUNNING
+    assert job.reserved_calls == 1
+    services.settle_call(job.pk, "w1", attempts=1, cost_usd=Decimal("0.01"))
+    job.refresh_from_db()
+    assert job.reserved_calls == 0
+    assert job.spend_usd == Decimal("0.01")
+    listing.delete()
+
+
+def test_classify_error_cost():
+    from decimal import Decimal as D
+
+    from providers.base import (
+        ProviderAuthError,
+        ProviderError,
+        ProviderNotConfigured,
+        ProviderRateLimitError,
+        ProviderResponseError,
+        ProviderTimeoutError,
+    )
+
+    assert pipeline.classify_error_cost(ProviderAuthError("no")) == D("0.0000")
+    assert pipeline.classify_error_cost(ProviderNotConfigured("x")) == D("0.0000")
+    assert pipeline.classify_error_cost(ProviderRateLimitError("slow")) == D("0.0000")
+    assert pipeline.classify_error_cost(ProviderError("bad", status=400)) == D("0.0000")
+    assert pipeline.classify_error_cost(ProviderTimeoutError("t")) is None
+    assert pipeline.classify_error_cost(ProviderResponseError("m")) is None
+    assert pipeline.classify_error_cost(ProviderError("s", status=500)) is None
+    assert pipeline.classify_error_cost(ProviderError("t", status=408)) is None
+
+
+def test_muse_never_calls_when_reserve_fails(listing, photos, enabled):
+    job = _running_job(listing, spend_usd=Decimal("1.90"))
+    screened = pipeline.run_screening(job.pk, "w1")
+    adapter = FakeMuseAdapter(observations=[])
+    with pytest.raises(services.BudgetExceededError):
+        pipeline.run_muse(job.pk, "w1", screened, adapter)
+    assert adapter.calls == 0
+    job.refresh_from_db()
+    assert job.status == JobStatus.PAUSED
+    assert job.error_code == "spend_cap"
+
+
+def test_cancel_between_batches_halts_without_further_calls(listing, photos, enabled):
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+
+    class CancellingAdapter(ScriptedMuseAdapter):
+        def analyze(self, request):
+            result = super().analyze(request)
+            services.cancel_job(job.pk)
+            return result
+
+    adapter = CancellingAdapter(
+        [
+            [
+                _obs(str(photos[0].id), "c1"),
+                _obs(str(photos[0].id), "c2", visible_object="none"),
+            ],
+            [
+                _obs(str(photos[1].id), "c1", visible_object="none"),
+                _obs(str(photos[1].id), "c2", visible_object="none"),
+            ],
+        ]
+    )
+    with pytest.raises(services.JobNotRunningError):
+        pipeline.run_muse(job.pk, "w1", screened, adapter)
+    assert adapter.calls == 1
+    job.refresh_from_db()
+    assert job.status == JobStatus.CANCELLED
+    assert job.spend_usd == Decimal("0.0123")
+    assert job.model_calls_made == 1
+    assert job.reserved_calls == 0
+    assert Observation.objects.filter(job=job).count() == 2
+
+
+def test_provider_timeout_settles_unknown(listing, photos, enabled):
+    from providers.base import ProviderTimeoutError
+
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    adapter = FakeMuseAdapter(error=ProviderTimeoutError("hung"))
+    with pytest.raises(ProviderTimeoutError):
+        pipeline.run_muse(job.pk, "w1", screened, adapter)
+    job.refresh_from_db()
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == "ProviderTimeoutError"
+    assert job.unknown_cost_calls == 1
+    assert job.spend_usd == Decimal("0.0000")
+
+
+def test_stale_settle_cannot_release_new_owner_hold(listing):
+    job = _running_job(listing)
+    services.reserve_call(job.pk, "w1", max_attempts=3, reserve_usd=Decimal("0.50"))
+    AuditJob.objects.filter(pk=job.pk).update(
+        heartbeat_at=timezone.now() - timedelta(hours=2)
+    )
+    stolen = services.claim_job("w2")
+    assert stolen is not None
+    assert stolen.worker_id == "w2"
+    services.reserve_call(job.pk, "w2", max_attempts=3, reserve_usd=Decimal("0.50"))
+    # The merely-slow first worker settles late: its spend books, but
+    # the new owner's reservation survives.
+    services.settle_call(job.pk, "w1", attempts=1, cost_usd=Decimal("0.0100"), ok=False)
+    job.refresh_from_db()
+    assert job.worker_id == "w2"
+    assert job.spend_usd == Decimal("0.0100")
+    assert job.reserved_calls == 3
+    assert job.status == JobStatus.RUNNING
+
+
+def test_auth_error_settles_zero(listing, photos, enabled):
+    from providers.base import ProviderAuthError
+
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    adapter = FakeMuseAdapter(error=ProviderAuthError("bad key"))
+    with pytest.raises(ProviderAuthError):
+        pipeline.run_muse(job.pk, "w1", screened, adapter)
+    job.refresh_from_db()
+    assert job.status == JobStatus.FAILED
+    assert job.spend_usd == Decimal("0.0000")
+    assert job.unknown_cost_calls == 0
+    assert job.model_calls_made >= 1
+
+
+def test_provider_costs_attributable_by_pool(listing, photos, enabled):
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    muse = ScriptedMuseAdapter(
+        [
+            [
+                _obs(str(photos[0].id), "c1"),
+                _obs(str(photos[0].id), "c2", visible_object="none"),
+            ],
+            [
+                _obs(str(photos[1].id), "c1", visible_object="none"),
+                _obs(str(photos[1].id), "c2", visible_object="none"),
+            ],
+        ],
+        cost=0.0123,
+    )
+    pipeline.run_muse(job.pk, "w1", screened, muse)
+    sam = FakeSamAdapter(records=[_segment()], cost=0.0025)
+    pipeline.run_sam(job.pk, "w1", sam)
+    totals: dict[str, Decimal] = {}
+    for row in AuditExecution.objects.filter(job=job).exclude(cost_usd__isnull=True):
+        totals[row.provider] = totals.get(row.provider, Decimal(0)) + row.cost_usd
+    assert totals[Provider.BASETEN] == Decimal("0.0123") * 2
+    assert totals[Provider.META] == Decimal("0.0025")
+    job.refresh_from_db()
+    assert job.spend_usd == sum(totals.values(), Decimal(0))
 
 
 def test_full_pipeline_completes_with_findings(listing, photos, enabled):

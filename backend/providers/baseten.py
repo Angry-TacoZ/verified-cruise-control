@@ -234,6 +234,7 @@ class BasetenMuseAdapter(ProviderAdapter):
                     )
                 else:
                     if response.status_code == 200:
+                        self.last_attempts = retries + 1
                         return self._handle_success(request, response, retries, started)
                     last_error = self.map_http_error(
                         response.status_code, response.text
@@ -249,6 +250,7 @@ class BasetenMuseAdapter(ProviderAdapter):
             if client is None:
                 owned_client.close()
         assert last_error is not None
+        self.last_attempts = retries + 1
         self._record(request, retries, started, None, None, None, last_error)
         raise last_error
 

@@ -18,7 +18,15 @@ from PIL import Image
 
 from evidence.images import original_path
 from evidence.models import Photograph
-from providers.base import ImageAttachment, ProviderError, ProviderResponseError
+from providers.base import (
+    ImageAttachment,
+    ProviderAuthError,
+    ProviderError,
+    ProviderNotConfigured,
+    ProviderRateLimitError,
+    ProviderResponseError,
+    RetryPolicy,
+)
 from providers.baseten import BasetenMuseAdapter, MuseRequest
 from providers.meta import MetaSamAdapter, SamRequest
 
@@ -158,6 +166,109 @@ def run_screening(job_id, worker_id: str) -> ScreenedJob:
     return ScreenedJob(claims=claims, photos=photos)
 
 
+def classify_error_cost(exc: ProviderError) -> Decimal | None:
+    """Settle a failed provider call: $0.00 only when the provider
+    certainly ran no inference (never-sent calls, auth/rate-limit and
+    other 4xx rejections short of timeouts); None (unknown, fail
+    closed) for timeouts, 5xx, and 200-malformed responses whose
+    metering never surfaced."""
+
+    if isinstance(
+        exc, (ProviderAuthError, ProviderRateLimitError, ProviderNotConfigured)
+    ):
+        return Decimal("0.0000")
+    status = getattr(exc, "status", None)
+    if isinstance(status, int) and 400 <= status < 500 and status != 408:
+        return Decimal("0.0000")
+    return None
+
+
+def _max_attempts_for(adapter) -> int:
+    policy = getattr(adapter, "retry_policy", None)
+    if policy is None:
+        policy = RetryPolicy()
+    return policy.max_retries + 1
+
+
+def _error_attempts(adapter, exc: ProviderError, max_attempts: int) -> int:
+    if isinstance(exc, ProviderNotConfigured):
+        return 0
+    return getattr(adapter, "last_attempts", 0) or max_attempts
+
+
+def _guarded_analyze(
+    job_id,
+    worker_id: str,
+    adapter,
+    request,
+    *,
+    stage: str,
+    provider: str,
+    model_id: str,
+    photo_ids: list[str],
+):
+    """Reserve budget, run one provider call, settle actuals, record the
+    error row on failure. Returns ``(result, attempts, cost, settled_job)``.
+    Budget pauses raise before any request is sent; provider failures fail
+    the job with the provider's code after settling.
+    """
+
+    max_attempts = _max_attempts_for(adapter)
+    services.reserve_call(
+        job_id,
+        worker_id,
+        max_attempts=max_attempts,
+        reserve_usd=settings.AUDIT_RESERVE_PER_CALL_USD,
+    )
+    try:
+        result = adapter.analyze(request)
+    except ProviderError as exc:
+        attempts = _error_attempts(adapter, exc, max_attempts)
+        cost = classify_error_cost(exc)
+        services.settle_call(
+            job_id, worker_id, attempts=attempts, cost_usd=cost, ok=False
+        )
+        services.record_execution(
+            job_id,
+            worker_id,
+            stage=stage,
+            provider=provider,
+            model_id=model_id,
+            photo_ids=photo_ids,
+            ok=False,
+            attempts=attempts,
+            usage={"billing": "certain-zero" if cost is not None else "unknown"},
+            cost_usd=cost,
+            error_code=type(exc).__name__,
+            error_detail=str(exc)[:500],
+        )
+        services.fail_job(job_id, worker_id, type(exc).__name__, str(exc)[:500])
+        raise
+    attempts = (result.usage.retries or 0) + 1
+    estimated = result.usage.estimated_cost_usd
+    cost = Decimal(str(estimated)) if estimated is not None else None
+    settled = services.settle_call(job_id, worker_id, attempts=attempts, cost_usd=cost)
+    return result, attempts, cost, settled
+
+
+_BUDGET_HALT_CODES = frozenset({"call_cap", "spend_cap", "unknown_cost"})
+
+
+def _raise_if_halted(settled, job_id, stage: str) -> None:
+    """Halt the stage when settle left the job non-running.
+
+    Budget pauses surface as ``BudgetExceededError``; external stops
+    (cancel, reclaim) surface as ``JobNotRunningError``. The worker
+    treats both as graceful halts; the distinction keeps dashboards
+    and retry policy honest about *why* the audit stopped.
+    """
+    if settled.status == JobStatus.RUNNING:
+        return
+    if settled.error_code in _BUDGET_HALT_CODES:
+        raise services.BudgetExceededError(f"job {job_id} halted during {stage} settle")
+    raise services.JobNotRunningError(f"job {job_id} stopped during {stage}")
+
+
 def _verdict(item: dict) -> str:
     """Map a validated observation to PRESENT/ABSENT/UNCLEAR.
 
@@ -270,32 +381,17 @@ def run_muse(
                 images=tuple(photo_attachments),
                 max_output_tokens=MUSE_MAX_OUTPUT_TOKENS,
             )
-            try:
-                result = own_adapter.analyze(request)
-            except ProviderError as exc:
-                # Failed calls produce no inference, so they are not billed;
-                # the call itself still counts against max_calls.
-                services.record_execution(
-                    job_id,
-                    worker_id,
-                    stage=Stage.Muse,
-                    provider=Provider.BASETEN,
-                    model_id=own_adapter.model_id,
-                    photo_ids=[str(photo.pk)],
-                    ok=False,
-                    usage={"failed_call_not_billed": True},
-                    cost_usd=Decimal("0.0000"),
-                    error_code=type(exc).__name__,
-                    error_detail=str(exc)[:500],
-                )
-                services.fail_job(job_id, worker_id, type(exc).__name__, str(exc)[:500])
-                raise
-            usage = result.usage
-            cost = (
-                Decimal(str(usage.estimated_cost_usd))
-                if usage.estimated_cost_usd is not None
-                else None
+            result, attempts, cost, settled = _guarded_analyze(
+                job_id,
+                worker_id,
+                own_adapter,
+                request,
+                stage=Stage.Muse,
+                provider=Provider.BASETEN,
+                model_id=own_adapter.model_id,
+                photo_ids=[str(photo.pk)],
             )
+            usage = result.usage
             seen, warnings, fatal = validate_batch(result.observations, expected, done)
             execution = services.record_execution(
                 job_id,
@@ -304,6 +400,7 @@ def run_muse(
                 provider=Provider.BASETEN,
                 model_id=result.model,
                 photo_ids=[str(photo.pk)],
+                attempts=attempts,
                 latency_ms=usage.latency_ms,
                 usage={
                     "prompt_version": usage.prompt_version,
@@ -340,6 +437,9 @@ def run_muse(
                 if created:
                     stored += 1
                 done.add((cid, str(photo.pk)))
+            # Spend for this batch is already booked; the observations
+            # above are kept so a resumed job never re-pays for them.
+            _raise_if_halted(settled, job_id, Stage.Muse)
     return stored
 
 
@@ -433,30 +533,17 @@ def run_sam(
             image_height=photo.height,
             concept=concept,
         )
-        try:
-            result = own_adapter.analyze(request)
-        except ProviderError as exc:
-            services.record_execution(
-                job_id,
-                worker_id,
-                stage=Stage.SAM,
-                provider=Provider.META,
-                model_id=own_adapter.model_id,
-                photo_ids=[str(photo.id)],
-                ok=False,
-                usage={"failed_call_not_billed": True},
-                cost_usd=Decimal("0.0000"),
-                error_code=type(exc).__name__,
-                error_detail=str(exc)[:500],
-            )
-            services.fail_job(job_id, worker_id, type(exc).__name__, str(exc)[:500])
-            raise
-        usage = result.usage
-        cost = (
-            Decimal(str(usage.estimated_cost_usd))
-            if usage.estimated_cost_usd is not None
-            else None
+        result, attempts, cost, settled = _guarded_analyze(
+            job_id,
+            worker_id,
+            own_adapter,
+            request,
+            stage=Stage.SAM,
+            provider=Provider.META,
+            model_id=own_adapter.model_id,
+            photo_ids=[str(photo.id)],
         )
+        usage = result.usage
         execution = services.record_execution(
             job_id,
             worker_id,
@@ -464,6 +551,7 @@ def run_sam(
             provider=Provider.META,
             model_id=result.model,
             photo_ids=[str(photo.id)],
+            attempts=attempts,
             latency_ms=usage.latency_ms,
             usage={
                 "pricing_version": usage.pricing_version,
@@ -499,6 +587,9 @@ def run_sam(
             execution=execution,
         )
         localized += 1
+        # Spend is booked; the SAM observation above is kept so a
+        # resumed job never re-pays for this localization.
+        _raise_if_halted(settled, job_id, Stage.SAM)
     return localized
 
 
@@ -686,31 +777,18 @@ def run_recheck(
                 ),
                 max_output_tokens=MUSE_MAX_OUTPUT_TOKENS,
             )
-            try:
-                result = own_adapter.analyze(request)
-            except ProviderError as exc:
-                services.record_execution(
-                    job_id,
-                    worker_id,
-                    stage=Stage.RECHECK,
-                    provider=Provider.BASETEN,
-                    model_id=own_adapter.model_id,
-                    photo_ids=[str(photo.id)],
-                    ok=False,
-                    usage={"failed_call_not_billed": True},
-                    cost_usd=Decimal("0.0000"),
-                    error_code=type(exc).__name__,
-                    error_detail=str(exc)[:500],
-                )
-                services.fail_job(job_id, worker_id, type(exc).__name__, str(exc)[:500])
-                raise
+            result, attempts, cost, settled = _guarded_analyze(
+                job_id,
+                worker_id,
+                own_adapter,
+                request,
+                stage=Stage.RECHECK,
+                provider=Provider.BASETEN,
+                model_id=own_adapter.model_id,
+                photo_ids=[str(photo.id)],
+            )
             calls += 1
             usage = result.usage
-            cost = (
-                Decimal(str(usage.estimated_cost_usd))
-                if usage.estimated_cost_usd is not None
-                else None
-            )
             seen, warnings, fatal = validate_batch(
                 result.observations, expected, covered
             )
@@ -721,6 +799,7 @@ def run_recheck(
                 provider=Provider.BASETEN,
                 model_id=result.model,
                 photo_ids=[str(photo.id)],
+                attempts=attempts,
                 latency_ms=usage.latency_ms,
                 usage={
                     "prompt_version": usage.prompt_version,
@@ -762,6 +841,9 @@ def run_recheck(
                 )
                 if created:
                     covered.add((cid, str(photo.pk)))
+            # Spend is booked; the recheck observations above are kept
+            # so a resumed job never re-pays for this crop.
+            _raise_if_halted(settled, job_id, Stage.RECHECK)
     services.record_execution(
         job_id,
         worker_id,

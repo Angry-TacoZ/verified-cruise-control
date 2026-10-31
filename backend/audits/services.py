@@ -184,11 +184,24 @@ def _claim_once(worker_id: str) -> AuditJob | None:
         )
         if stale is None:
             return None
+        # Reclaim resets any outstanding reservation: the previous
+        # worker is presumed dead, and its in-flight call (if any) will
+        # never settle. Unavoidable ambiguity: a call that completed
+        # server-side microseconds before the crash may go unbooked, and
+        # a late settle from a merely-slow worker still books its spend
+        # without pausing another owner's job. No exactly-once billing
+        # is claimed: providers offer no idempotency keys here.
         rows = AuditJob.objects.filter(
             pk=stale.pk,
             status=JobStatus.RUNNING,
             heartbeat_at__lt=cutoff,
-        ).update(worker_id=worker_id, leased_at=now, heartbeat_at=now)
+        ).update(
+            worker_id=worker_id,
+            leased_at=now,
+            heartbeat_at=now,
+            reserved_calls=0,
+            reserved_spend_usd=Decimal("0.0000"),
+        )
         if not rows:
             return None
         stale.refresh_from_db()
@@ -220,12 +233,16 @@ def _assert_writable(job: AuditJob, worker_id: str) -> None:
 
 
 def _check_caps(job: AuditJob) -> None:
-    """Raise (without pausing) when a cap is already reached."""
-    if job.calls_made >= job.max_calls:
+    """Raise (without pausing) when a cap is already reached.
+
+    Caps govern model calls only; local pipeline stages never consume
+    the model allowance.
+    """
+    if job.model_calls_made >= job.max_calls:
         raise BudgetExceededError(
             f"job {job.pk} hit call cap",
             code="call_cap",
-            detail=f"reached max calls ({job.max_calls})",
+            detail=f"reached max model calls ({job.max_calls})",
         )
     if job.spend_usd >= job.spend_cap_usd:
         raise BudgetExceededError(
@@ -257,6 +274,128 @@ def _pause(job: AuditJob, code: str, detail: str) -> None:
     job.refresh_from_db()
 
 
+def reserve_call(
+    job_id, worker_id: str, *, max_attempts: int, reserve_usd: Decimal
+) -> None:
+    """Atomically reserve worst-case attempts + spend headroom for one
+    provider call. The conditional UPDATE is the race guard: concurrent
+    reservers converge on a single winner, and losers fail closed
+    without pausing the job (a lost race is contention, not a cap hit).
+    Cap breaches pause with an exact code. Must precede every provider
+    call; every reservation is released by exactly one settle_call.
+    """
+    job = AuditJob.objects.get(pk=job_id)
+    _assert_writable(job, worker_id)
+    rows = AuditJob.objects.filter(
+        pk=job.pk,
+        status=JobStatus.RUNNING,
+        worker_id=worker_id,
+        reserved_calls=0,
+        model_calls_made__lte=F("max_calls") - max_attempts,
+        spend_usd__lte=F("spend_cap_usd") - reserve_usd,
+    ).update(reserved_calls=max_attempts, reserved_spend_usd=reserve_usd)
+    if rows:
+        return
+    job.refresh_from_db()
+    _assert_writable(job, worker_id)
+    if job.reserved_calls > 0:
+        raise BudgetExceededError(
+            f"job {job.pk} already has a provider call in flight",
+            code="contention",
+            detail="another reservation is outstanding",
+        )
+    if job.model_calls_made + max_attempts > job.max_calls:
+        left = job.max_calls - job.model_calls_made
+        _pause(
+            job,
+            "call_cap",
+            f"next call needs {max_attempts} attempt(s); {left} left of {job.max_calls}",
+        )
+        raise BudgetExceededError(
+            f"job {job.pk} hit call cap",
+            code="call_cap",
+            detail="next call would exceed the model-call allowance",
+        )
+    if job.spend_usd + reserve_usd > job.spend_cap_usd:
+        _pause(
+            job,
+            "spend_cap",
+            f"spend ${job.spend_usd} + ${reserve_usd} headroom exceeds cap "
+            f"${job.spend_cap_usd}",
+        )
+        raise BudgetExceededError(
+            f"job {job.pk} hit spend cap",
+            code="spend_cap",
+            detail="next call would exceed the spend cap",
+        )
+    raise BudgetExceededError(
+        f"job {job.pk} lost a reservation race",
+        code="contention",
+        detail="another reserver won; retry the stage",
+    )
+
+
+def settle_call(
+    job_id,
+    worker_id: str,
+    *,
+    attempts: int,
+    cost_usd: Decimal | None,
+    ok: bool = True,
+) -> AuditJob:
+    """Book actual attempts + cost and release the reservation. Always
+    books (spend is real even if the job was cancelled or reclaimed
+    mid-call) but never overwrites a non-running status: pauses apply
+    only to RUNNING jobs owned by the settler. The reservation is
+    released only by its owner, so a stale worker's late settle can
+    never zero a new owner's hold. Unknown cost pauses a running job
+    instead of treating the spend as zero — unless ``ok`` is False,
+    in which case the caller fails the job with the provider's code
+    (the unknown spend stays visible in ``unknown_cost_calls`` and the
+    failed execution row). Returns the refreshed job."""
+    with transaction.atomic():
+        AuditJob.objects.filter(pk=job_id).update(
+            model_calls_made=F("model_calls_made") + attempts,
+        )
+        if cost_usd is None:
+            AuditJob.objects.filter(pk=job_id).update(
+                unknown_cost_calls=F("unknown_cost_calls") + 1
+            )
+        else:
+            AuditJob.objects.filter(pk=job_id).update(
+                spend_usd=F("spend_usd") + cost_usd
+            )
+        AuditJob.objects.filter(pk=job_id, worker_id=worker_id).update(
+            reserved_calls=0,
+            reserved_spend_usd=Decimal("0.0000"),
+        )
+    job = AuditJob.objects.get(pk=job_id)
+    if job.status != JobStatus.RUNNING or job.worker_id != worker_id:
+        return job
+    if not ok:
+        return job
+    if cost_usd is None:
+        _pause(
+            job,
+            "unknown_cost",
+            "a provider call settled with unknown cost; refusing to continue blind",
+        )
+        return job
+    if job.spend_usd >= job.spend_cap_usd:
+        _pause(
+            job,
+            "spend_cap",
+            f"spend ${job.spend_usd} reached cap ${job.spend_cap_usd}",
+        )
+    elif job.model_calls_made >= job.max_calls:
+        _pause(
+            job,
+            "call_cap",
+            f"reached max model calls ({job.max_calls})",
+        )
+    return job
+
+
 def record_execution(
     job_id,
     worker_id: str,
@@ -266,73 +405,36 @@ def record_execution(
     model_id: str = "",
     photo_ids: list | None = None,
     ok: bool = True,
+    attempts: int = 1,
     latency_ms: int | None = None,
     usage: dict | None = None,
     cost_usd: Decimal | None = None,
     error_code: str = "",
     error_detail: str = "",
 ) -> AuditExecution:
-    """Append a ledger row and charge it against the job budget.
-
-    Unknown cost (``cost_usd=None`` on a provider call) pauses the job
-    instead of treating the spend as zero. Local stages pass no cost and
-    are never charged. Pauses and their raises happen after the ledger
-    write commits, so the halted state is never rolled back.
+    """Append a ledger row. Budget charging is separate (reserve before
+    the call, settle after): rows are recorded even when the job was
+    cancelled or reclaimed mid-call, because spend and attempts are real.
+    Ownership is deliberately not asserted here; stages enforce liveness
+    at batch boundaries, and observation writes are first-wins, so a
+    stale worker can never overwrite another worker's results.
     """
-    from .models import Provider
-
     job = AuditJob.objects.get(pk=job_id)
-    check_budget(job, worker_id)
-    try:
-        with transaction.atomic():
-            job = AuditJob.objects.get(pk=job_id)
-            _assert_writable(job, worker_id)
-            _check_caps(job)
-            execution = AuditExecution.objects.create(
-                job=job,
-                stage=stage,
-                provider=provider,
-                model_id=model_id,
-                photo_ids=photo_ids or [],
-                ok=ok,
-                latency_ms=latency_ms,
-                usage=usage or {},
-                cost_usd=cost_usd,
-                error_code=error_code,
-                error_detail=error_detail,
-            )
-            AuditJob.objects.filter(pk=job.pk).update(calls_made=F("calls_made") + 1)
-            if provider == Provider.LOCAL:
-                return execution
-            if cost_usd is None:
-                AuditJob.objects.filter(pk=job.pk).update(
-                    unknown_cost_calls=F("unknown_cost_calls") + 1
-                )
-            else:
-                AuditJob.objects.filter(pk=job.pk).update(
-                    spend_usd=F("spend_usd") + cost_usd
-                )
-    except BudgetExceededError as exc:
-        _pause(job, exc.code, exc.detail)
-        raise
-    job.refresh_from_db()
-    if provider != Provider.LOCAL and cost_usd is None:
-        _pause(
-            job,
-            "unknown_cost",
-            f"provider {provider} call has unknown cost; refusing to continue blind",
-        )
-        raise BudgetExceededError(
-            f"job {job.pk} hit unknown cost",
-            code="unknown_cost",
-            detail="provider call has unknown cost",
-        )
-    if provider != Provider.LOCAL and job.spend_usd >= job.spend_cap_usd:
-        _pause(
-            job,
-            "spend_cap",
-            f"spend ${job.spend_usd} reached cap ${job.spend_cap_usd}",
-        )
+    execution = AuditExecution.objects.create(
+        job=job,
+        stage=stage,
+        provider=provider,
+        model_id=model_id,
+        photo_ids=photo_ids or [],
+        ok=ok,
+        attempts=attempts,
+        latency_ms=latency_ms,
+        usage=usage or {},
+        cost_usd=cost_usd,
+        error_code=error_code,
+        error_detail=error_detail,
+    )
+    AuditJob.objects.filter(pk=job.pk).update(calls_made=F("calls_made") + 1)
     return execution
 
 

@@ -41,6 +41,7 @@ class AuditJobOut(Schema):
     pricing_version: str
     max_calls: int
     calls_made: int
+    model_calls_made: int
     spend_cap_usd: str
     spend_usd: str
     unknown_cost_calls: int
@@ -99,6 +100,7 @@ class ExecutionOut(Schema):
     model_id: str
     photo_ids: list
     ok: bool
+    attempts: int
     latency_ms: int | None
     usage: dict
     cost_usd: str | None
@@ -123,6 +125,7 @@ def _serialize_job(job: AuditJob) -> dict:
         "pricing_version": job.pricing_version,
         "max_calls": job.max_calls,
         "calls_made": job.calls_made,
+        "model_calls_made": job.model_calls_made,
         "spend_cap_usd": str(job.spend_cap_usd),
         "spend_usd": str(job.spend_usd),
         "unknown_cost_calls": job.unknown_cost_calls,
@@ -220,6 +223,7 @@ def app_get_evidence(request, job_id: uuid.UUID):
                 "model_id": execution.model_id,
                 "photo_ids": execution.photo_ids,
                 "ok": execution.ok,
+                "attempts": execution.attempts,
                 "latency_ms": execution.latency_ms,
                 "usage": execution.usage,
                 "cost_usd": (

@@ -138,6 +138,10 @@ def _audit_decimal(name: str, default: str):
 
 AUDIT_MAX_CALLS_PER_JOB = _audit_int("VCC_AUDIT_MAX_CALLS", 60)
 AUDIT_SPEND_CAP_USD = _audit_decimal("VCC_AUDIT_SPEND_CAP_USD", "2.00")
+# Headroom quantum reserved before every provider call: a call proceeds
+# only when spend + quantum fits under the cap. This bounds the *next*
+# call's headroom; it is not a prediction of actual provider billing.
+AUDIT_RESERVE_PER_CALL_USD = _audit_decimal("VCC_AUDIT_RESERVE_PER_CALL", "0.50")
 AUDIT_MAX_CROPS_PER_JOB = _audit_int("VCC_AUDIT_MAX_CROPS", 12)
 AUDIT_MAX_RECHECKS_PER_JOB = _audit_int("VCC_AUDIT_MAX_RECHECKS", 12)
 AUDIT_WORKER_HEARTBEAT_S = _audit_int("VCC_AUDIT_HEARTBEAT_S", 300)

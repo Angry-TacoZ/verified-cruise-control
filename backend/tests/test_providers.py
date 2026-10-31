@@ -314,6 +314,35 @@ def test_muse_analyze_rejects_truncated_output():
         )
 
 
+def test_adapter_tracks_last_attempts():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"error": "slow"})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps({"observations": [], "meta": {}})
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+            },
+        )
+
+    adapter = BasetenMuseAdapter(api_key="bt-test")
+    assert adapter.last_attempts == 0
+    adapter.analyze(muse_request(), client=mock_client(handler), sleep=lambda s: None)
+    assert adapter.last_attempts == 2
+    assert adapter.live_calls_attempted == 2
+
+
 def test_muse_analyze_retries_rate_limit_then_succeeds():
     calls = []
 

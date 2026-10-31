@@ -142,6 +142,7 @@ class ProviderAdapter(ABC):
         if model_id is not None:
             self.model_id = model_id
         self.live_calls_attempted = 0
+        self.last_attempts = 0
 
     @property
     def is_configured(self) -> bool:

@@ -71,6 +71,7 @@ export interface AuditJob {
   pricing_version: string;
   max_calls: number;
   calls_made: number;
+  model_calls_made: number;
   spend_cap_usd: string;
   spend_usd: string;
   unknown_cost_calls: number;
@@ -134,6 +135,7 @@ export interface AuditExecution {
   model_id: string;
   photo_ids: string[];
   ok: boolean;
+  attempts: number;
   latency_ms: number | null;
   usage: Record<string, unknown>;
   cost_usd: string | null;

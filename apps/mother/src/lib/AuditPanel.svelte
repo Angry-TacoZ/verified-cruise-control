@@ -218,7 +218,7 @@
         {/if}
       </div>
       <div class="mt-2 text-slate-600">
-        {latest.calls_made}/{latest.max_calls} calls · {money(latest.spend_usd)} of
+        {latest.model_calls_made}/{latest.max_calls} model calls · {money(latest.spend_usd)} of
         {money(latest.spend_cap_usd)} cap{#if latest.unknown_cost_calls > 0}
           · {latest.unknown_cost_calls} unknown-cost call(s){/if}
         · {latest.observation_count} observations · {latest.crop_count} crops
@@ -322,6 +322,7 @@
             <li class="rounded border border-slate-200 bg-white p-2">
               {exec.stage} · {exec.provider}{#if exec.model_id}/{exec.model_id}{/if}
               · {exec.ok ? 'ok' : `failed (${exec.error_code})`} ·
+              {exec.attempts} attempt{exec.attempts === 1 ? '' : 's'} ·
               {exec.cost_usd === null ? 'cost unknown' : money(exec.cost_usd)}
             </li>
           {/each}

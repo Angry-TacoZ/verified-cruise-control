@@ -423,6 +423,7 @@ class MetaSamAdapter(ProviderAdapter):
                                 response.read().decode("utf-8", errors="replace"),
                             )
                         else:
+                            self.last_attempts = retries + 1
                             text = parse_sse_output_text(response.iter_lines())
                             records = parse_segmentation_records(
                                 text, request.image_width, request.image_height
@@ -448,6 +449,7 @@ class MetaSamAdapter(ProviderAdapter):
             if client is None:
                 owned.close()
         assert last_error is not None
+        self.last_attempts = retries + 1
         self._record(request, retries, started, last_error)
         raise last_error
 
