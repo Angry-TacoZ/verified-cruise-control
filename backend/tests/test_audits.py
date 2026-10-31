@@ -871,3 +871,14 @@ def test_full_pipeline_completes_with_findings(listing, photos, enabled):
     done.refresh_from_db()
     assert done.spend_usd > Decimal("0.0000")
     assert done.unknown_cost_calls == 0
+    # Ledger math: job spend equals the sum of known execution costs.
+    ledger_sum = sum(
+        (
+            e.cost_usd
+            for e in AuditExecution.objects.filter(job=job).exclude(
+                cost_usd__isnull=True
+            )
+        ),
+        Decimal("0.0000"),
+    )
+    assert done.spend_usd == ledger_sum
