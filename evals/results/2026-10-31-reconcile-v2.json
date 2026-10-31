@@ -1,0 +1,107 @@
+{
+  "eval": "reconcile",
+  "rule": "reconcile v2 conservative (audits.pipeline.reconcile_claim)",
+  "cases_version": "v2",
+  "passed": 14,
+  "total": 14,
+  "cases": [
+    {
+      "id": "all-absent",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "no confirmed sighting in 2 photo observation(s); absence from photos is not evidence of absence",
+      "pass": true
+    },
+    {
+      "id": "sam-confirmed",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "Muse sighting confirmed by SAM localization (photo evidence only; not capability proof)",
+      "pass": true
+    },
+    {
+      "id": "recheck-confirmed",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "crop recheck confirmed the feature (photo evidence only; not capability proof)",
+      "pass": true
+    },
+    {
+      "id": "needs-other-view",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "no confirmed sighting in 2 photo observation(s); absence from photos is not evidence of absence",
+      "pass": true
+    },
+    {
+      "id": "muse-sam-disagree",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "no confirmed sighting in 1 photo observation(s); absence from photos is not evidence of absence",
+      "pass": true
+    },
+    {
+      "id": "lonely-present",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "no confirmed sighting in 1 photo observation(s); absence from photos is not evidence of absence",
+      "pass": true
+    },
+    {
+      "id": "unclear-no-flag",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "no confirmed sighting in 1 photo observation(s); absence from photos is not evidence of absence",
+      "pass": true
+    },
+    {
+      "id": "empty",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "no observations for this claim",
+      "pass": true
+    },
+    {
+      "id": "absent-plus-sam-absent",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "no confirmed sighting in 2 photo observation(s); absence from photos is not evidence of absence",
+      "pass": true
+    },
+    {
+      "id": "recheck-absent-mixed",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "no confirmed sighting in 1 photo observation(s); absence from photos is not evidence of absence",
+      "pass": true
+    },
+    {
+      "id": "authoritative-absent",
+      "expected": "contradicted",
+      "got": "contradicted",
+      "summary": "authoritative vehicle-specific evidence conflicts with the claim",
+      "pass": true
+    },
+    {
+      "id": "authoritative-present",
+      "expected": "verified",
+      "got": "verified",
+      "summary": "authoritative vehicle-specific evidence establishes the feature",
+      "pass": true
+    },
+    {
+      "id": "intrinsic-software-claim",
+      "expected": "not_visually_verifiable",
+      "got": "not_visually_verifiable",
+      "summary": "claim needs nonvisual confirmation; photos cannot resolve it",
+      "pass": true
+    },
+    {
+      "id": "intrinsic-history-claim",
+      "expected": "not_visually_verifiable",
+      "got": "not_visually_verifiable",
+      "summary": "claim needs nonvisual confirmation; photos cannot resolve it",
+      "pass": true
+    }
+  ]
+}

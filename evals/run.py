@@ -41,8 +41,12 @@ FIXTURES = REPO / "fixtures" / "synthetic-listings" / "photos"
 MIME = {".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 
 
+GOLDENS_VERSION = "v2"
+
+
 def run_reconcile() -> dict:
-    goldens = json.loads((CASES / "reconcile_goldens.json").read_text())
+    path = REPO / "evals" / "cases" / GOLDENS_VERSION / "reconcile_goldens.json"
+    goldens = json.loads(path.read_text())
     photo_ids = [uuid.uuid4() for _ in range(4)]
     scored = []
     for case in goldens["cases"]:
@@ -55,7 +59,7 @@ def run_reconcile() -> dict:
             )
             for item in case["observations"]
         ]
-        state, summary = reconcile_claim(rows)
+        state, summary = reconcile_claim(rows, case.get("claim", ""))
         scored.append(
             {
                 "id": case["id"],
@@ -153,7 +157,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.eval == "reconcile":
         report = run_reconcile()
-        name = f"{date.today().isoformat()}-reconcile-v1.json"
+        name = f"{date.today().isoformat()}-reconcile-{GOLDENS_VERSION}.json"
     else:
         report = run_muse_live(args.max_spend)
         name = f"{date.today().isoformat()}-muse-{PROMPT_VERSION}.json"

@@ -7,6 +7,7 @@ pipeline completes it.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
@@ -565,50 +566,89 @@ def run_recheck(
     return calls
 
 
-def reconcile_claim(observations: list[Observation]) -> tuple[str, str]:
+# Claims matching these patterns intrinsically need nonvisual confirmation
+# (software state, history, coverage): no photograph can establish them, so
+# unresolved cases route to NOT_VISUALLY_VERIFIABLE instead of generic
+# INSUFFICIENT. Deliberately narrow v1 heuristic: photo evidence that does
+# show the claim still wins (checked first), and a wrong label here only
+# changes human-review guidance, never a verification verdict.
+INTRINSICALLY_NONVISUAL = re.compile(
+    r"software|firmware|version|update|recall|calibrat|service history|"
+    r"service records|warranty|subscription|activation|odometer|title status|"
+    r"accident history",
+    re.IGNORECASE,
+)
+
+
+def reconcile_claim(
+    observations: list[Observation], claim_text: str = ""
+) -> tuple[str, str]:
     """Deterministic five-state rule for one claim (pure, testable).
 
-    VERIFIED is never assigned: photos alone cannot establish a feature,
-    authoritative documentation would be required. Returns (state, summary).
+    Conservative by design (Rule E): missing visible evidence is never
+    negative, so photo-only audits can only reach VISUALLY_SUPPORTED,
+    INSUFFICIENT, or NOT_VISUALLY_VERIFIABLE. CONTRADICTED and VERIFIED
+    require authoritative vehicle-specific evidence, which v1 does not
+    ingest (the channel exists for hand-supplied docs evidence).
+    Returns (state, summary).
     """
-    by_source: dict[str, list[Observation]] = {}
-    for obs in observations:
-        by_source.setdefault(obs.source, []).append(obs)
-    muse = by_source.get(ObservationSource.Muse, [])
+    authoritative = [
+        obs for obs in observations if obs.source == ObservationSource.AUTHORITATIVE
+    ]
+    if authoritative:
+        verdicts = {obs.verdict for obs in authoritative}
+        if verdicts == {Verdict.PRESENT}:
+            return (
+                EvidenceState.VERIFIED,
+                "authoritative vehicle-specific evidence establishes the feature",
+            )
+        if verdicts == {Verdict.ABSENT}:
+            return (
+                EvidenceState.CONTRADICTED,
+                "authoritative vehicle-specific evidence conflicts with the claim",
+            )
+        return (
+            EvidenceState.INSUFFICIENT,
+            "authoritative evidence disagrees with itself; human review needed",
+        )
     present_sources = {
         obs.source for obs in observations if obs.verdict == Verdict.PRESENT
     }
-    any_present = bool(present_sources)
-    muse_absent_all = bool(muse) and all(o.verdict == Verdict.ABSENT for o in muse)
-    all_muse_unclear = bool(muse) and all(o.verdict == Verdict.UNCLEAR for o in muse)
-    needs_other_view = any(o.extra.get("needs_other_view") for o in muse)
-    n_photos = len({o.photo_id for o in muse})
-
-    if muse_absent_all and not any_present:
-        return (
-            EvidenceState.CONTRADICTED,
-            f"feature absent in all {n_photos} photo(s); no source saw it",
-        )
-    if ObservationSource.SAM in present_sources and (
-        ObservationSource.Muse in present_sources
+    if ObservationSource.Muse in present_sources and (
+        ObservationSource.SAM in present_sources
     ):
         return (
             EvidenceState.VISUALLY_SUPPORTED,
-            "Muse sighting confirmed by SAM localization",
+            (
+                "Muse sighting confirmed by SAM localization "
+                "(photo evidence only; not capability proof)"
+            ),
         )
     if ObservationSource.RECHECK in present_sources:
         return (
             EvidenceState.VISUALLY_SUPPORTED,
-            "crop recheck confirmed the feature",
+            (
+                "crop recheck confirmed the feature "
+                "(photo evidence only; not capability proof)"
+            ),
         )
-    if all_muse_unclear and needs_other_view and not any_present:
+    if claim_text and INTRINSICALLY_NONVISUAL.search(claim_text):
         return (
             EvidenceState.NOT_VISUALLY_VERIFIABLE,
-            "photos cannot resolve this; another evidence form is needed",
+            "claim needs nonvisual confirmation; photos cannot resolve it",
+        )
+    n_muse = sum(1 for obs in observations if obs.source == ObservationSource.Muse)
+    if n_muse:
+        return (
+            EvidenceState.INSUFFICIENT,
+            (
+                f"no confirmed sighting in {n_muse} photo observation(s); "
+                "absence from photos is not evidence of absence"
+            ),
         )
     return (
         EvidenceState.INSUFFICIENT,
-        "signals disagree or are too weak to decide",
+        "no observations for this claim",
     )
 
 
@@ -623,7 +663,7 @@ def run_reconcile(job_id, worker_id: str) -> int:
         observations = list(
             Observation.objects.filter(job=job, claim_key=claim).order_by("created_at")
         )
-        state, summary = reconcile_claim(observations)
+        state, summary = reconcile_claim(observations, claim)
         AuditFinding.objects.update_or_create(
             job=job,
             claim_key=claim,

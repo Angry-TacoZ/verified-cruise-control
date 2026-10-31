@@ -742,14 +742,11 @@ def _obs_row(job, photo, source, verdict, claim="adaptive cruise control", **ext
     )
 
 
-def test_reconcile_contradicted(listing, photos):
-    job = _running_job(listing)
-    rows = [
-        _obs_row(job, photos[0], ObservationSource.Muse, Verdict.ABSENT),
-        _obs_row(job, photos[1], ObservationSource.Muse, Verdict.ABSENT),
-    ]
-    state, _ = pipeline.reconcile_claim(rows)
-    assert state == "contradicted"
+# NOTE: absence-in-photos previously asserted CONTRADICTED here. That was
+# the Finding 2 defect (Rule E: missing evidence is not negative). Coverage
+# moved to test_conservative_no_radar_in_exteriors (insufficient) and
+# test_conservative_authoritative_discrepancy (contradicted only via
+# authoritative evidence).
 
 
 def test_reconcile_supported_via_sam(listing, photos):
@@ -773,19 +770,11 @@ def test_reconcile_supported_via_recheck(listing, photos):
     assert state == "visually_supported"
 
 
-def test_reconcile_not_visually_verifiable(listing, photos):
-    job = _running_job(listing)
-    rows = [
-        _obs_row(
-            job,
-            photos[0],
-            ObservationSource.Muse,
-            Verdict.UNCLEAR,
-            needs_other_view=True,
-        ),
-    ]
-    state, _ = pipeline.reconcile_claim(rows)
-    assert state == "not_visually_verifiable"
+# NOTE: needs_other_view previously asserted NOT_VISUALLY_VERIFIABLE here.
+# That was the Finding 2 defect: needing another photograph is still a
+# visual question. Coverage moved to
+# test_conservative_ambiguous_housing_needs_photo (insufficient) and
+# test_conservative_nonvisual_claim (intrinsically nonvisual claims only).
 
 
 def test_reconcile_insufficient_on_disagreement(listing, photos):
@@ -809,6 +798,143 @@ def test_reconcile_never_verified(listing, photos):
     assert state != "verified"
 
 
+def _conservative(job, photos, specs, claim="adaptive cruise control"):
+    rows = [
+        _obs_row(job, photos[photo], source, verdict, claim, **extra)
+        for photo, source, verdict, extra in specs
+    ]
+    return pipeline.reconcile_claim(rows, claim)
+
+
+def test_conservative_no_radar_in_exteriors(listing, photos):
+    """Absence in exterior shots is not a contradiction (Rule E)."""
+    job = _running_job(listing)
+    M = ObservationSource.Muse
+    state, _ = _conservative(
+        job,
+        photos,
+        [(0, M, Verdict.ABSENT, {}), (1, M, Verdict.ABSENT, {})],
+    )
+    assert state == "insufficient_evidence"
+
+
+def test_conservative_buttons_without_confirmed_acc(listing, photos):
+    """Buttons spotted but SAM cannot localize ACC: unconfirmed."""
+    job = _running_job(listing)
+    M, S = ObservationSource.Muse, ObservationSource.SAM
+    state, _ = _conservative(
+        job,
+        photos,
+        [(0, M, Verdict.PRESENT, {}), (0, S, Verdict.ABSENT, {})],
+    )
+    assert state == "insufficient_evidence"
+
+
+def test_conservative_no_relevant_photos(listing, photos):
+    job = _running_job(listing)
+    M = ObservationSource.Muse
+    state, _ = _conservative(
+        job,
+        photos,
+        [(0, M, Verdict.UNCLEAR, {}), (1, M, Verdict.UNCLEAR, {})],
+    )
+    assert state == "insufficient_evidence"
+
+
+def test_conservative_irrelevant_photos(listing, photos):
+    job = _running_job(listing)
+    M = ObservationSource.Muse
+    state, _ = _conservative(
+        job,
+        photos,
+        [(0, M, Verdict.ABSENT, {}), (1, M, Verdict.ABSENT, {})],
+        claim="night vision assist",
+    )
+    assert state == "insufficient_evidence"
+
+
+def test_conservative_positive_plus_inconclusive(listing, photos):
+    """One unconfirmed sighting among inconclusive views decides nothing."""
+    job = _running_job(listing)
+    M, S = ObservationSource.Muse, ObservationSource.SAM
+    state, _ = _conservative(
+        job,
+        photos,
+        [
+            (0, M, Verdict.PRESENT, {}),
+            (1, M, Verdict.UNCLEAR, {}),
+            (0, S, Verdict.UNCLEAR, {}),
+        ],
+    )
+    assert state == "insufficient_evidence"
+
+
+def test_conservative_conflicting_observations(listing, photos):
+    job = _running_job(listing)
+    M = ObservationSource.Muse
+    state, _ = _conservative(
+        job,
+        photos,
+        [(0, M, Verdict.PRESENT, {}), (1, M, Verdict.ABSENT, {})],
+    )
+    assert state == "insufficient_evidence"
+
+
+def test_conservative_authoritative_discrepancy(listing, photos):
+    """Only authoritative vehicle-specific evidence can contradict/verify."""
+    job = _running_job(listing)
+    A = ObservationSource.AUTHORITATIVE
+    state, summary = _conservative(job, photos, [(0, A, Verdict.ABSENT, {})])
+    assert state == "contradicted"
+    assert "authoritative" in summary
+    state, _ = _conservative(
+        job, photos, [(0, A, Verdict.PRESENT, {})], claim="lane keeping assist"
+    )
+    assert state == "verified"
+
+
+def test_conservative_nonvisual_claim(listing, photos):
+    job = _running_job(listing)
+    M = ObservationSource.Muse
+    state, _ = _conservative(
+        job,
+        photos,
+        [(0, M, Verdict.UNCLEAR, {}), (1, M, Verdict.UNCLEAR, {})],
+        claim="driver assistance software version 3.2",
+    )
+    assert state == "not_visually_verifiable"
+    # Photo evidence can still confirm even an intrinsically nonvisual claim.
+    state, _ = _conservative(
+        job,
+        photos,
+        [
+            (0, M, Verdict.PRESENT, {}),
+            (0, ObservationSource.SAM, Verdict.PRESENT, {}),
+        ],
+        claim="firmware update 2.1",
+    )
+    assert state == "visually_supported"
+
+
+def test_conservative_lane_centering_not_borrowed():
+    """Lane-keeping evidence must not resolve a lane-centering claim."""
+    state, _ = pipeline.reconcile_claim([], "lane centering")
+    assert state == "insufficient_evidence"
+
+
+def test_conservative_ambiguous_housing_needs_photo(listing, photos):
+    """Needing another photograph is still a visual question, not a
+    nonvisual one."""
+    job = _running_job(listing)
+    M = ObservationSource.Muse
+    state, _ = _conservative(
+        job,
+        photos,
+        [(0, M, Verdict.UNCLEAR, {"needs_other_view": True})],
+    )
+    assert state == "insufficient_evidence"
+
+
 def test_run_reconcile_persists_findings_and_completes(listing, photos):
     from audits.models import AuditFinding
 
@@ -818,7 +944,7 @@ def test_run_reconcile_persists_findings_and_completes(listing, photos):
     assert pipeline.run_reconcile(job.pk, "w1") == 2
     findings = {f.claim_key: f.state for f in AuditFinding.objects.filter(job=job)}
     assert findings == {
-        "adaptive cruise control": "contradicted",
+        "adaptive cruise control": "insufficient_evidence",
         "lane keeping assist": "insufficient_evidence",
     }
     assert (
@@ -853,7 +979,7 @@ def test_full_pipeline_completes_with_findings(listing, photos, enabled):
     findings = {f.claim_key: f.state for f in AuditFinding.objects.filter(job=job)}
     assert findings == {
         "adaptive cruise control": "visually_supported",
-        "lane keeping assist": "contradicted",
+        "lane keeping assist": "insufficient_evidence",
     }
     stages = list(
         AuditExecution.objects.filter(job=job)

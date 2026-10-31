@@ -41,6 +41,7 @@ class ObservationSource(models.TextChoices):
     Muse = "muse", "Muse"
     SAM = "sam", "SAM"
     RECHECK = "recheck", "Crop recheck"
+    AUTHORITATIVE = "authoritative", "Authoritative vehicle-specific evidence"
 
 
 class Verdict(models.TextChoices):

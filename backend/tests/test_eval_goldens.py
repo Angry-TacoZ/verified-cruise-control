@@ -14,7 +14,7 @@ GOLDENS = json.loads(
         Path(__file__).resolve().parents[2]
         / "evals"
         / "cases"
-        / "v1"
+        / "v2"
         / "reconcile_goldens.json"
     ).read_text(encoding="utf-8")
 )
@@ -33,7 +33,7 @@ def test_reconcile_goldens():
             )
             for item in case["observations"]
         ]
-        state, _ = reconcile_claim(rows)
+        state, _ = reconcile_claim(rows, case.get("claim", ""))
         if state != case["expected"]:
             failures.append(f"{case['id']}: expected {case['expected']}, got {state}")
     assert failures == []
