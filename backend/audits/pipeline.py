@@ -87,22 +87,52 @@ def load_images(photos: list[Photograph]) -> list[ImageAttachment]:
     return attachments
 
 
+def get_snapshot(job: AuditJob) -> dict:
+    """This job's frozen inputs. Rows created before snapshots existed
+    (dev databases only) are backfilled once from the live listing."""
+    if job.snapshot:
+        return job.snapshot
+    snapshot = services.build_snapshot(job.listing_id)
+    AuditJob.objects.filter(pk=job.pk).update(snapshot=snapshot)
+    job.snapshot = snapshot
+    return snapshot
+
+
 def run_screening(job_id, worker_id: str) -> ScreenedJob:
-    """Local pre-pass: claims + preserved originals must exist.
+    """Local pre-pass: the snapshot's claims + preserved originals must
+    exist and still be on disk.
 
     Records a LOCAL ledger row (never charged). Fails the job with an
-    exact blocker when there is nothing to audit.
+    exact blocker when there is nothing to audit or snapshotted evidence
+    went missing (never silently proceeds on a subset).
     """
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
-    claims = [str(c) for c in (job.listing.advertised_claims or []) if str(c)]
-    photos = list(Photograph.objects.filter(listing=job.listing))
+    snapshot = get_snapshot(job)
+    claims = [c["text"] for c in snapshot.get("claims", []) if c.get("text")]
+    wanted = [p["id"] for p in snapshot.get("photos", [])]
     if not claims:
         services.fail_job(job_id, worker_id, "no_claims", "listing has no claims")
         raise services.JobNotRunningError(f"job {job_id} has no claims")
-    if not photos:
+    if not wanted:
         services.fail_job(job_id, worker_id, "no_photos", "listing has no photos")
         raise services.JobNotRunningError(f"job {job_id} has no photos")
+    rows = {str(p.pk): p for p in Photograph.objects.filter(pk__in=wanted)}
+    missing = [photo_id for photo_id in wanted if photo_id not in rows]
+    if missing:
+        detail = f"{len(missing)} snapshotted photo(s) missing from the database"
+        services.fail_job(job_id, worker_id, "evidence_missing", detail)
+        raise services.JobNotRunningError(f"job {job_id} lost evidence")
+    photos = [rows[photo_id] for photo_id in wanted]
+    gone = [
+        str(p.pk)
+        for p in photos
+        if not original_path(p.storage_ref, p.image_format).is_file()
+    ]
+    if gone:
+        detail = f"{len(gone)} snapshotted original(s) missing from storage"
+        services.fail_job(job_id, worker_id, "evidence_missing", detail)
+        raise services.JobNotRunningError(f"job {job_id} lost evidence")
     services.record_execution(
         job_id,
         worker_id,
@@ -421,6 +451,7 @@ def run_crop(job_id, worker_id: str) -> int:
                 AuditCrop.objects.create(
                     job=job,
                     source_photo=photo,
+                    source_observation=obs,
                     box=entry["box"],
                     storage_ref=ref,
                     mask_storage_ref=entry.get("mask_ref"),
@@ -445,16 +476,43 @@ RECHECK_PROMPT_VERSION = "m1-recheck"
 
 RECHECK_SYSTEM_INSTRUCTIONS = (
     "You are an ADAS feature spotter for used-car listing audits. "
-    "The attached image is a zoomed crop cut from the listed photo to "
-    "inspect one region closely. Report exactly what the crop shows for "
-    "each advertised claim: never guess from the listing text, and flag "
-    "ambiguity explicitly. Respond with a JSON object containing an "
-    "'observations' array; each item has photo_id (the source photo), "
-    "claim_concept, visible_object (a short string naming the visible "
-    'object, or the literal string "none"), description, '
-    "supports_localization (boolean), ambiguous (boolean), needs_crop "
-    "(boolean), needs_other_view (boolean)."
+    "Two images are attached: the full source photo for context, then a "
+    "zoomed crop cut from it to inspect one region closely. Judge the "
+    "crop with the full photo as context, and report exactly what they "
+    "show for each advertised claim: never guess from the listing text, "
+    "and flag ambiguity explicitly. Respond with a JSON object "
+    "containing an 'observations' array; each item has photo_id (the "
+    "source photo), claim_concept, visible_object (a short string "
+    'naming the visible object, or the literal string "none"), '
+    "description, supports_localization (boolean), ambiguous (boolean), "
+    "needs_crop (boolean), needs_other_view (boolean)."
 )
+
+
+def crop_needs_recheck(crop: AuditCrop, job: AuditJob) -> bool:
+    """A crop earns a paid recheck only on documented ambiguity: Muse
+    explicitly asked for a closer look (needs_crop), or Muse and SAM
+    disagree on the pair. Confirmed sightings are evidence as-is.
+    Crops without a recorded source observation (pre-link rows) keep the
+    old always-recheck behavior rather than silently skipping."""
+    sam_obs = crop.source_observation
+    if sam_obs is None:
+        return True
+    muse_obs = (
+        Observation.objects.filter(
+            job=job,
+            claim_key=sam_obs.claim_key,
+            photo_id=crop.source_photo_id,
+            source=ObservationSource.Muse,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+    if muse_obs is None:
+        return True
+    if muse_obs.extra.get("needs_crop"):
+        return True
+    return muse_obs.verdict != sam_obs.verdict
 
 
 def run_recheck(
@@ -462,8 +520,10 @@ def run_recheck(
     worker_id: str,
     adapter: BasetenMuseAdapter | None = None,
 ) -> int:
-    """Re-examine crops with Muse, one call per crop, bounded by the
-    recheck cap. A crop is skipped when every claim already has a RECHECK
+    """Re-examine ambiguous crops with Muse, one call per crop, bounded
+    by the recheck cap. A crop earns a call only on documented ambiguity
+    (see crop_needs_recheck); confirmed sightings are evidence as-is. A
+    crop is also skipped when every claim already has a RECHECK
     observation for its photo; the first crop wins each (claim, photo)
     pair. Returns provider calls made this run."""
     job = AuditJob.objects.get(pk=job_id)
@@ -472,13 +532,15 @@ def run_recheck(
         model_id=settings.AUDIT_BASETEN_MODEL_ID
     )
     cap = settings.AUDIT_MAX_RECHECKS_PER_JOB
-    claims = [str(c) for c in (job.listing.advertised_claims or []) if str(c)]
+    snapshot = get_snapshot(job)
+    claims = [c["text"] for c in snapshot.get("claims", []) if c.get("text")]
     covered = set(
         Observation.objects.filter(
             job=job, source=ObservationSource.RECHECK
         ).values_list("claim_key", "photo_id")
     )
     calls = 0
+    skipped_confirmed = 0
     crops_dir = audit_dirs(job_id)["crops"]
     for crop in AuditCrop.objects.filter(job=job).order_by("created_at"):
         if calls >= cap:
@@ -486,19 +548,29 @@ def run_recheck(
         photo = crop.source_photo
         if all((claim, photo.pk) in covered for claim in claims):
             continue
+        if not crop_needs_recheck(crop, job):
+            skipped_confirmed += 1
+            continue
         if not services.heartbeat(job_id, worker_id):
             raise services.JobNotRunningError(f"job {job_id} stopped during recheck")
         data = (crops_dir / f"{crop.storage_ref}.png").read_bytes()
+        context = original_path(photo.storage_ref, photo.image_format).read_bytes()
         request = MuseRequest(
             prompt_version=RECHECK_PROMPT_VERSION,
             system_instructions=RECHECK_SYSTEM_INSTRUCTIONS,
             user_text=(
                 build_user_text(claims, [str(photo.id)])
-                + "\n\nThe attached image is a zoomed crop from photo "
-                f"{photo.id}; judge only what the crop shows."
+                + "\n\nTwo images follow: the full photo for context, then "
+                f"a zoomed crop from photo {photo.id}. Judge the crop with "
+                "the full photo as context."
             ),
             photo_ids=(str(photo.id),),
             images=(
+                ImageAttachment(
+                    photo_id=str(photo.id),
+                    mime_type=photo.mime_type,
+                    data=context,
+                ),
                 ImageAttachment(
                     photo_id=str(photo.id), mime_type="image/png", data=data
                 ),
@@ -546,23 +618,41 @@ def run_recheck(
             },
             cost_usd=cost,
         )
+        muse_verdicts = {
+            (o.claim_key, o.photo_id): o.verdict
+            for o in Observation.objects.filter(
+                job=job, photo=photo, source=ObservationSource.Muse
+            )
+        }
         for item in result.observations:
             if item["photo_id"] != str(photo.id):
                 continue
+            verdict = _verdict(item)
+            prior = muse_verdicts.get((item["claim_concept"], photo.pk))
             _, created = Observation.objects.get_or_create(
                 job=job,
                 claim_key=item["claim_concept"],
                 photo=photo,
                 source=ObservationSource.RECHECK,
                 defaults={
-                    "verdict": _verdict(item),
+                    "verdict": verdict,
                     "rationale": item.get("description", ""),
-                    "extra": {"crop_ref": crop.storage_ref},
+                    "extra": {
+                        "crop_ref": crop.storage_ref,
+                        "changed": prior is not None and prior != verdict,
+                    },
                     "execution": execution,
                 },
             )
             if created:
                 covered.add((item["claim_concept"], photo.pk))
+    services.record_execution(
+        job_id,
+        worker_id,
+        stage=Stage.RECHECK,
+        provider=Provider.LOCAL,
+        usage={"calls": calls, "skipped_confirmed": skipped_confirmed, "cap": cap},
+    )
     return calls
 
 
@@ -657,13 +747,19 @@ def run_reconcile(job_id, worker_id: str) -> int:
     the job. Reruns overwrite findings (update_or_create), never duplicate."""
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
-    claims = [str(c) for c in (job.listing.advertised_claims or []) if str(c)]
+    snapshot = get_snapshot(job)
+    claims = [c["text"] for c in snapshot.get("claims", []) if c.get("text")]
     count = 0
     for claim in claims:
         observations = list(
             Observation.objects.filter(job=job, claim_key=claim).order_by("created_at")
         )
         state, summary = reconcile_claim(observations, claim)
+        recheck_ran = any(o.source == ObservationSource.RECHECK for o in observations)
+        state_without, _ = reconcile_claim(
+            [o for o in observations if o.source != ObservationSource.RECHECK],
+            claim,
+        )
         AuditFinding.objects.update_or_create(
             job=job,
             claim_key=claim,
@@ -671,7 +767,9 @@ def run_reconcile(job_id, worker_id: str) -> int:
                 "state": state,
                 "summary": summary,
                 "evidence": {
-                    "rule": "v1",
+                    "rule": "v2",
+                    "recheck_ran": recheck_ran,
+                    "recheck_changed_finding": recheck_ran and state_without != state,
                     "observations": [
                         {
                             "id": str(o.id),

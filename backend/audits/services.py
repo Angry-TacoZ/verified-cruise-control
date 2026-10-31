@@ -45,6 +45,36 @@ class JobNotRunningError(AuditError):
     """Raised when writing to a job that is no longer running."""
 
 
+def build_snapshot(listing_id) -> dict:
+    """Freeze the audit inputs: claim IDs + texts, photo IDs + SHA-256.
+
+    The pipeline processes this snapshot, never the live listing, so
+    later claim edits or photo arrivals cannot shift historical findings.
+    """
+    from evidence.models import Photograph
+    from listings.models import Listing
+
+    listing = Listing.objects.get(pk=listing_id)
+    claims = [str(c) for c in (listing.advertised_claims or []) if str(c)]
+    photos = Photograph.objects.filter(listing=listing).order_by("created_at")
+    return {
+        "taken_at": timezone.now().isoformat(),
+        "claims": [{"id": f"c{i + 1}", "text": text} for i, text in enumerate(claims)],
+        "photos": [
+            {
+                "id": str(photo.pk),
+                "sha256": photo.sha256,
+                "width": photo.width,
+                "height": photo.height,
+                "mime_type": photo.mime_type,
+                "image_format": photo.image_format,
+                "storage_ref": photo.storage_ref,
+            }
+            for photo in photos
+        ],
+    }
+
+
 def queue_audit(listing_id, requested_by: str = "") -> tuple[AuditJob, bool]:
     """Queue an audit, reusing an in-flight job for the same listing.
 
@@ -75,6 +105,7 @@ def queue_audit(listing_id, requested_by: str = "") -> tuple[AuditJob, bool]:
                 job = AuditJob.objects.create(
                     listing_id=listing_id,
                     requested_by=requested_by,
+                    snapshot=build_snapshot(listing_id),
                     max_calls=settings.AUDIT_MAX_CALLS_PER_JOB,
                     spend_cap_usd=settings.AUDIT_SPEND_CAP_USD,
                 )

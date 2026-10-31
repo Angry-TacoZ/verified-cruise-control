@@ -72,6 +72,7 @@ class AuditJob(models.Model):
         max_length=16, choices=JobStatus.choices, default=JobStatus.QUEUED
     )
     requested_by = models.CharField(max_length=255, blank=True, default="")
+    snapshot = models.JSONField(default=dict)
     prompt_version = models.CharField(max_length=32, default="m1")
     pricing_version = models.CharField(max_length=32, default="2026-10-31/09-20")
     max_calls = models.PositiveIntegerField(default=60)
@@ -188,6 +189,13 @@ class AuditCrop(models.Model):
         "evidence.Photograph",
         on_delete=models.CASCADE,
         related_name="audit_crops",
+    )
+    source_observation = models.ForeignKey(
+        Observation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="crops",
     )
     box = models.JSONField(default=dict)
     storage_ref = models.CharField(max_length=64, unique=True)
