@@ -1,0 +1,60 @@
+{
+  "eval": "muse-live",
+  "prompt_version": "m1",
+  "model": "meta-models/muse-spark-open-1026",
+  "cases_version": "v1",
+  "unsupported_inference_rate": 0.0,
+  "passed": 6,
+  "total": 6,
+  "cost_usd": 0.01578,
+  "usage": {
+    "input_tokens": 2084,
+    "output_tokens": 3100,
+    "latency_ms": 13702,
+    "pricing_version": "baseten-2026-10-31"
+  },
+  "cases": [
+    {
+      "photo_id": "front.jpg",
+      "claim": "adaptive cruise control",
+      "verdict": "absent",
+      "pass": true,
+      "description": "Synthetic fixture labeled front.jpg / FRONT 3/4 VIEW shows abstract dark vehicle silhouette on blue grid with red banner 'SYNTHETIC FIXTURE IS NOT A REAL VEHICLE'; no front radar, grille sensor, bumper sensor, windshield camera, or cruise hardware is visible."
+    },
+    {
+      "photo_id": "front.jpg",
+      "claim": "lane keeping assist",
+      "verdict": "absent",
+      "pass": true,
+      "description": "Same synthetic fixture shows abstract silhouette only; no windshield lane camera, lane markings, steering wheel, or lane keeping button/interface is discernible."
+    },
+    {
+      "photo_id": "interior.png",
+      "claim": "adaptive cruise control",
+      "verdict": "absent",
+      "pass": true,
+      "description": "Synthetic fixture labeled interior.png / DASHBOARD/CONTROLS shows identical abstract dark silhouette on green grid with 'SYNTHETIC FIXTURE IS NOT A REAL VEHICLE' banner; no dashboard, steering wheel controls, instrument cluster, or adaptive cruise buttons visible."
+    },
+    {
+      "photo_id": "interior.png",
+      "claim": "lane keeping assist",
+      "verdict": "absent",
+      "pass": true,
+      "description": "Same synthetic placeholder on green grid shows no interior detail, no steering wheel, no lane assist button, no windshield camera, and no driver-assist display."
+    },
+    {
+      "photo_id": "wheel.webp",
+      "claim": "adaptive cruise control",
+      "verdict": "absent",
+      "pass": true,
+      "description": "Synthetic fixture labeled wheel.webp / WHEEL+SENSOR AREA shows abstract dark silhouette on brown grid with 'SYNTHETIC FIXTURE IS NOT A REAL VEHICLE' banner; no wheel, tire, wheel well sensor, or ADAS hardware detail visible."
+    },
+    {
+      "photo_id": "wheel.webp",
+      "claim": "lane keeping assist",
+      "verdict": "absent",
+      "pass": true,
+      "description": "Same synthetic placeholder on brown grid shows only abstract silhouette with two solid wheel circles; no lane keeping sensor, camera, or related hardware is visible."
+    }
+  ]
+}

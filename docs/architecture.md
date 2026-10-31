@@ -70,19 +70,53 @@ SQLite runs `journal_mode=WAL`, `synchronous=FULL`, `busy_timeout=5000`
 `backend/tests/test_sqlite.py` on a file-backed DB). Transactions stay short;
 nothing holds a transaction across network I/O.
 
-## Provider contracts (PR #1: interfaces only)
+## Provider contracts (PR #2: live behind keys)
 
 `backend/providers/` defines per-model adapters with exact identifiers
 (`meta-models/muse-spark-open-1026` on Baseten, `sam-3.1` on Meta),
-timeout/retry policies, structured errors, pure payload builders, and a
-per-provider usage ledger. `analyze()` raises `ProviderNotConfigured`;
-`backend/tests/test_zero_inference.py` runs the whole import flow with
-sockets blocked and keys unset. PR #2 implements live calls behind these
-interfaces plus durable audit jobs:
+bounded retries, structured errors, pure payload builders, and a
+per-provider usage ledger. Every adapter call reports `last_attempts`
+and token usage; missing usage means unknown cost, never zero.
+Without keys, `analyze()` raises `ProviderNotConfigured` and the audit
+fails closed with that code — no silent skip.
+`backend/tests/test_zero_inference.py` still runs the whole import flow
+with sockets blocked and keys unset: import never calls providers.
 
-1. Local deterministic screening → 2. Muse full-image analysis → 3. SAM 3.1
-   localization → 4. conditional Muse crop re-analysis → 5. deterministic
-   reconciliation (five-state taxonomy) → 6. human QA.
+## Audit engine (PR #2)
+
+One listing → one audit job (`AuditJob`), processed stage by stage:
+
+1. Local deterministic screening (claims + photo snapshot) → 2. Muse
+   full-image analysis (one photo × ≤6 claims per call, 4096 output
+   tokens) → 3. SAM 3.1 localization of PRESENT sightings → 4. Pillow
+   box crops → 5. conditional Muse crop re-analysis (documented
+   ambiguity only) → 6. deterministic reconciliation (five-state
+   taxonomy: `verified`, `visually_supported`, `insufficient_evidence`,
+   `not_visually_verifiable`, `contradicted`) → findings + evidence.
+
+Key mechanics (all covered by `backend/tests/test_audits*.py`):
+
+- **Standalone worker process**: `python backend/manage.py run_audit_worker`
+  (or `./scripts/start-audit-worker.ps1`). The queue endpoint only
+  persists the job (`202`) — no in-request threads. One process runs
+  one job at a time; the atomic claim keeps concurrent workers from
+  double-running a job.
+- **Durable resume**: claims, photo IDs, and SHA-256 values are
+  snapshotted at queue time; stages read the snapshot, never the live
+  listing. Completed observations/crops survive worker restarts and
+  are never re-requested (no duplicate paid calls). A killed worker's
+  job is reclaimed via its stale heartbeat lease.
+- **Pre-call budgets**: every provider call first reserves worst-case
+  attempts + spend headroom (`VCC_AUDIT_RESERVE_PER_CALL`) through a
+  conditional UPDATE; losers fail closed without pausing. After the
+  call, actuals replace the hold. Local stages consume no model
+  allowance. Unknown cost, call-cap, or spend-cap pauses the job with
+  an exact code; `model_calls_made` counts model attempts only
+  (`calls_made` counts ledger rows, local stages included).
+- **No exactly-once billing claim**: a provider call that finished
+  server-side microseconds before a crash may go unsettled; providers
+  offer no idempotency keys here. The ledger records what the app can
+  prove (attempts, usage, cost or explicit unknown).
 
 ## Trust boundaries
 

@@ -61,6 +61,94 @@ export interface PhotoFailure {
   created_at: string;
 }
 
+export interface AuditJob {
+  id: string;
+  listing_id: string;
+  status: string;
+  current_stage: string;
+  requested_by: string;
+  prompt_version: string;
+  pricing_version: string;
+  max_calls: number;
+  calls_made: number;
+  model_calls_made: number;
+  spend_cap_usd: string;
+  spend_usd: string;
+  unknown_cost_calls: number;
+  worker_id: string;
+  error_code: string;
+  error_detail: string;
+  observation_count: number;
+  crop_count: number;
+  finding_count: number;
+  execution_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AuditFinding {
+  id: string;
+  claim_key: string;
+  claim_text: string;
+  state: string;
+  summary: string;
+  evidence: {
+    rule: string;
+    observations: { id: string; source: string; photo_id: string; verdict: string }[];
+  };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AuditBox {
+  box: [number, number, number, number];
+  mask_ref: string | null;
+  mask_size?: [number, number];
+  confidence: number | null;
+}
+
+export interface AuditObservation {
+  id: string;
+  claim_key: string;
+  photo_id: string;
+  source: string;
+  verdict: string;
+  boxes: AuditBox[];
+  rationale: string;
+  extra: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AuditCrop {
+  id: string;
+  source_photo_id: string;
+  box: [number, number, number, number];
+  width: number;
+  height: number;
+  has_mask: boolean;
+}
+
+export interface AuditExecution {
+  id: string;
+  stage: string;
+  provider: string;
+  model_id: string;
+  photo_ids: string[];
+  ok: boolean;
+  attempts: number;
+  latency_ms: number | null;
+  usage: Record<string, unknown>;
+  cost_usd: string | null;
+  error_code: string;
+  created_at: string;
+}
+
+export interface AuditEvidence {
+  observations: AuditObservation[];
+  crops: AuditCrop[];
+  executions: AuditExecution[];
+}
+
 export interface PairingInfo {
   id: string;
   label: string;
@@ -161,4 +249,22 @@ export const backend = {
   revokePairing: (id: string) =>
     request<{ ok: boolean }>(`/api/pairing/${id}/revoke`, { method: 'POST', json: {} }),
   photoUrl: (listingId: string, photoId: string) => `/api/listings/${listingId}/photos/${photoId}`,
+  queueAudit: (listingId: string) =>
+    request<{ job: AuditJob; created: boolean }>(`/api/listings/${listingId}/audits`, {
+      method: 'POST',
+      json: {},
+    }),
+  listAudits: (listingId: string) => request<AuditJob[]>(`/api/listings/${listingId}/audits`),
+  getAudit: (jobId: string) => request<AuditJob>(`/api/audits/${jobId}`),
+  listFindings: (jobId: string) => request<AuditFinding[]>(`/api/audits/${jobId}/findings`),
+  getEvidence: (jobId: string) => request<AuditEvidence>(`/api/audits/${jobId}/evidence`),
+  cancelAudit: (jobId: string) =>
+    request<AuditJob>(`/api/audits/${jobId}/cancel`, { method: 'POST', json: {} }),
+  retryAudit: (jobId: string) =>
+    request<{ job: AuditJob; created: boolean }>(`/api/audits/${jobId}/retry`, {
+      method: 'POST',
+      json: {},
+    }),
+  cropUrl: (jobId: string, cropId: string) => `/api/audits/${jobId}/crops/${cropId}`,
+  maskUrl: (jobId: string, ref: string) => `/api/audits/${jobId}/masks/${ref}`,
 };

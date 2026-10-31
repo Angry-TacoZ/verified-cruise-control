@@ -36,6 +36,15 @@ cost per listing · malformed-input reliability.
 
 ## Current status
 
-No scored runs yet — PR #1 performs zero model calls by design. PR #2 will
-add `cases/v1/` (fixed ADAS extraction + localization cases) and the first
-baseline + candidate result files with real Baseten/Meta usage.
+- `cases/v2/reconcile_goldens.json`: 14 hand-labeled reconcile cases; run
+  with `python evals/run.py reconcile` (zero inference). Pinned in CI by
+  `backend/tests/test_eval_goldens.py`. v2 supersedes v1 with conservative
+  Rule E classification (absence is never contradiction); v1 cases and
+  results are preserved as versioned history.
+- `cases/v1/muse_fixture_ground_truth.json`: unsupported-inference eval
+  over the 3 synthetic fixture photos (no honest output may claim a
+  feature is present). Run with `python evals/run.py muse-live`: one live
+  call, refuses unless `VCC_LIVE_SMOKE=1` plus keys, cost bound $0.25.
+  Live runs need explicit human approval and are never run in CI.
+- `results/2026-10-31-smoke-baseten-meta.json`: provider connectivity
+  smoke baseline (not a scored eval).
