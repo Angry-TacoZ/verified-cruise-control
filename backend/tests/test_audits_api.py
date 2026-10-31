@@ -340,9 +340,7 @@ def test_worker_runs_claimed_job_to_complete(listing, enabled):
     from audits import services
 
     services.queue_audit(listing.pk)
-    muse = FakeMuseAdapter(
-        observations=[_obs(str(photo.id), "adaptive cruise control")]
-    )
+    muse = FakeMuseAdapter(observations=[_obs(str(photo.id), "c1")])
     sam = FakeSamAdapter(records=[_segment(size=(64, 48))])
     settled = worker.run_claimed_job("w-test", muse, sam)
     assert settled is not None

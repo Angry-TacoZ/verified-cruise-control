@@ -99,7 +99,9 @@ def _truncate(value: str, cap: int, label: str, warnings: list[str]) -> str:
 
 
 def validate_observation_payload(
-    payload: object, photo_ids: frozenset[str]
+    payload: object,
+    photo_ids: frozenset[str],
+    allowed_concepts: frozenset[str] | None = None,
 ) -> tuple[list[dict], list[str]]:
     """Strictly validate Muse's structured observations.
 
@@ -107,7 +109,8 @@ def validate_observation_payload(
     recorded warning (the server does not enforce the schema); anything
     structurally wrong raises :class:`ProviderResponseError` so the caller
     quarantines the response. An empty observation list is valid: a photo
-    may legitimately show nothing relevant.
+    may legitimately show nothing relevant. When ``allowed_concepts`` is
+    given, every claim_concept must be a requested claim ID.
     """
     warnings: list[str] = []
     if not isinstance(payload, dict):
@@ -133,6 +136,13 @@ def validate_observation_payload(
         if not isinstance(photo_id, str) or photo_id not in photo_ids:
             raise ProviderResponseError(
                 f"Muse observation {index} has an unknown photo_id"
+            )
+        if (
+            allowed_concepts is not None
+            and item["claim_concept"] not in allowed_concepts
+        ):
+            raise ProviderResponseError(
+                f"Muse observation {index} has an unknown claim_concept"
             )
         clean: dict = {"photo_id": photo_id}
         for key in ("claim_concept", "visible_object", "description"):
@@ -264,6 +274,15 @@ class BasetenMuseAdapter(ProviderAdapter):
             ) from exc
         if not isinstance(content, str):
             raise ProviderResponseError("Baseten message content is not text")
+        choice = body["choices"][0]
+        finish_reason = (
+            choice.get("finish_reason") if isinstance(choice, dict) else None
+        )
+        if finish_reason == "length":
+            raise ProviderResponseError(
+                "Baseten response hit the output-token limit; observations "
+                "are incomplete"
+            )
         try:
             payload = json.loads(content)
         except ValueError as exc:

@@ -63,6 +63,7 @@ class QueueOut(Schema):
 class FindingOut(Schema):
     id: uuid.UUID
     claim_key: str
+    claim_text: str
     state: str
     summary: str
     evidence: dict
@@ -171,6 +172,7 @@ def app_get_findings(request, job_id: uuid.UUID):
         {
             "id": finding.id,
             "claim_key": finding.claim_key,
+            "claim_text": finding.claim_text,
             "state": finding.state,
             "summary": finding.summary,
             "evidence": finding.evidence,

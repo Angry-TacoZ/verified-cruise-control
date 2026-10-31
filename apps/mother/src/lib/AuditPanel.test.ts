@@ -38,19 +38,21 @@ const baseJob = {
 const findings = [
   {
     id: 'f1',
-    claim_key: 'adaptive cruise control',
+    claim_key: 'c1',
+    claim_text: 'adaptive cruise control',
     state: 'visually_supported',
     summary: 'Muse sighting confirmed by SAM localization',
-    evidence: { rule: 'v1', observations: [] },
+    evidence: { rule: 'v2', observations: [] },
     created_at: '2026-10-31T00:01:00Z',
     updated_at: '2026-10-31T00:01:00Z',
   },
   {
     id: 'f2',
-    claim_key: 'lane keeping assist',
-    state: 'contradicted',
-    summary: 'feature absent in all 2 photo(s); no source saw it',
-    evidence: { rule: 'v1', observations: [] },
+    claim_key: 'c2',
+    claim_text: 'lane keeping assist',
+    state: 'insufficient_evidence',
+    summary: 'no confirmed sighting in 2 photo observation(s)',
+    evidence: { rule: 'v2', observations: [] },
     created_at: '2026-10-31T00:01:00Z',
     updated_at: '2026-10-31T00:01:00Z',
   },
@@ -141,7 +143,8 @@ describe('AuditPanel', () => {
     render(AuditPanel, { props: { listingId: LISTING } });
     expect(await screen.findByText('Findings (2)')).toBeInTheDocument();
     expect(screen.getByText('Visually supported')).toBeInTheDocument();
-    expect(screen.getByText('Contradicted')).toBeInTheDocument();
+    expect(screen.getByText('Insufficient evidence')).toBeInTheDocument();
+    expect(screen.getAllByText('adaptive cruise control').length).toBeGreaterThan(0);
     expect(screen.queryByText(/AI-verified/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/AI verified/i)).not.toBeInTheDocument();
   });

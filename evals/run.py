@@ -87,7 +87,11 @@ def run_muse_live(max_spend: float) -> dict:
     if os.environ.get("VCC_LIVE_SMOKE") != "1":
         raise SystemExit("refusing: set VCC_LIVE_SMOKE=1 to run live evals")
     truth = json.loads((CASES / "muse_fixture_ground_truth.json").read_text())
-    claims = truth["claims"]
+    # Stable claim IDs derived positionally (c1..cN); the v1 case file is
+    # never edited to fit the harness (Rule D).
+    entries = [
+        {"id": f"c{i + 1}", "text": text} for i, text in enumerate(truth["claims"])
+    ]
     acceptable = set(truth["acceptable_verdicts"])
     attachments = []
     for name in truth["photos"]:
@@ -100,7 +104,7 @@ def run_muse_live(max_spend: float) -> dict:
     request = MuseRequest(
         prompt_version=PROMPT_VERSION,
         system_instructions=SYSTEM_INSTRUCTIONS,
-        user_text=build_user_text(claims, truth["photos"]),
+        user_text=build_user_text(entries, truth["photos"]),
         photo_ids=tuple(truth["photos"]),
         images=tuple(attachments),
         # Six (claim, photo) observations with descriptions do not fit the
@@ -113,6 +117,7 @@ def run_muse_live(max_spend: float) -> dict:
     cost = usage.estimated_cost_usd
     if cost is None or cost > max_spend:
         raise SystemExit(f"refusing: live cost {cost} exceeds bound ${max_spend}")
+    id_to_text = {entry["id"]: entry["text"] for entry in entries}
     scored = []
     for item in result.observations:
         if item["ambiguous"]:
@@ -121,12 +126,14 @@ def run_muse_live(max_spend: float) -> dict:
             verdict = "absent"
         else:
             verdict = "present"
+        cid = item["claim_concept"]
         scored.append(
             {
                 "photo_id": item["photo_id"],
-                "claim": item["claim_concept"],
+                "claim_id": cid,
+                "claim": id_to_text.get(cid, f"UNKNOWN {cid}"),
                 "verdict": verdict,
-                "pass": verdict in acceptable,
+                "pass": verdict in acceptable and cid in id_to_text,
                 "description": item["description"],
             }
         )

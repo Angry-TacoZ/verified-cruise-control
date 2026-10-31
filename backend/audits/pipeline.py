@@ -18,7 +18,7 @@ from PIL import Image
 
 from evidence.images import original_path
 from evidence.models import Photograph
-from providers.base import ImageAttachment, ProviderError
+from providers.base import ImageAttachment, ProviderError, ProviderResponseError
 from providers.baseten import BasetenMuseAdapter, MuseRequest
 from providers.meta import MetaSamAdapter, SamRequest
 
@@ -44,24 +44,38 @@ SYSTEM_INSTRUCTIONS = (
     "photo shows: never guess from the listing text, never verify a "
     "feature from one unclear view, and flag ambiguity explicitly. "
     "Respond with a JSON object containing an 'observations' array; each "
-    "item has photo_id, claim_concept, visible_object (a short string "
-    'naming the visible object, or the literal string "none"), '
-    "description, supports_localization (boolean), ambiguous (boolean), "
-    "needs_crop (boolean), needs_other_view (boolean)."
+    "item has photo_id, claim_concept (the claim ID, e.g. c1), "
+    "visible_object (a short string naming the visible object, or the "
+    'literal string "none"), description, supports_localization '
+    "(boolean), ambiguous (boolean), needs_crop (boolean), needs_other_view "
+    "(boolean)."
 )
 
+# Batching limits (documented, tested): one photo per Muse call, at most
+# six claims per call, 4096 output tokens. Six observations were
+# live-verified to fit in 4096 tokens (evals 2026-10-30-muse-m1); larger
+# claim sets are chunked so no call can silently truncate.
+MUSE_MAX_CLAIMS_PER_CALL = 6
+MUSE_MAX_OUTPUT_TOKENS = 4096
 
-def build_user_text(claims: list[str], photo_ids: list[str]) -> str:
+
+def chunked(items: list, size: int):
+    for index in range(0, len(items), size):
+        yield items[index : index + size]
+
+
+def build_user_text(entries: list[dict], photo_ids: list[str]) -> str:
     lines = [
-        "Advertised claims:",
-        *(f"- {claim}" for claim in claims),
+        "Advertised claims (ID: text):",
+        *(f"- {entry['id']}: {entry['text']}" for entry in entries),
         "",
         "Photos under review:",
         *(f"- {photo_id}" for photo_id in photo_ids),
         "",
         (
-            "For every (claim, photo) pair, emit one observation. A photo may "
-            "legitimately show nothing relevant; report that honestly."
+            "For every (claim ID, photo) pair, emit one observation with "
+            "claim_concept set to the claim ID. A photo may legitimately "
+            "show nothing relevant; report that honestly."
         ),
     ]
     return "\n".join(lines)
@@ -158,98 +172,174 @@ def _verdict(item: dict) -> str:
     return Verdict.PRESENT
 
 
+def validate_batch(
+    items, expected: set[tuple[str, str]], done: set[tuple[str, str]]
+) -> tuple[dict, list[str], tuple[str, str] | None]:
+    """Check one batch response against its expected (claim ID, photo) set.
+
+    Returns ``(seen, warnings, fatal)`` where ``seen`` maps pairs to items
+    (first duplicate wins, with a warning) and ``fatal`` is a
+    ``(code, detail)`` pair when the batch must fail the job instead of
+    silently producing partial evidence.
+    """
+    batch_ids = {cid for cid, _ in expected}
+    batch_photos = {pid for _, pid in expected}
+    seen: dict[tuple[str, str], dict] = {}
+    warnings: list[str] = []
+    for index, item in enumerate(items):
+        cid = item.get("claim_concept")
+        pid = item.get("photo_id")
+        if cid not in batch_ids:
+            return {}, [], ("unknown_claim", f"observation has unknown claim {cid!r}")
+        if pid not in batch_photos:
+            return (
+                {},
+                [],
+                ("unknown_photo", f"observation has unexpected photo {pid!r}"),
+            )
+        if (cid, pid) in seen:
+            warnings.append(f"duplicate observation for {(cid, pid)}; first wins")
+            continue
+        seen[(cid, pid)] = item
+    outstanding = expected - done
+    if not items and outstanding:
+        return (
+            {},
+            [],
+            (
+                "empty_batch",
+                f"model returned no observations for {len(outstanding)} pair(s)",
+            ),
+        )
+    missing = expected - set(seen) - done
+    if missing:
+        sample = sorted(missing)[:3]
+        return (
+            {},
+            [],
+            (
+                "incomplete_batch",
+                f"model omitted {len(missing)} pair(s), e.g. {sample}",
+            ),
+        )
+    return seen, warnings, None
+
+
 def run_muse(
     job_id,
     worker_id: str,
     screened: ScreenedJob,
     adapter: BasetenMuseAdapter | None = None,
 ) -> int:
-    """One Muse call over all photos; persist normalized observations.
+    """Batched Muse observation: one photo and up to six claims per call.
 
-    Idempotent on resume: existing (claim, photo, source) rows are kept.
-    Returns the number of observations stored. Provider failures fail the
-    job with the provider's error code.
+    Batches already complete in the database are skipped, so worker
+    restarts never repeat paid calls. Every batch response is checked for
+    completeness against its expected pairs: unknown IDs, missing pairs,
+    or empty responses fail the job with an exact code instead of
+    silently producing partial evidence. Returns observations stored.
     """
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
     own_adapter = adapter or BasetenMuseAdapter(
         model_id=settings.AUDIT_BASETEN_MODEL_ID
     )
-    photo_ids = [str(p.id) for p in screened.photos]
-    request = MuseRequest(
-        prompt_version=PROMPT_VERSION,
-        system_instructions=SYSTEM_INSTRUCTIONS,
-        user_text=build_user_text(screened.claims, photo_ids),
-        photo_ids=tuple(photo_ids),
-        images=tuple(load_images(screened.photos)),
-    )
-    try:
-        result = own_adapter.analyze(request)
-    except ProviderError as exc:
-        # Failed calls produce no inference, so they are not billed; the
-        # call itself still counts against max_calls via record_execution.
-        services.record_execution(
-            job_id,
-            worker_id,
-            stage=Stage.Muse,
-            provider=Provider.BASETEN,
-            model_id=own_adapter.model_id,
-            photo_ids=photo_ids,
-            ok=False,
-            usage={"failed_call_not_billed": True},
-            cost_usd=Decimal("0.0000"),
-            error_code=type(exc).__name__,
-            error_detail=str(exc)[:500],
-        )
-        services.fail_job(job_id, worker_id, type(exc).__name__, str(exc)[:500])
-        raise
-    usage = result.usage
-    cost = (
-        Decimal(str(usage.estimated_cost_usd))
-        if usage.estimated_cost_usd is not None
-        else None
-    )
-    execution = services.record_execution(
-        job_id,
-        worker_id,
-        stage=Stage.Muse,
-        provider=Provider.BASETEN,
-        model_id=result.model,
-        photo_ids=list(usage.photo_ids),
-        latency_ms=usage.latency_ms,
-        usage={
-            "prompt_version": usage.prompt_version,
-            "input_tokens": usage.input_tokens,
-            "output_tokens": usage.output_tokens,
-            "pricing_version": usage.pricing_version,
-            "validation_warnings": list(result.validation_warnings),
-        },
-        cost_usd=cost,
-    )
-    by_id = {str(p.id): p for p in screened.photos}
+    snapshot = get_snapshot(job)
+    entries = snapshot.get("claims", [])
+    done = {
+        (claim_key, str(photo_id))
+        for claim_key, photo_id in Observation.objects.filter(
+            job=job, source=ObservationSource.Muse
+        ).values_list("claim_key", "photo_id")
+    }
     stored = 0
-    for item in result.observations:
-        photo = by_id.get(item["photo_id"])
-        if photo is None:  # pragma: no cover - validator guarantees membership
-            continue
-        _, created = Observation.objects.get_or_create(
-            job=job,
-            claim_key=item["claim_concept"],
-            photo=photo,
-            source=ObservationSource.Muse,
-            defaults={
-                "verdict": _verdict(item),
-                "rationale": item.get("description", ""),
-                "extra": {
-                    "supports_localization": bool(item.get("supports_localization")),
-                    "needs_crop": bool(item.get("needs_crop")),
-                    "needs_other_view": bool(item.get("needs_other_view")),
+    images = {str(p.id): p for p in screened.photos}
+    for photo in screened.photos:
+        photo_attachments = load_images([photo])
+        for chunk in chunked(entries, MUSE_MAX_CLAIMS_PER_CALL):
+            expected = {(entry["id"], str(photo.pk)) for entry in chunk}
+            if expected <= done:
+                continue
+            if not services.heartbeat(job_id, worker_id):
+                raise services.JobNotRunningError(f"job {job_id} stopped during muse")
+            request = MuseRequest(
+                prompt_version=PROMPT_VERSION,
+                system_instructions=SYSTEM_INSTRUCTIONS,
+                user_text=build_user_text(chunk, [str(photo.pk)]),
+                photo_ids=(str(photo.pk),),
+                images=tuple(photo_attachments),
+                max_output_tokens=MUSE_MAX_OUTPUT_TOKENS,
+            )
+            try:
+                result = own_adapter.analyze(request)
+            except ProviderError as exc:
+                # Failed calls produce no inference, so they are not billed;
+                # the call itself still counts against max_calls.
+                services.record_execution(
+                    job_id,
+                    worker_id,
+                    stage=Stage.Muse,
+                    provider=Provider.BASETEN,
+                    model_id=own_adapter.model_id,
+                    photo_ids=[str(photo.pk)],
+                    ok=False,
+                    usage={"failed_call_not_billed": True},
+                    cost_usd=Decimal("0.0000"),
+                    error_code=type(exc).__name__,
+                    error_detail=str(exc)[:500],
+                )
+                services.fail_job(job_id, worker_id, type(exc).__name__, str(exc)[:500])
+                raise
+            usage = result.usage
+            cost = (
+                Decimal(str(usage.estimated_cost_usd))
+                if usage.estimated_cost_usd is not None
+                else None
+            )
+            seen, warnings, fatal = validate_batch(result.observations, expected, done)
+            execution = services.record_execution(
+                job_id,
+                worker_id,
+                stage=Stage.Muse,
+                provider=Provider.BASETEN,
+                model_id=result.model,
+                photo_ids=[str(photo.pk)],
+                latency_ms=usage.latency_ms,
+                usage={
+                    "prompt_version": usage.prompt_version,
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "pricing_version": usage.pricing_version,
+                    "validation_warnings": list(result.validation_warnings) + warnings,
                 },
-                "execution": execution,
-            },
-        )
-        if created:
-            stored += 1
+                cost_usd=cost,
+            )
+            if fatal is not None:
+                code, detail = fatal
+                services.fail_job(job_id, worker_id, code, detail)
+                raise ProviderResponseError(detail)
+            for (cid, _), item in seen.items():
+                _, created = Observation.objects.get_or_create(
+                    job=job,
+                    claim_key=cid,
+                    photo=images[str(photo.pk)],
+                    source=ObservationSource.Muse,
+                    defaults={
+                        "verdict": _verdict(item),
+                        "rationale": item.get("description", ""),
+                        "extra": {
+                            "supports_localization": bool(
+                                item.get("supports_localization")
+                            ),
+                            "needs_crop": bool(item.get("needs_crop")),
+                            "needs_other_view": bool(item.get("needs_other_view")),
+                        },
+                        "execution": execution,
+                    },
+                )
+                if created:
+                    stored += 1
+                done.add((cid, str(photo.pk)))
     return stored
 
 
@@ -295,6 +385,11 @@ def run_sam(
     """
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
+    id_to_text = {
+        entry["id"]: entry["text"]
+        for entry in get_snapshot(job).get("claims", [])
+        if entry.get("text")
+    }
     own_adapter = adapter or MetaSamAdapter(model_id=settings.AUDIT_SAM_MODEL_ID)
     targets = Observation.objects.filter(
         job=job, source=ObservationSource.Muse, verdict=Verdict.PRESENT
@@ -312,7 +407,12 @@ def run_sam(
             raise services.JobNotRunningError(f"job {job_id} stopped during sam")
         if not target.extra.get("supports_localization"):
             continue
-        concept = sanitize_concept(target.claim_key)
+        text = id_to_text.get(target.claim_key)
+        if text is None:
+            detail = f"Muse observation references unknown claim {target.claim_key!r}"
+            services.fail_job(job_id, worker_id, "unknown_claim", detail)
+            raise services.JobNotRunningError(f"job {job_id} has unknown claim")
+        concept = sanitize_concept(text)
         photo = target.photo
         if not concept:
             Observation.objects.create(
@@ -482,7 +582,8 @@ RECHECK_SYSTEM_INSTRUCTIONS = (
     "show for each advertised claim: never guess from the listing text, "
     "and flag ambiguity explicitly. Respond with a JSON object "
     "containing an 'observations' array; each item has photo_id (the "
-    "source photo), claim_concept, visible_object (a short string "
+    "source photo), claim_concept (the claim ID, e.g. c1), visible_object "
+    "(a short string "
     'naming the visible object, or the literal string "none"), '
     "description, supports_localization (boolean), ambiguous (boolean), "
     "needs_crop (boolean), needs_other_view (boolean)."
@@ -520,12 +621,12 @@ def run_recheck(
     worker_id: str,
     adapter: BasetenMuseAdapter | None = None,
 ) -> int:
-    """Re-examine ambiguous crops with Muse, one call per crop, bounded
-    by the recheck cap. A crop earns a call only on documented ambiguity
-    (see crop_needs_recheck); confirmed sightings are evidence as-is. A
-    crop is also skipped when every claim already has a RECHECK
-    observation for its photo; the first crop wins each (claim, photo)
-    pair. Returns provider calls made this run."""
+    """Re-examine ambiguous crops with Muse, one call per crop and claim
+    chunk, bounded by the recheck cap. A crop earns calls only on
+    documented ambiguity (see crop_needs_recheck); confirmed sightings
+    are evidence as-is. Pairs already covered are skipped, and every
+    batch response is completeness-checked like the Muse stage. Returns
+    provider calls made this run."""
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
     own_adapter = adapter or BasetenMuseAdapter(
@@ -533,119 +634,134 @@ def run_recheck(
     )
     cap = settings.AUDIT_MAX_RECHECKS_PER_JOB
     snapshot = get_snapshot(job)
-    claims = [c["text"] for c in snapshot.get("claims", []) if c.get("text")]
-    covered = set(
-        Observation.objects.filter(
+    entries = [e for e in snapshot.get("claims", []) if e.get("text")]
+    covered = {
+        (claim_key, str(photo_id))
+        for claim_key, photo_id in Observation.objects.filter(
             job=job, source=ObservationSource.RECHECK
         ).values_list("claim_key", "photo_id")
-    )
+    }
     calls = 0
     skipped_confirmed = 0
     crops_dir = audit_dirs(job_id)["crops"]
     for crop in AuditCrop.objects.filter(job=job).order_by("created_at"):
-        if calls >= cap:
-            break
         photo = crop.source_photo
-        if all((claim, photo.pk) in covered for claim in claims):
-            continue
         if not crop_needs_recheck(crop, job):
             skipped_confirmed += 1
             continue
-        if not services.heartbeat(job_id, worker_id):
-            raise services.JobNotRunningError(f"job {job_id} stopped during recheck")
-        data = (crops_dir / f"{crop.storage_ref}.png").read_bytes()
-        context = original_path(photo.storage_ref, photo.image_format).read_bytes()
-        request = MuseRequest(
-            prompt_version=RECHECK_PROMPT_VERSION,
-            system_instructions=RECHECK_SYSTEM_INSTRUCTIONS,
-            user_text=(
-                build_user_text(claims, [str(photo.id)])
-                + "\n\nTwo images follow: the full photo for context, then "
-                f"a zoomed crop from photo {photo.id}. Judge the crop with "
-                "the full photo as context."
-            ),
-            photo_ids=(str(photo.id),),
-            images=(
-                ImageAttachment(
-                    photo_id=str(photo.id),
-                    mime_type=photo.mime_type,
-                    data=context,
+        pending = [
+            entry for entry in entries if (entry["id"], str(photo.pk)) not in covered
+        ]
+        for chunk in chunked(pending, MUSE_MAX_CLAIMS_PER_CALL):
+            if calls >= cap:
+                break
+            expected = {(entry["id"], str(photo.pk)) for entry in chunk}
+            if not expected - covered:
+                continue
+            if not services.heartbeat(job_id, worker_id):
+                raise services.JobNotRunningError(
+                    f"job {job_id} stopped during recheck"
+                )
+            data = (crops_dir / f"{crop.storage_ref}.png").read_bytes()
+            context = original_path(photo.storage_ref, photo.image_format).read_bytes()
+            request = MuseRequest(
+                prompt_version=RECHECK_PROMPT_VERSION,
+                system_instructions=RECHECK_SYSTEM_INSTRUCTIONS,
+                user_text=(
+                    build_user_text(chunk, [str(photo.id)])
+                    + "\n\nTwo images follow: the full photo for context, then "
+                    f"a zoomed crop from photo {photo.id}. Judge the crop with "
+                    "the full photo as context."
                 ),
-                ImageAttachment(
-                    photo_id=str(photo.id), mime_type="image/png", data=data
+                photo_ids=(str(photo.id),),
+                images=(
+                    ImageAttachment(
+                        photo_id=str(photo.id),
+                        mime_type=photo.mime_type,
+                        data=context,
+                    ),
+                    ImageAttachment(
+                        photo_id=str(photo.id), mime_type="image/png", data=data
+                    ),
                 ),
-            ),
-        )
-        try:
-            result = own_adapter.analyze(request)
-        except ProviderError as exc:
-            services.record_execution(
+                max_output_tokens=MUSE_MAX_OUTPUT_TOKENS,
+            )
+            try:
+                result = own_adapter.analyze(request)
+            except ProviderError as exc:
+                services.record_execution(
+                    job_id,
+                    worker_id,
+                    stage=Stage.RECHECK,
+                    provider=Provider.BASETEN,
+                    model_id=own_adapter.model_id,
+                    photo_ids=[str(photo.id)],
+                    ok=False,
+                    usage={"failed_call_not_billed": True},
+                    cost_usd=Decimal("0.0000"),
+                    error_code=type(exc).__name__,
+                    error_detail=str(exc)[:500],
+                )
+                services.fail_job(job_id, worker_id, type(exc).__name__, str(exc)[:500])
+                raise
+            calls += 1
+            usage = result.usage
+            cost = (
+                Decimal(str(usage.estimated_cost_usd))
+                if usage.estimated_cost_usd is not None
+                else None
+            )
+            seen, warnings, fatal = validate_batch(
+                result.observations, expected, covered
+            )
+            execution = services.record_execution(
                 job_id,
                 worker_id,
                 stage=Stage.RECHECK,
                 provider=Provider.BASETEN,
-                model_id=own_adapter.model_id,
+                model_id=result.model,
                 photo_ids=[str(photo.id)],
-                ok=False,
-                usage={"failed_call_not_billed": True},
-                cost_usd=Decimal("0.0000"),
-                error_code=type(exc).__name__,
-                error_detail=str(exc)[:500],
-            )
-            services.fail_job(job_id, worker_id, type(exc).__name__, str(exc)[:500])
-            raise
-        calls += 1
-        usage = result.usage
-        cost = (
-            Decimal(str(usage.estimated_cost_usd))
-            if usage.estimated_cost_usd is not None
-            else None
-        )
-        execution = services.record_execution(
-            job_id,
-            worker_id,
-            stage=Stage.RECHECK,
-            provider=Provider.BASETEN,
-            model_id=result.model,
-            photo_ids=[str(photo.id)],
-            latency_ms=usage.latency_ms,
-            usage={
-                "prompt_version": usage.prompt_version,
-                "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens,
-                "pricing_version": usage.pricing_version,
-                "crop_ref": crop.storage_ref,
-            },
-            cost_usd=cost,
-        )
-        muse_verdicts = {
-            (o.claim_key, o.photo_id): o.verdict
-            for o in Observation.objects.filter(
-                job=job, photo=photo, source=ObservationSource.Muse
-            )
-        }
-        for item in result.observations:
-            if item["photo_id"] != str(photo.id):
-                continue
-            verdict = _verdict(item)
-            prior = muse_verdicts.get((item["claim_concept"], photo.pk))
-            _, created = Observation.objects.get_or_create(
-                job=job,
-                claim_key=item["claim_concept"],
-                photo=photo,
-                source=ObservationSource.RECHECK,
-                defaults={
-                    "verdict": verdict,
-                    "rationale": item.get("description", ""),
-                    "extra": {
-                        "crop_ref": crop.storage_ref,
-                        "changed": prior is not None and prior != verdict,
-                    },
-                    "execution": execution,
+                latency_ms=usage.latency_ms,
+                usage={
+                    "prompt_version": usage.prompt_version,
+                    "input_tokens": usage.input_tokens,
+                    "output_tokens": usage.output_tokens,
+                    "pricing_version": usage.pricing_version,
+                    "crop_ref": crop.storage_ref,
+                    "validation_warnings": list(result.validation_warnings) + warnings,
                 },
+                cost_usd=cost,
             )
-            if created:
-                covered.add((item["claim_concept"], photo.pk))
+            if fatal is not None:
+                code, detail = fatal
+                services.fail_job(job_id, worker_id, code, detail)
+                raise ProviderResponseError(detail)
+            muse_verdicts = {
+                (o.claim_key, o.photo_id): o.verdict
+                for o in Observation.objects.filter(
+                    job=job, photo=photo, source=ObservationSource.Muse
+                )
+            }
+            for (cid, _), item in seen.items():
+                verdict = _verdict(item)
+                prior = muse_verdicts.get((cid, photo.pk))
+                _, created = Observation.objects.get_or_create(
+                    job=job,
+                    claim_key=cid,
+                    photo=photo,
+                    source=ObservationSource.RECHECK,
+                    defaults={
+                        "verdict": verdict,
+                        "rationale": item.get("description", ""),
+                        "extra": {
+                            "crop_ref": crop.storage_ref,
+                            "changed": prior is not None and prior != verdict,
+                        },
+                        "execution": execution,
+                    },
+                )
+                if created:
+                    covered.add((cid, str(photo.pk)))
     services.record_execution(
         job_id,
         worker_id,
@@ -748,22 +864,24 @@ def run_reconcile(job_id, worker_id: str) -> int:
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
     snapshot = get_snapshot(job)
-    claims = [c["text"] for c in snapshot.get("claims", []) if c.get("text")]
+    entries = [e for e in snapshot.get("claims", []) if e.get("text")]
     count = 0
-    for claim in claims:
+    for entry in entries:
+        claim, text = entry["id"], entry["text"]
         observations = list(
             Observation.objects.filter(job=job, claim_key=claim).order_by("created_at")
         )
-        state, summary = reconcile_claim(observations, claim)
+        state, summary = reconcile_claim(observations, text)
         recheck_ran = any(o.source == ObservationSource.RECHECK for o in observations)
         state_without, _ = reconcile_claim(
             [o for o in observations if o.source != ObservationSource.RECHECK],
-            claim,
+            text,
         )
         AuditFinding.objects.update_or_create(
             job=job,
             claim_key=claim,
             defaults={
+                "claim_text": text,
                 "state": state,
                 "summary": summary,
                 "evidence": {

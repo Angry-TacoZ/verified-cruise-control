@@ -270,6 +270,50 @@ def test_muse_analyze_rejects_malformed_content():
         )
 
 
+def test_muse_validator_rejects_unknown_claim_concept():
+    payload = {
+        "observations": [
+            {
+                "photo_id": "p1",
+                "claim_concept": "c99",
+                "visible_object": "v",
+                "description": "d",
+                "supports_localization": False,
+                "ambiguous": False,
+                "needs_crop": False,
+                "needs_other_view": False,
+            }
+        ]
+    }
+    with pytest.raises(ProviderResponseError, match="unknown claim_concept"):
+        validate_observation_payload(
+            payload, frozenset({"p1"}), frozenset({"c1", "c2"})
+        )
+    ok, _ = validate_observation_payload(payload, frozenset({"p1"}))
+    assert len(ok) == 1
+
+
+def test_muse_analyze_rejects_truncated_output():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"content": '{"observations": ['},
+                        "finish_reason": "length",
+                    }
+                ]
+            },
+        )
+
+    adapter = BasetenMuseAdapter(api_key="bt-test")
+    with pytest.raises(ProviderResponseError, match="output-token limit"):
+        adapter.analyze(
+            muse_request(), client=mock_client(handler), sleep=lambda s: None
+        )
+
+
 def test_muse_analyze_retries_rate_limit_then_succeeds():
     calls = []
 

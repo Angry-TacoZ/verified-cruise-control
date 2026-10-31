@@ -88,6 +88,7 @@ export interface AuditJob {
 export interface AuditFinding {
   id: string;
   claim_key: string;
+  claim_text: string;
   state: string;
   summary: string;
   evidence: {

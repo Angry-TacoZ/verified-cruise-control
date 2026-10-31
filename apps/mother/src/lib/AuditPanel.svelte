@@ -253,7 +253,7 @@
       <ul class="mt-2 space-y-2 text-sm">
         {#each findings as finding (finding.id)}
           <li class={`rounded-md border p-3 ${stateTone(finding.state)}`}>
-            <div class="font-medium">{finding.claim_key}</div>
+            <div class="font-medium">{finding.claim_text || finding.claim_key}</div>
             <div class="mt-1">
               <span class="font-semibold">{stateLabel(finding.state)}</span>
               {#if finding.summary}

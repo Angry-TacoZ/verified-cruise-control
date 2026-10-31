@@ -214,6 +214,7 @@ class AuditFinding(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     job = models.ForeignKey(AuditJob, on_delete=models.CASCADE, related_name="findings")
     claim_key = models.CharField(max_length=255)
+    claim_text = models.TextField(blank=True, default="")
     state = models.CharField(max_length=32, choices=EvidenceState.choices)
     summary = models.TextField(blank=True, default="")
     evidence = models.JSONField(default=dict)
