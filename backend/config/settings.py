@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     "listings",
     "evidence",
     "pairing",
+    "audits",
 ]
 
 MIDDLEWARE = [
@@ -102,3 +103,45 @@ LOGGING = {
     "handlers": {"console": {"class": "logging.StreamHandler"}},
     "root": {"handlers": ["console"], "level": "INFO"},
 }
+
+# --- PR #2 audit engine: inference enablement + credit safety ---
+# Inference runs only when explicitly enabled AND an operator starts an
+# audit. Malformed values fail closed at startup (no silent defaults).
+AUDIT_INFERENCE_ENABLED = os.environ.get("VCC_INFERENCE_ENABLED", "") == "1"
+
+
+def _audit_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        raise RuntimeError(f"{name} must be an integer, got {raw!r}")
+    if value <= 0:
+        raise RuntimeError(f"{name} must be positive, got {raw!r}")
+    return value
+
+
+def _audit_decimal(name: str, default: str):
+    from decimal import Decimal, InvalidOperation
+
+    raw = os.environ.get(name, default)
+    try:
+        value = Decimal(raw)
+    except (InvalidOperation, ValueError):
+        raise RuntimeError(f"{name} must be a decimal, got {raw!r}")
+    if value <= 0:
+        raise RuntimeError(f"{name} must be positive, got {raw!r}")
+    return value
+
+
+AUDIT_MAX_CALLS_PER_JOB = _audit_int("VCC_AUDIT_MAX_CALLS", 60)
+AUDIT_SPEND_CAP_USD = _audit_decimal("VCC_AUDIT_SPEND_CAP_USD", "2.00")
+AUDIT_MAX_CROPS_PER_JOB = _audit_int("VCC_AUDIT_MAX_CROPS", 12)
+AUDIT_MAX_RECHECKS_PER_JOB = _audit_int("VCC_AUDIT_MAX_RECHECKS", 12)
+AUDIT_WORKER_HEARTBEAT_S = _audit_int("VCC_AUDIT_HEARTBEAT_S", 300)
+AUDIT_BASETEN_MODEL_ID = os.environ.get(
+    "VCC_BASETEN_MODEL", "meta-models/muse-spark-open-1026"
+)
+AUDIT_SAM_MODEL_ID = os.environ.get("VCC_SAM_MODEL", "sam-3.1")
