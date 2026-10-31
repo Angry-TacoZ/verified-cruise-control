@@ -39,6 +39,37 @@ as relative `/api/*` paths. All JSON unless noted. Auth failures return
 
 The extension token is **not** accepted on any of these (`401`).
 
+### Audit job object (PR #2)
+
+`GET /api/audits/{job_id}` returns the job with lifecycle + budget
+fields. Queueing only persists the job (`status: queued`,
+`worker_id: ""`); the standalone `run_audit_worker` process claims it —
+endpoints never spawn worker threads.
+
+Budget fields (exact names):
+
+- `max_calls` / `model_calls_made`: model-attempt allowance vs actual
+  model attempts. Local stages (screening, crop cutting, reconcile)
+  never consume this allowance.
+- `calls_made`: ledger-row count (model calls **and** local stages) —
+  activity, not spend. Compare against `max_calls` only via
+  `model_calls_made`.
+- `spend_cap_usd` / `spend_usd`: per-job ceiling vs settled actuals.
+  `spend_usd` never absorbs an unknown-cost call as zero.
+- `unknown_cost_calls`: calls that finished without billable usage
+  (missing token counts, timeouts after possible execution). Any
+  nonzero value on a paused job means "spend may exceed `spend_usd`".
+- `error_code` / `error_detail`: exact halt reason (`call_cap`,
+  `spend_cap`, `unknown_cost`, provider error names, `worker_crash`).
+- Execution rows in `/evidence` carry `attempts` (external requests
+  fired, retries included) and `cost_usd` (string, or `null` when
+  billing is unknown — never silently zero).
+
+Job statuses: `queued` → `running` → `complete`; `paused` (budget
+blocker, resumable by a fresh job via `/retry`); `failed`
+(provider/validation crash); `cancelled` (operator). `retry` on a
+paused job keeps the blocker's record while the fresh job starts clean.
+
 ## Extension (`X-Extension-Token` header; no cookies, no CSRF)
 
 | Method | Path | Notes |
@@ -95,9 +126,9 @@ matching failure rows. Unresolved failures flip the listing to `partial`;
 meeting `expected_photo_count` with no outstanding failures yields
 `complete`.
 
-## Future (not in PR #1)
+## Retired notes
 
-`POST /api/listings/{id}/audit` will enqueue a durable audit job and return
-`202 Accepted`. PR #2 implements this as `POST /api/listings/{id}/audits`
-(plural; see the Mother app table). The singular path was never shipped,
-so no compatibility shim exists.
+`POST /api/listings/{id}/audits` (plural; see the Mother app table)
+enqueues a durable audit job and returns `202 Accepted`. The singular
+`/audit` path discussed during PR #1 planning was never shipped, so no
+compatibility shim exists.

@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import threading
 
+from django.conf import settings
 from django.db import close_old_connections
 
 from providers.base import ProviderError
@@ -42,7 +43,12 @@ def run_claimed_job(
     """Claim one job and run the full pipeline. Returns the settled job,
     or None when no job was claimable. Expected halts (budget pause,
     cancel, provider failure) are already recorded with exact state; only
-    unexpected crashes fail the job here."""
+    unexpected crashes fail the job here. Refuses to claim while
+    inference is disabled, so flipping the flag off stops spend even
+    for already-queued jobs (they wait for re-enablement)."""
+    if not settings.AUDIT_INFERENCE_ENABLED:
+        logger.debug("audit worker %s idle: inference disabled", worker_id)
+        return None
     try:
         job = services.claim_job(worker_id)
     except Exception:

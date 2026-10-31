@@ -130,7 +130,7 @@ No cloud account, API keys, or paid services are needed for PR #1.
 
 ```powershell
 ./scripts/setup.ps1        # once: venv, deps, migrations, npm installs
-./scripts/dev.ps1          # backend :8000 + mother app :5173 + fixtures :8901
+./scripts/dev.ps1          # backend :8000 + audit worker + mother app :5173 + fixtures :8901
 ```
 
 Then:
@@ -178,7 +178,31 @@ verify pairing + evidence persist, re-import and confirm no duplicate
 evidence. The partial fixture (`listing-partial.html`) exercises the
 failed-photo path: one photo 404s, the failure is recorded server-side and
 shown in the mother app, and the popup's retry reuses the same listing.
-Zero Baseten/Meta calls by construction (adapters refuse in PR #1).
+Import makes zero Baseten/Meta calls by construction.
+
+## Audit engine (PR #2)
+
+Audits compare advertised claims against the imported photos and produce
+per-claim findings in five states (`verified`, `visually_supported`,
+`insufficient_evidence`, `not_visually_verifiable`, `contradicted`).
+
+Run one (needs `VCC_INFERENCE_ENABLED=1` plus `BASETEN_API_KEY` and
+`META_API_KEY` in `backend/.env` — see `backend/.env.example`):
+
+1. `./scripts/dev.ps1` (the audit worker starts in its own window), or
+   `./scripts/start-audit-worker.ps1` standalone.
+2. In the mother app, open a listing → **Run audit**. This only queues
+   the job (`202`); the worker claims it and runs screening → Muse →
+   SAM → crops → conditional recheck → reconcile.
+3. Findings, observations, crops, and the cost ledger appear in the
+   audit panel; `/api/audits/{job_id}/evidence` exposes the same data.
+
+Spend controls (see `docs/security.md`): every provider call reserves
+worst-case attempts + spend before firing; per-job call and spend caps
+pause with exact codes; unknown billing is never booked as zero; local
+stages consume no model allowance. Killing the worker mid-audit is
+safe — the next worker pass reclaims the job and resumes without
+re-firing completed calls (exactly-once billing is not claimed).
 
 ## Repository layout
 
@@ -199,8 +223,8 @@ committed. Copy `backend/.env.example` to `backend/.env` for local keys.
 
 | Area      | Command (repo root)                              | Coverage |
 |-----------|--------------------------------------------------|----------|
-| Backend   | `.venv/Scripts/python -m pytest backend/`        | 90+ tests: migrations, WAL, import, photos, failure records, concurrency, pairing, CSRF, zero-inference |
-| Mother    | `npm test --prefix apps/mother`                  | API client, dashboard, import form, failure display |
+| Backend   | `.venv/Scripts/python -m pytest backend/`        | 220+ tests: migrations, WAL, import, photos, failure records, concurrency, pairing, CSRF, zero-inference, audits (queue/claim/budget/stages/worker), providers, eval goldens |
+| Mother    | `npm test --prefix apps/mother`                  | API client, dashboard, import form, failure display, audit panel |
 | Extension | `npm test --prefix apps/extension`               | Extractor, protocol, uploader, retry, URL/redirect policy, storage guards, popup UI |
 | Browser   | `npx playwright test` in `apps/mother`           | Setup → dashboard → manual import smoke + extension E2E (full + partial import, retry, storage restriction) + screenshots |
 
@@ -208,20 +232,23 @@ CI (`.github/workflows/ci.yml`) runs lint, typecheck, tests, and production
 builds on every PR with mocked providers only — no model credentials exist
 in CI.
 
-## Known limitations (PR #1)
+## Known limitations (PR #2 branch)
 
-- No live AI inference: no Muse/SAM calls, no audit jobs, no findings UI.
-  The mother app deliberately shows “imported, not audited” everywhere.
-- One extractor (synthetic fixture server); dealership rules are PR #2+.
-- Photo gallery enumerates stored photos; crops/masks/thumbnails unenforced.
+- Live inference spends real credits: keep `VCC_INFERENCE_ENABLED` off
+  unless you mean it, and never set `VCC_LIVE_SMOKE=1` in CI.
+- One extractor (synthetic fixture server); dealership rules are later.
+- Reconciliation is conservative by design: photo-only audits reach
+  `contradicted`/`verified` only with authoritative backing, so most
+  real listings land in `insufficient_evidence` until more sources exist.
 - Single local operator, single pairing token family, no multi-user auth.
 - SQLite + local disk only; no backups, no replication.
 
 ## Roadmap
 
-- **PR #2**: live Muse Spark Open 1026 + SAM 3.1 integration, local audit
-  worker, durable jobs, Pillow crops, deterministic reconciliation,
-  five-state findings, baseline evals with real cost accounting.
+- **PR #2 (this branch)**: live Muse Spark Open 1026 + SAM 3.1
+  integration, standalone audit worker, durable jobs, Pillow crops,
+  deterministic reconciliation, five-state findings, baseline evals
+  with real cost accounting.
 - Later: dealership extractor pack, reviewer QA workflow, evidence packets,
   packaging hardening.
 

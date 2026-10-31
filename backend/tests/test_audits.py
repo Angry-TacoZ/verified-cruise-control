@@ -1858,6 +1858,17 @@ def test_worker_restart_reclaims_and_resumes(listing, photos, enabled):
     assert settled.findings.count() == 2
 
 
+def test_worker_refuses_while_inference_disabled(listing, enabled, settings):
+    from audits import worker
+
+    job, _ = services.queue_audit(listing.pk, requested_by="operator")
+    settings.AUDIT_INFERENCE_ENABLED = False
+    assert worker.run_claimed_job("w-x") is None
+    job.refresh_from_db()
+    assert job.status == JobStatus.QUEUED
+    assert job.worker_id == ""
+
+
 def test_completed_job_never_reexecutes(listing, photos, enabled):
     from audits import worker
 

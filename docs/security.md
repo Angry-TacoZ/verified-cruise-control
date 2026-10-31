@@ -80,6 +80,34 @@ can read this repository and can serve arbitrary listing pages.
   repeated reports never double-count, and successful uploads resolve
   matching rows so status reflects current evidence.
 
+## Model inference & spend controls (PR #2)
+
+- Inference is layered-gated: queueing and worker claiming both honor
+  `VCC_INFERENCE_ENABLED=1` (flipping it off parks already-queued jobs
+  unclaimed), provider calls additionally require their API keys, and
+  live tests/evals require `VCC_LIVE_SMOKE=1` plus keys. CI sets none
+  of these — mocked providers only, zero spend by construction.
+- Spend is bounded **before** each provider call, not after: the
+  worker reserves worst-case attempts + spend headroom
+  (`VCC_AUDIT_RESERVE_PER_CALL`) through an atomic conditional UPDATE,
+  then settles actuals. Reservation losers fail closed without
+  pausing; caps pause the job with an exact code (`call_cap`,
+  `spend_cap`, `unknown_cost`).
+- Unknown billing is never zero: missing token usage, timeouts after
+  possible execution, and unpriced responses pause with
+  `unknown_cost` (or keep the provider's failure code with
+  `unknown_cost_calls` incremented). `$0` settles only for calls that
+  certainly ran no inference.
+- The audit worker is a separate OS process (`run_audit_worker`); web
+  requests never run inference inline, and a server restart cannot
+  silently abandon or double-fire a call — jobs resume from durable
+  stage results, and completed observations are never re-requested.
+- Residual billing truth: caps are application-side headroom, not
+  provider-side guarantees. A call that finished server-side just
+  before a crash may go unsettled. No exactly-once billing is
+  claimed; the ledger records attempts, usage, and cost-or-unknown
+  for every call.
+
 ## Secrets & public-repo hygiene
 
 - Never committed: `.env`, `runtime-data/` (DB, originals, Django secret),
