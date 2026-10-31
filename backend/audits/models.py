@@ -147,6 +147,7 @@ class Observation(models.Model):
     verdict = models.CharField(max_length=16, choices=Verdict.choices)
     boxes = models.JSONField(default=list)
     rationale = models.TextField(blank=True, default="")
+    extra = models.JSONField(default=dict)
     execution = models.ForeignKey(
         AuditExecution,
         on_delete=models.SET_NULL,

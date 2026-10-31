@@ -16,6 +16,7 @@ from audits.models import (
     AuditJob,
     JobStatus,
     Observation,
+    ObservationSource,
     Provider,
     Stage,
     Verdict,
@@ -325,11 +326,11 @@ class FakeMuseAdapter:
         return MuseObservationResult(
             observations=tuple(self._observations),
             model=self.model_id,
-            prompt_version=pipeline.PROMPT_VERSION,
+            prompt_version=request.prompt_version,
             usage=UsageRecord(
                 provider="baseten",
                 model_id=self.model_id,
-                prompt_version=pipeline.PROMPT_VERSION,
+                prompt_version=request.prompt_version,
                 photo_ids=tuple(request.photo_ids),
                 status="ok",
                 latency_ms=11,
@@ -423,18 +424,6 @@ def test_muse_unknown_cost_pauses(listing, photos, enabled):
     assert Observation.objects.filter(job=job).count() == 0
 
 
-def test_run_stages_leaves_job_running_for_later_stages(listing, photos, enabled):
-    job = _running_job(listing)
-    adapter = FakeMuseAdapter(
-        observations=[_obs(str(photos[0].id), "adaptive cruise control")]
-    )
-    done = pipeline.run_stages(job.pk, "w1", adapter)
-    assert done.status == JobStatus.RUNNING
-    assert done.current_stage == Stage.Muse
-    assert Observation.objects.filter(job=job).count() == 1
-    assert AuditExecution.objects.filter(job=job).count() == 2
-
-
 def test_run_stages_rejects_stale_worker(listing, photos, enabled):
     job = _running_job(listing)
     with pytest.raises(services.StaleWorkerError):
@@ -453,3 +442,432 @@ def test_complete_job(listing):
     services.complete_job(job.pk, "w1")
     job.refresh_from_db()
     assert job.status == JobStatus.COMPLETE
+
+
+# --- SAM stage (fake adapter, zero inference) ----------------------------
+
+
+class FakeSamAdapter:
+    model_id = "fake-sam"
+
+    def __init__(self, records=None, error=None, cost=0.0025):
+        self._records = records or []
+        self._error = error
+        self._cost = cost
+        self.calls = 0
+        self.concepts: list[str] = []
+
+    def analyze(self, request):
+        from providers.meta import SamSegmentationResult
+
+        self.calls += 1
+        self.concepts.append(request.concept)
+        if self._error is not None:
+            raise self._error
+        return SamSegmentationResult(
+            records=tuple(self._records),
+            model=self.model_id,
+            usage=UsageRecord(
+                provider="meta",
+                model_id=self.model_id,
+                prompt_version="sam-test",
+                photo_ids=(request.photo.photo_id,),
+                status="ok",
+                latency_ms=9,
+                estimated_cost_usd=self._cost,
+                pricing_version="test",
+            ),
+            warnings=(),
+        )
+
+
+def _segment(box=(8, 8, 32, 32), size=(64, 48), confidence=0.9):
+    from providers.meta import SegmentRecord
+
+    width, height = size
+    return SegmentRecord(
+        object_id=0,
+        box=box,
+        width=width,
+        height=height,
+        raster=bytes(width * height),
+        encoding="one_bit",
+        provider_confidence=confidence,
+    )
+
+
+def _present_muse_obs(job, photo, claim="adaptive cruise control", **extra):
+    flags = {"supports_localization": True}
+    flags.update(extra)
+    return Observation.objects.create(
+        job=job,
+        claim_key=claim,
+        photo=photo,
+        source=ObservationSource.Muse,
+        verdict=Verdict.PRESENT,
+        rationale="saw it",
+        extra=flags,
+    )
+
+
+def test_sanitize_concept():
+    assert pipeline.sanitize_concept("adaptive cruise control") == (
+        "adaptive cruise control"
+    )
+    assert pipeline.sanitize_concept("a! b? c; d. e<f> g|h") == "a b c d ef gh"
+    long = " ".join(f"w{i}" for i in range(20))
+    assert pipeline.sanitize_concept(long) == " ".join(f"w{i}" for i in range(10))
+    assert pipeline.sanitize_concept("!?.") == ""
+
+
+def test_sam_localizes_flagged_present(listing, photos, enabled):
+    job = _running_job(listing)
+    _present_muse_obs(job, photos[0])
+    adapter = FakeSamAdapter(records=[_segment()])
+    assert pipeline.run_sam(job.pk, "w1", adapter) == 1
+    assert adapter.calls == 1
+    assert adapter.concepts == ["adaptive cruise control"]
+    obs = Observation.objects.get(job=job, source=ObservationSource.SAM)
+    assert obs.verdict == Verdict.PRESENT
+    assert obs.boxes[0]["box"] == [8, 8, 32, 32]
+    assert obs.boxes[0]["confidence"] == 0.9
+    mask_file = pipeline.audit_dirs(job.pk)["masks"] / f"{obs.boxes[0]['mask_ref']}.png"
+    assert mask_file.exists()
+    from PIL import Image
+
+    with Image.open(mask_file) as img:
+        assert img.size == (64, 48)
+    row = AuditExecution.objects.get(job=job, stage=Stage.SAM)
+    assert row.provider == Provider.META
+    job.refresh_from_db()
+    assert job.spend_usd == Decimal("0.0025")
+
+
+def test_sam_zero_match_is_absent(listing, photos, enabled):
+    job = _running_job(listing)
+    _present_muse_obs(job, photos[0])
+    adapter = FakeSamAdapter(records=[])
+    assert pipeline.run_sam(job.pk, "w1", adapter) == 1
+    obs = Observation.objects.get(job=job, source=ObservationSource.SAM)
+    assert obs.verdict == Verdict.ABSENT
+    assert obs.boxes == []
+
+
+def test_sam_skips_unflagged_observations(listing, photos, enabled):
+    job = _running_job(listing)
+    _present_muse_obs(job, photos[0], supports_localization=False)
+    adapter = FakeSamAdapter(records=[_segment()])
+    assert pipeline.run_sam(job.pk, "w1", adapter) == 0
+    assert adapter.calls == 0
+    assert not Observation.objects.filter(
+        job=job, source=ObservationSource.SAM
+    ).exists()
+
+
+def test_sam_unlocalizable_claim_is_unclear(listing, photos, enabled):
+    job = _running_job(listing)
+    _present_muse_obs(job, photos[0], claim="!?.")
+    adapter = FakeSamAdapter(records=[_segment()])
+    assert pipeline.run_sam(job.pk, "w1", adapter) == 0
+    assert adapter.calls == 0
+    obs = Observation.objects.get(job=job, source=ObservationSource.SAM)
+    assert obs.verdict == Verdict.UNCLEAR
+
+
+def test_sam_resume_skips_localized_pairs(listing, photos, enabled):
+    job = _running_job(listing)
+    _present_muse_obs(job, photos[0])
+    adapter = FakeSamAdapter(records=[_segment()])
+    assert pipeline.run_sam(job.pk, "w1", adapter) == 1
+    assert pipeline.run_sam(job.pk, "w1", adapter) == 0
+    assert adapter.calls == 1
+
+
+def test_sam_provider_error_fails_job(listing, photos, enabled):
+    job = _running_job(listing)
+    _present_muse_obs(job, photos[0])
+    adapter = FakeSamAdapter(error=ProviderRateLimitError("slow down"))
+    with pytest.raises(ProviderRateLimitError):
+        pipeline.run_sam(job.pk, "w1", adapter)
+    job.refresh_from_db()
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == "ProviderRateLimitError"
+
+
+# --- crop stage ----------------------------------------------------------
+
+
+def _sam_present_obs(job, photo, boxes, claim="adaptive cruise control"):
+    return Observation.objects.create(
+        job=job,
+        claim_key=claim,
+        photo=photo,
+        source=ObservationSource.SAM,
+        verdict=Verdict.PRESENT,
+        boxes=boxes,
+        rationale="segments",
+    )
+
+
+def test_crop_cuts_boxes_to_files(listing, photos, enabled):
+    from audits.models import AuditCrop
+
+    job = _running_job(listing)
+    _sam_present_obs(
+        job,
+        photos[0],
+        [{"box": [8, 8, 32, 32], "mask_ref": None, "confidence": 0.9}],
+    )
+    assert pipeline.run_crop(job.pk, "w1") == 1
+    crop = AuditCrop.objects.get(job=job)
+    assert (crop.width, crop.height) == (24, 24)
+    assert crop.source_photo_id == photos[0].pk
+    crop_file = pipeline.audit_dirs(job.pk)["crops"] / f"{crop.storage_ref}.png"
+    assert crop_file.exists()
+    from PIL import Image
+
+    with Image.open(crop_file) as img:
+        assert img.size == (24, 24)
+    # Resume is idempotent.
+    assert pipeline.run_crop(job.pk, "w1") == 0
+    assert AuditCrop.objects.filter(job=job).count() == 1
+
+
+def test_crop_respects_cap_and_skips_degenerate(listing, photos, enabled):
+    from audits.models import AuditCrop
+
+    enabled.AUDIT_MAX_CROPS_PER_JOB = 1
+    job = _running_job(listing)
+    _sam_present_obs(
+        job,
+        photos[0],
+        [
+            {"box": [0, 0, 16, 16], "mask_ref": None},
+            {"box": [16, 16, 32, 32], "mask_ref": None},
+            {"box": [5, 5, 5, 5], "mask_ref": None},
+        ],
+    )
+    assert pipeline.run_crop(job.pk, "w1") == 1
+    assert AuditCrop.objects.filter(job=job).count() == 1
+    row = AuditExecution.objects.filter(job=job, stage=Stage.CROP).latest("created_at")
+    assert row.provider == Provider.LOCAL
+    assert row.usage["skipped"] == 2
+
+
+# --- recheck stage -------------------------------------------------------
+
+
+def _crop_row(job, photo):
+    from audits.models import AuditCrop
+
+    ref = "cropref1"
+    dest = pipeline.audit_dirs(job.pk)["crops"] / f"{ref}.png"
+    from PIL import Image
+
+    Image.new("RGB", (16, 16)).save(dest, format="PNG")
+    return AuditCrop.objects.create(
+        job=job,
+        source_photo=photo,
+        box=[0, 0, 16, 16],
+        storage_ref=ref,
+        width=16,
+        height=16,
+    )
+
+
+def test_recheck_confirms_crop(listing, photos, enabled):
+    job = _running_job(listing)
+    _crop_row(job, photos[0])
+    adapter = FakeMuseAdapter(
+        observations=[
+            _obs(str(photos[0].id), "adaptive cruise control"),
+            _obs(
+                str(photos[0].id),
+                "lane keeping assist",
+                visible_object=False,
+            ),
+        ]
+    )
+    assert pipeline.run_recheck(job.pk, "w1", adapter) == 1
+    rows = {
+        o.claim_key: o.verdict
+        for o in Observation.objects.filter(job=job, source=ObservationSource.RECHECK)
+    }
+    assert rows == {
+        "adaptive cruise control": Verdict.PRESENT,
+        "lane keeping assist": Verdict.ABSENT,
+    }
+    row = AuditExecution.objects.get(job=job, stage=Stage.RECHECK)
+    assert row.usage["prompt_version"] == "m1-recheck"
+
+
+def test_recheck_skips_covered_crops(listing, photos, enabled):
+    job = _running_job(listing)
+    crop = _crop_row(job, photos[0])
+    for claim in ("adaptive cruise control", "lane keeping assist"):
+        Observation.objects.create(
+            job=job,
+            claim_key=claim,
+            photo=photos[0],
+            source=ObservationSource.RECHECK,
+            verdict=Verdict.PRESENT,
+            extra={"crop_ref": crop.storage_ref},
+        )
+    adapter = FakeMuseAdapter(observations=[])
+    assert pipeline.run_recheck(job.pk, "w1", adapter) == 0
+    assert adapter.calls == 0
+
+
+def test_recheck_provider_error_fails_job(listing, photos, enabled):
+    job = _running_job(listing)
+    _crop_row(job, photos[0])
+    adapter = FakeMuseAdapter(error=ProviderRateLimitError("slow down"))
+    with pytest.raises(ProviderRateLimitError):
+        pipeline.run_recheck(job.pk, "w1", adapter)
+    job.refresh_from_db()
+    assert job.status == JobStatus.FAILED
+
+
+# --- reconcile -----------------------------------------------------------
+
+
+def _obs_row(job, photo, source, verdict, claim="adaptive cruise control", **extra):
+    return Observation.objects.create(
+        job=job,
+        claim_key=claim,
+        photo=photo,
+        source=source,
+        verdict=verdict,
+        extra=extra,
+    )
+
+
+def test_reconcile_contradicted(listing, photos):
+    job = _running_job(listing)
+    rows = [
+        _obs_row(job, photos[0], ObservationSource.Muse, Verdict.ABSENT),
+        _obs_row(job, photos[1], ObservationSource.Muse, Verdict.ABSENT),
+    ]
+    state, _ = pipeline.reconcile_claim(rows)
+    assert state == "contradicted"
+
+
+def test_reconcile_supported_via_sam(listing, photos):
+    job = _running_job(listing)
+    rows = [
+        _obs_row(job, photos[0], ObservationSource.Muse, Verdict.PRESENT),
+        _obs_row(job, photos[0], ObservationSource.SAM, Verdict.PRESENT),
+    ]
+    state, _ = pipeline.reconcile_claim(rows)
+    assert state == "visually_supported"
+
+
+def test_reconcile_supported_via_recheck(listing, photos):
+    job = _running_job(listing)
+    rows = [
+        _obs_row(job, photos[0], ObservationSource.Muse, Verdict.UNCLEAR),
+        _obs_row(job, photos[0], ObservationSource.SAM, Verdict.ABSENT),
+        _obs_row(job, photos[0], ObservationSource.RECHECK, Verdict.PRESENT),
+    ]
+    state, _ = pipeline.reconcile_claim(rows)
+    assert state == "visually_supported"
+
+
+def test_reconcile_not_visually_verifiable(listing, photos):
+    job = _running_job(listing)
+    rows = [
+        _obs_row(
+            job,
+            photos[0],
+            ObservationSource.Muse,
+            Verdict.UNCLEAR,
+            needs_other_view=True,
+        ),
+    ]
+    state, _ = pipeline.reconcile_claim(rows)
+    assert state == "not_visually_verifiable"
+
+
+def test_reconcile_insufficient_on_disagreement(listing, photos):
+    job = _running_job(listing)
+    rows = [
+        _obs_row(job, photos[0], ObservationSource.Muse, Verdict.PRESENT),
+        _obs_row(job, photos[0], ObservationSource.SAM, Verdict.ABSENT),
+    ]
+    state, _ = pipeline.reconcile_claim(rows)
+    assert state == "insufficient_evidence"
+
+
+def test_reconcile_never_verified(listing, photos):
+    job = _running_job(listing)
+    rows = [
+        _obs_row(job, photos[0], ObservationSource.Muse, Verdict.PRESENT),
+        _obs_row(job, photos[0], ObservationSource.SAM, Verdict.PRESENT),
+        _obs_row(job, photos[0], ObservationSource.RECHECK, Verdict.PRESENT),
+    ]
+    state, _ = pipeline.reconcile_claim(rows)
+    assert state != "verified"
+
+
+def test_run_reconcile_persists_findings_and_completes(listing, photos):
+    from audits.models import AuditFinding
+
+    job = _running_job(listing)
+    _obs_row(job, photos[0], ObservationSource.Muse, Verdict.ABSENT)
+    _obs_row(job, photos[1], ObservationSource.Muse, Verdict.ABSENT)
+    assert pipeline.run_reconcile(job.pk, "w1") == 2
+    findings = {f.claim_key: f.state for f in AuditFinding.objects.filter(job=job)}
+    assert findings == {
+        "adaptive cruise control": "contradicted",
+        "lane keeping assist": "insufficient_evidence",
+    }
+    assert (
+        AuditFinding.objects.get(job=job, claim_key="adaptive cruise control").evidence[
+            "rule"
+        ]
+        == "v1"
+    )
+    job.refresh_from_db()
+    assert job.status == JobStatus.COMPLETE
+
+
+def test_full_pipeline_completes_with_findings(listing, photos, enabled):
+    from audits.models import AuditFinding
+
+    job = _running_job(listing)
+    muse = FakeMuseAdapter(
+        observations=[
+            _obs(str(photos[0].id), "adaptive cruise control"),
+            _obs(
+                str(photos[1].id),
+                "adaptive cruise control",
+                visible_object=False,
+            ),
+            _obs(str(photos[0].id), "lane keeping assist", visible_object=False),
+            _obs(str(photos[1].id), "lane keeping assist", visible_object=False),
+        ]
+    )
+    sam = FakeSamAdapter(records=[_segment()])
+    done = pipeline.run_stages(job.pk, "w1", muse, sam)
+    assert done.status == JobStatus.COMPLETE
+    findings = {f.claim_key: f.state for f in AuditFinding.objects.filter(job=job)}
+    assert findings == {
+        "adaptive cruise control": "visually_supported",
+        "lane keeping assist": "contradicted",
+    }
+    stages = list(
+        AuditExecution.objects.filter(job=job)
+        .order_by("created_at")
+        .values_list("stage", flat=True)
+    )
+    assert stages == [
+        "screening",
+        "muse",
+        "sam",
+        "crop",
+        "recheck",
+        "reconcile",
+    ]
+    done.refresh_from_db()
+    assert done.spend_usd > Decimal("0.0000")
+    assert done.unknown_cost_calls == 0
