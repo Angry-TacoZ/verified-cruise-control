@@ -41,7 +41,7 @@ FIXTURES = REPO / "fixtures" / "synthetic-listings" / "photos"
 MIME = {".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 
 
-GOLDENS_VERSION = "v3"
+GOLDENS_VERSION = "v4"
 
 
 def run_reconcile(version: str = GOLDENS_VERSION) -> dict:
@@ -59,7 +59,9 @@ def run_reconcile(version: str = GOLDENS_VERSION) -> dict:
             )
             for item in case["observations"]
         ]
-        state, summary = reconcile_claim(rows, case.get("claim", ""))
+        state, summary = reconcile_claim(
+            rows, case.get("claim", ""), case.get("vehicle")
+        )
         scored.append(
             {
                 "id": case["id"],

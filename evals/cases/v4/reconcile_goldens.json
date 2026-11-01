@@ -1,0 +1,295 @@
+{
+  "version": 4,
+  "rule": "v4-eligibility-per-control",
+  "catalog_version": "2026-11-01/v1",
+  "notes": "Rule v4 pins Layer D eligibility + per-control aggregation: manufacturer-specific catalog entries apply only when the audit vehicle (trusted listing metadata) falls inside their documented make/model/year applicability; every control item (top-level plus nested controls) is interpreted independently and SAM targets the claim-relevant item. v3 cases carried no vehicle identity, so v4 re-states them with explicit vehicles and corrected expectations; v1/v2/v3 files and results are preserved as versioned history.",
+  "changes_from_v3": "Dedicated-button support now requires an applicable vehicle (new insufficient cases: borrowed entries, out-of-range years, missing identity); nested controls can independently support a claim (nested-lka-supports); contradictory model context cannot override listing metadata.",
+  "cases": [
+    {
+      "id": "kia-acc-supported",
+      "claim": "adaptive cruise control",
+      "vehicle": {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"},
+      "expected": "visually_supported",
+      "why": "Documented dedicated ACC control on the documented vehicle, SAM-confirmed.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "following-distance button",
+            "control_symbol": "vehicle with distance bars",
+            "control_type": "button",
+            "location": "steering_wheel",
+            "dedicated": true
+          }
+        },
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "kia-lka-supported",
+      "claim": "lane keeping assist",
+      "vehicle": {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"},
+      "expected": "visually_supported",
+      "why": "Documented dedicated LKA dash button on the documented vehicle.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "lane keeping assist button",
+            "control_symbol": "vehicle between lane lines",
+            "control_type": "button",
+            "location": "left_dashboard",
+            "dedicated": true,
+            "manufacturer_context": "Kia Forte"
+          }
+        },
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "vw-golf-cannot-borrow-kia-lka",
+      "claim": "lane keeping assist",
+      "vehicle": {"year": 2022, "make": "Volkswagen", "model": "Golf", "trim": ""},
+      "expected": "insufficient_evidence",
+      "why": "The LKA entry is verified for Kia Forte only; a Golf cannot borrow it even with SAM confirmation.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "lane keeping assist button",
+            "control_symbol": "vehicle between lane lines",
+            "control_type": "button",
+            "location": "left_dashboard",
+            "dedicated": true
+          }
+        },
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "toyota-cannot-borrow-kia-acc",
+      "claim": "adaptive cruise control",
+      "vehicle": {"year": 2020, "make": "Toyota", "model": "Camry", "trim": "SE"},
+      "expected": "insufficient_evidence",
+      "why": "The SCC distance entry is verified for Kia Forte 2021-2022 only.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "following-distance button",
+            "control_symbol": "vehicle with distance bars",
+            "control_type": "button",
+            "location": "steering_wheel",
+            "dedicated": true,
+            "manufacturer_context": "Toyota Camry"
+          }
+        },
+        {"source": "sam", "verdict": "absent", "photo": 0}
+      ]
+    },
+    {
+      "id": "year-out-of-range",
+      "claim": "adaptive cruise control",
+      "vehicle": {"year": 2024, "make": "Kia", "model": "Forte", "trim": ""},
+      "expected": "insufficient_evidence",
+      "why": "Right make and model, but the ACC entry covers 2021-2022 and the car is a 2024.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "following-distance button",
+            "control_symbol": "vehicle with distance bars",
+            "control_type": "button",
+            "location": "steering_wheel",
+            "dedicated": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "missing-vehicle-identity",
+      "claim": "adaptive cruise control",
+      "expected": "insufficient_evidence",
+      "why": "No vehicle identity at all: manufacturer-specific entries cannot apply, and the model's visual guess does not establish identity.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "following-distance button",
+            "control_symbol": "vehicle with distance bars",
+            "control_type": "button",
+            "location": "steering_wheel",
+            "dedicated": true,
+            "manufacturer_context": "Kia Forte"
+          }
+        }
+      ]
+    },
+    {
+      "id": "nested-lka-supports",
+      "claim": "lane keeping assist",
+      "vehicle": {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"},
+      "expected": "visually_supported",
+      "why": "Top-level object is an unmapped cluster, but the nested LKA dash button independently supports the claim.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "dashboard button cluster",
+            "location": "left_dashboard",
+            "controls": [
+              {
+                "visible_object": "lane keeping assist button",
+                "control_symbol": "vehicle between lane lines",
+                "location": "left_dashboard"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "multi-control-acc-supported",
+      "claim": "adaptive cruise control",
+      "vehicle": {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"},
+      "expected": "visually_supported",
+      "why": "Three controls in one photo; the distance button supports ACC while the LKA and generic buttons are evaluated separately.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "following-distance button",
+            "control_symbol": "vehicle with distance bars",
+            "control_type": "button",
+            "location": "steering_wheel",
+            "dedicated": true,
+            "controls": [
+              {
+                "visible_object": "lane keeping assist button",
+                "control_symbol": "vehicle between lane lines",
+                "location": "left_dashboard"
+              },
+              {
+                "visible_object": "cruise set and resume buttons",
+                "location": "steering_wheel"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "generic-cruise-not-acc",
+      "claim": "adaptive cruise control",
+      "vehicle": {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"},
+      "expected": "insufficient_evidence",
+      "why": "SAM confirms the buttons exist, but generic cruise buttons are non-diagnostic for ACC.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "cruise set and resume buttons",
+            "control_type": "button",
+            "location": "steering_wheel"
+          }
+        },
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "stalk-menu-not-centering",
+      "claim": "lane centering",
+      "vehicle": {"year": 2022, "make": "Volkswagen", "model": "Jetta", "trim": ""},
+      "expected": "insufficient_evidence",
+      "why": "The stalk button opens an assistance menu; a menu never establishes lane centering.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "driver assistance button",
+            "control_type": "stalk button",
+            "location": "stalk",
+            "dedicated": true,
+            "manufacturer_context": "VW Jetta GLI"
+          }
+        },
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "lka-not-centering",
+      "claim": "lane centering",
+      "vehicle": {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"},
+      "expected": "insufficient_evidence",
+      "why": "A documented LKA control never promotes to lane centering.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "lane keeping assist button",
+            "control_symbol": "vehicle between lane lines",
+            "control_type": "button",
+            "location": "left_dashboard",
+            "dedicated": true
+          }
+        },
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "context-conflict-listing-governs",
+      "claim": "adaptive cruise control",
+      "vehicle": {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"},
+      "expected": "visually_supported",
+      "why": "The model misreads the car as a Jetta, but trusted listing metadata governs applicability and the conflict is recorded.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "following-distance button",
+            "control_symbol": "vehicle with distance bars",
+            "control_type": "button",
+            "location": "steering_wheel",
+            "dedicated": true,
+            "manufacturer_context": "Volkswagen Jetta dashboard"
+          }
+        }
+      ]
+    },
+    {
+      "id": "legacy-confirm-kept",
+      "claim": "adaptive cruise control",
+      "vehicle": {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"},
+      "expected": "visually_supported",
+      "why": "Rows without control identification keep the legacy Muse+SAM confirm rule.",
+      "observations": [
+        {"source": "muse", "verdict": "present", "photo": 0},
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    }
+  ]
+}

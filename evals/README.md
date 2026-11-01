@@ -36,16 +36,22 @@ cost per listing · malformed-input reliability.
 
 ## Current status
 
-- `cases/v3/reconcile_goldens.json`: 13 hand-labeled reconcile cases over
-  manufacturer-aware interpretation + SAM target fixtures; run with
+- `cases/v4/reconcile_goldens.json`: 13 hand-labeled reconcile cases
+  with explicit audit-vehicle blocks; run with
   `python evals/run.py reconcile` (zero inference). Pinned in CI by
-  `backend/tests/test_eval_goldens.py`. v3 supersedes v2 with Layer D
-  catalog-driven support (diagnostic/supportive catalog mappings can
-  yield `visually_supported`, documented unknown cannot); v1/v2 cases
-  and results are preserved as versioned history.
+  `backend/tests/test_eval_goldens.py` alongside v2. v4 supersedes v3
+  with eligibility gating (manufacturer-specific entries apply only to
+  documented make/model/year vehicles; borrowed entries, out-of-range
+  years, and missing identity yield `insufficient_evidence`) plus
+  per-control aggregation (nested controls support independently; SAM
+  aims at the claim-relevant item). v1/v2/v3 cases and results are
+  preserved as versioned history.
+- `cases/v3/reconcile_goldens.json`: 13 hand-labeled reconcile cases
+  over manufacturer-aware interpretation without vehicle identity;
+  superseded by v4, retained for history.
 - `cases/v2/reconcile_goldens.json`: 14 hand-labeled reconcile cases
-  under the pre-catalog conservative classifier; v2 supersedes v1
-  (absence is never contradiction). Both retained for history.
+  under the pre-catalog conservative classifier (absence is never
+  contradiction); still pinned. v1 retained for history.
 - `cases/v1/muse_fixture_ground_truth.json`: unsupported-inference eval
   over the 3 synthetic fixture photos (no honest output may claim a
   feature is present). Run with `python evals/run.py muse-live`: one live

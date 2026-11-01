@@ -200,10 +200,12 @@ Run one (needs `VCC_INFERENCE_ENABLED=1` plus `BASETEN_API_KEY` and
 
 Muse names physical controls (button, symbol, location); the
 versioned ADAS reference catalog (`docs/adas-catalog.md`) maps those
-to documented vehicle capabilities; SAM localizes the named object —
-never an abstract feature; deterministic reconcile assigns the final
-state plus an inspectable interpretation (observed object, reference,
-strength, cannot-infer list). Dedicated controls (e.g. a following-
+to documented vehicle capabilities, and manufacturer-specific entries
+apply only to vehicles inside their documented make/model/year range;
+SAM localizes the claim-relevant object — never an abstract feature;
+deterministic reconcile assigns the final state plus an inspectable
+interpretation (observed object, reference, strength, cannot-infer
+list, per-control provenance). Dedicated controls (e.g. a following-
 distance button) can yield `visually_supported`; generic ones never
 promote upward.
 

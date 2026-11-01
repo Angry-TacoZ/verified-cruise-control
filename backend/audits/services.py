@@ -46,10 +46,13 @@ class JobNotRunningError(AuditError):
 
 
 def build_snapshot(listing_id) -> dict:
-    """Freeze the audit inputs: claim IDs + texts, photo IDs + SHA-256.
+    """Freeze the audit inputs: vehicle identity, claim IDs + texts,
+    photo IDs + SHA-256.
 
     The pipeline processes this snapshot, never the live listing, so
     later claim edits or photo arrivals cannot shift historical findings.
+    The vehicle block (year/make/model/trim, never the VIN) gates
+    manufacturer-specific catalog entries at reconcile time.
     """
     from evidence.models import Photograph
     from listings.models import Listing
@@ -59,6 +62,12 @@ def build_snapshot(listing_id) -> dict:
     photos = Photograph.objects.filter(listing=listing).order_by("created_at")
     return {
         "taken_at": timezone.now().isoformat(),
+        "vehicle": {
+            "year": listing.year,
+            "make": listing.make or "",
+            "model": listing.model or "",
+            "trim": listing.trim or "",
+        },
         "claims": [{"id": f"c{i + 1}", "text": text} for i, text in enumerate(claims)],
         "photos": [
             {

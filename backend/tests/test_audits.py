@@ -1068,7 +1068,7 @@ def test_run_reconcile_persists_findings_and_completes(listing, photos):
         ("c1", "adaptive cruise control"): "insufficient_evidence",
         ("c2", "lane keeping assist"): "insufficient_evidence",
     }
-    assert AuditFinding.objects.get(job=job, claim_key="c1").evidence["rule"] == "v3"
+    assert AuditFinding.objects.get(job=job, claim_key="c1").evidence["rule"] == "v4"
     job.refresh_from_db()
     assert job.status == JobStatus.COMPLETE
 
@@ -1755,6 +1755,11 @@ def test_provider_costs_attributable_by_pool(listing, photos, enabled):
 def test_full_pipeline_completes_with_findings(listing, photos, enabled):
     from audits.models import AuditFinding
 
+    listing.year = 2021
+    listing.make = "Kia"
+    listing.model = "Forte"
+    listing.trim = "GT-Line"
+    listing.save(update_fields=["year", "make", "model", "trim"])
     job = _running_job(listing)
     acc_button = {
         "visible_object": "following-distance button",
@@ -2411,6 +2416,11 @@ def test_recheck_legacy_row_keeps_pair_first_wins(listing, photos, enabled):
 # --- manufacturer-aware ADAS recognition (remediation F2) ------------------
 
 
+FORTE_2021 = {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"}
+CAMRY_2020 = {"year": 2020, "make": "Toyota", "model": "Camry", "trim": "SE"}
+JETTA_2022 = {"year": 2022, "make": "Volkswagen", "model": "Jetta", "trim": ""}
+
+
 def _keyed_row(job, photo, source, verdict, claim="c1", **control):
     extra = {"visible_object": control.pop("visible_object", "control")}
     extra.update(control)
@@ -2437,7 +2447,9 @@ def test_reconcile_diagnostic_acc_without_sam(listing, photos):
         dedicated=True,
     )
     state, summary = pipeline.reconcile_claim(
-        list(Observation.objects.filter(job=job)), "adaptive cruise control"
+        list(Observation.objects.filter(job=job)),
+        "adaptive cruise control",
+        FORTE_2021,
     )
     assert state == "visually_supported"
     assert "diagnostic" in summary
@@ -2477,9 +2489,9 @@ def test_reconcile_lka_supported_centering_not(listing, photos):
         manufacturer_context="Kia Forte",
     )
     rows = list(Observation.objects.filter(job=job))
-    state, _ = pipeline.reconcile_claim(rows, "lane keeping assist")
+    state, _ = pipeline.reconcile_claim(rows, "lane keeping assist", FORTE_2021)
     assert state == "visually_supported"
-    state, summary = pipeline.reconcile_claim(rows, "lane centering")
+    state, summary = pipeline.reconcile_claim(rows, "lane centering", FORTE_2021)
     assert state == "insufficient_evidence"
     assert "lane_centering_assist" in summary
 
@@ -2497,7 +2509,7 @@ def test_reconcile_stalk_menu_insufficient(listing, photos):
     )
     _obs_row(job, photos[0], ObservationSource.SAM, Verdict.PRESENT, claim="c1")
     state, summary = pipeline.reconcile_claim(
-        list(Observation.objects.filter(job=job)), "lane centering"
+        list(Observation.objects.filter(job=job)), "lane centering", JETTA_2022
     )
     assert state == "insufficient_evidence"
     assert "general assistance control" in summary
@@ -2543,16 +2555,16 @@ def test_reconcile_lane_tiers_never_promote(listing, photos):
         dedicated=True,
     )
     rows = list(Observation.objects.filter(job=job))
-    assert pipeline.reconcile_claim(rows, "lane departure warning")[0] == (
+    assert pipeline.reconcile_claim(rows, "lane departure warning", FORTE_2021)[0] == (
         "insufficient_evidence"
     )
-    assert pipeline.reconcile_claim(rows, "lane following assist")[0] == (
+    assert pipeline.reconcile_claim(rows, "lane following assist", FORTE_2021)[0] == (
         "insufficient_evidence"
     )
-    assert pipeline.reconcile_claim(rows, "highway driving assist")[0] == (
+    assert pipeline.reconcile_claim(rows, "highway driving assist", FORTE_2021)[0] == (
         "insufficient_evidence"
     )
-    assert pipeline.reconcile_claim(rows, "hands-free driving")[0] == (
+    assert pipeline.reconcile_claim(rows, "hands-free driving", FORTE_2021)[0] == (
         "insufficient_evidence"
     )
 
@@ -2569,9 +2581,191 @@ def test_reconcile_keyed_recheck_supports(listing, photos):
         dedicated=True,
     )
     state, _ = pipeline.reconcile_claim(
-        list(Observation.objects.filter(job=job)), "adaptive cruise control"
+        list(Observation.objects.filter(job=job)),
+        "adaptive cruise control",
+        FORTE_2021,
     )
     assert state == "visually_supported"
+
+
+def test_snapshot_freezes_vehicle_identity(listing, photos, enabled):
+    listing.year = 2021
+    listing.make = "Kia"
+    listing.model = "Forte"
+    listing.trim = "GT-Line"
+    listing.save(update_fields=["year", "make", "model", "trim"])
+    job, created = services.queue_audit(listing.pk)
+    assert created is True
+    assert job.snapshot["vehicle"] == {
+        "year": 2021,
+        "make": "Kia",
+        "model": "Forte",
+        "trim": "GT-Line",
+    }
+    listing.model = "K5"
+    listing.save(update_fields=["model"])
+    job.refresh_from_db()
+    assert job.snapshot["vehicle"]["model"] == "Forte"
+
+
+def test_run_reconcile_rejects_borrowed_catalog_entry(listing, photos):
+    listing.year = 2020
+    listing.make = "Toyota"
+    listing.model = "Camry"
+    listing.save(update_fields=["year", "make", "model"])
+    job = _running_job(listing)
+    _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+    )
+    assert pipeline.run_reconcile(job.pk, "w1") == 2
+    finding = job.findings.get(claim_key="c1")
+    assert finding.state == "insufficient_evidence"
+    assert "not verified for" in finding.summary
+    assert finding.evidence["interpretation"]["supports_claim"] is False
+
+
+def test_run_reconcile_unknown_vehicle_rejects_specific_entry(listing, photos):
+    job = _running_job(listing)
+    _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+        manufacturer_context="Kia Forte",
+    )
+    pipeline.run_reconcile(job.pk, "w1")
+    finding = job.findings.get(claim_key="c1")
+    assert finding.state == "insufficient_evidence"
+    assert "identity" in finding.summary
+
+
+def test_reconcile_nested_control_supports_claim(listing, photos):
+    job = _running_job(listing)
+    _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="dashboard button cluster",
+        location="left_dashboard",
+        controls=[
+            {
+                "visible_object": "lane keeping assist button",
+                "control_symbol": "vehicle between lane lines",
+                "location": "left_dashboard",
+            }
+        ],
+    )
+    state, summary = pipeline.reconcile_claim(
+        list(Observation.objects.filter(job=job)),
+        "lane keeping assist",
+        FORTE_2021,
+    )
+    assert state == "visually_supported"
+    assert "control #1" in summary
+
+
+def test_reconcile_multi_control_no_cross_promotion(listing, photos):
+    job = _running_job(listing)
+    _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="following-distance button",
+        control_symbol="vehicle with distance bars",
+        location="steering_wheel",
+        dedicated=True,
+        controls=[
+            {
+                "visible_object": "lane keeping assist button",
+                "control_symbol": "vehicle between lane lines",
+                "location": "left_dashboard",
+            },
+            {
+                "visible_object": "cruise set and resume buttons",
+                "location": "steering_wheel",
+            },
+        ],
+    )
+    rows = list(Observation.objects.filter(job=job))
+    state, summary = pipeline.reconcile_claim(
+        rows, "adaptive cruise control", FORTE_2021
+    )
+    assert state == "visually_supported"
+    assert "control #0" in summary
+    state, _ = pipeline.reconcile_claim(rows, "lane keeping assist", FORTE_2021)
+    assert state == "visually_supported"
+    state, _ = pipeline.reconcile_claim(rows, "lane centering", FORTE_2021)
+    assert state == "insufficient_evidence"
+
+
+def test_reconcile_two_supporting_controls(listing, photos):
+    job = _running_job(listing)
+    _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="following-distance button",
+        location="steering_wheel",
+        controls=[
+            {
+                "visible_object": "SCC follow control",
+                "control_symbol": "distance bars",
+                "location": "steering_wheel",
+            }
+        ],
+    )
+    state, _ = pipeline.reconcile_claim(
+        list(Observation.objects.filter(job=job)),
+        "adaptive cruise control",
+        FORTE_2021,
+    )
+    assert state == "visually_supported"
+
+
+def test_reconcile_all_control_interpretations_preserved(listing, photos):
+    listing.year = 2021
+    listing.make = "Kia"
+    listing.model = "Forte"
+    listing.save(update_fields=["year", "make", "model"])
+    job = _running_job(listing)
+    _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="button cluster",
+        location="steering_wheel",
+        controls=[
+            {
+                "visible_object": "following-distance button",
+                "location": "steering_wheel",
+            },
+            {
+                "visible_object": "cruise set and resume buttons",
+                "location": "steering_wheel",
+            },
+        ],
+    )
+    pipeline.run_reconcile(job.pk, "w1")
+    finding = job.findings.get(claim_key="c1")
+    assert finding.state == "visually_supported"
+    kept = finding.evidence["interpretation"]["interpretations"]
+    assert [entry["control_index"] for entry in kept] == [0, 1, 2]
+    assert [entry["supports_claim"] for entry in kept] == [False, True, False]
+    assert kept[1]["entry_id"] == "kia-forte-2021-scc-distance"
+    assert kept[1]["photo_id"] == str(photos[0].pk)
 
 
 def test_sam_target_from_observed_object():
@@ -2599,26 +2793,108 @@ def test_sam_target_from_observed_object():
         ),
     ]
     for extra, expected in cases:
-        concept, source = pipeline._sam_target_for(
+        concept, source, index = pipeline._sam_target_for(
             Obs(extra=extra), "adaptive cruise control"
         )
         assert concept == expected
         assert source == "observed_object"
+        assert index == 0
 
 
 def test_sam_target_legacy_fallback_and_unavailable():
     from audits.models import Observation as Obs
 
-    concept, source = pipeline._sam_target_for(
+    concept, source, index = pipeline._sam_target_for(
         Obs(extra={"supports_localization": True}), "adaptive cruise control!"
     )
     assert concept == "adaptive cruise control"
     assert source == "claim_fallback"
-    concept, source = pipeline._sam_target_for(
+    assert index is None
+    concept, source, index = pipeline._sam_target_for(
         Obs(extra={"visible_object": "!!!"}), "adaptive cruise control"
     )
     assert concept == ""
     assert source == "unavailable"
+    assert index is None
+
+
+def test_sam_target_selects_nested_claim_relevant_control():
+    from audits.models import Observation as Obs
+
+    extra = {
+        "visible_object": "cruise set and resume buttons",
+        "location": "steering_wheel",
+        "controls": [
+            {
+                "visible_object": "following-distance button",
+                "control_symbol": "DISTANCE",
+                "location": "steering_wheel",
+            }
+        ],
+    }
+    concept, source, index = pipeline._sam_target_for(
+        Obs(extra=extra), "adaptive cruise control", FORTE_2021
+    )
+    assert concept == "following-distance button"
+    assert source == "observed_object"
+    assert index == 1
+
+
+def test_sam_target_prefers_supporting_top_level():
+    from audits.models import Observation as Obs
+
+    extra = {
+        "visible_object": "following-distance button",
+        "location": "steering_wheel",
+        "dedicated": True,
+        "controls": [
+            {
+                "visible_object": "lane keeping assist button",
+                "location": "left_dashboard",
+            }
+        ],
+    }
+    concept, source, index = pipeline._sam_target_for(
+        Obs(extra=extra), "adaptive cruise control", FORTE_2021
+    )
+    assert concept == "following-distance button"
+    assert source == "observed_object"
+    assert index == 0
+
+
+def test_sam_target_prefers_claim_relevant_over_unrelated():
+    from audits.models import Observation as Obs
+
+    extra = {
+        "visible_object": "cup holder",
+        "controls": [
+            {
+                "visible_object": "cruise set and resume buttons",
+                "location": "steering_wheel",
+            }
+        ],
+    }
+    concept, source, index = pipeline._sam_target_for(
+        Obs(extra=extra), "cruise control", FORTE_2021
+    )
+    assert concept == "cruise set and resume buttons"
+    assert source == "observed_object"
+    assert index == 1
+
+
+def test_sam_target_skips_none_candidates():
+    from audits.models import Observation as Obs
+
+    extra = {
+        "visible_object": "none",
+        "controls": [{"visible_object": "none"}],
+    }
+    concept, source, index = pipeline._sam_target_for(
+        Obs(extra=extra), "adaptive cruise control", FORTE_2021
+    )
+    assert concept == ""
+    assert source == "unavailable"
+    assert index is None
 
 
 def test_sam_receives_object_not_claim(listing, photos, enabled):
@@ -2638,6 +2914,36 @@ def test_sam_receives_object_not_claim(listing, photos, enabled):
     obs = Observation.objects.get(job=job, source=ObservationSource.SAM)
     assert obs.extra["sam_target"] == "following-distance button"
     assert obs.extra["target_source"] == "observed_object"
+
+
+def test_sam_localizes_nested_control_and_records_index(listing, photos, enabled):
+    listing.year = 2021
+    listing.make = "Kia"
+    listing.model = "Forte"
+    listing.save(update_fields=["year", "make", "model"])
+    job = _running_job(listing)
+    _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="cruise set and resume buttons",
+        location="steering_wheel",
+        supports_localization=True,
+        controls=[
+            {
+                "visible_object": "following-distance button",
+                "control_symbol": "DISTANCE",
+                "location": "steering_wheel",
+            }
+        ],
+    )
+    sam = FakeSamAdapter(records=[_segment()])
+    assert pipeline.run_sam(job.pk, "w1", sam) == 1
+    assert sam.calls == 1
+    assert sam.concepts == ["following-distance button"]
+    obs = Observation.objects.get(job=job, source=ObservationSource.SAM)
+    assert obs.extra["control_index"] == 1
 
 
 def test_sam_skips_unsanitizable_target_without_spend(listing, photos, enabled):
@@ -2766,10 +3072,15 @@ def test_adas_fixtures_flow_through_pipeline(enabled):
 
     adas_dir = Path(__file__).resolve().parents[2] / "fixtures" / "adas"
     truth = json.loads((adas_dir / "ground_truth.json").read_text(encoding="utf-8"))
+    vehicle = truth["vehicle"]
     listing = Listing.objects.create(
         source_url="https://example.test/l/adas-fixtures",
         source_site="example.test",
         title="adas fixtures",
+        year=vehicle["year"],
+        make=vehicle["make"],
+        model=vehicle["model"],
+        trim=vehicle["trim"],
         advertised_claims=truth["claims"],
         expected_photo_count=len(truth["photos"]),
     )

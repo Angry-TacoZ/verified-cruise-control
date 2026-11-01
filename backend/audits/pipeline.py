@@ -596,29 +596,63 @@ def sanitize_concept(text: str) -> str:
     return " ".join(cleaned.split()[:10])
 
 
-def _sam_target_for(target: Observation, claim_text: str) -> tuple[str, str]:
+def _sam_target_for(
+    target: Observation, claim_text: str, vehicle: dict | None = None
+) -> tuple[str, str, int | None]:
     """Build the SAM prompt from the observed physical object (Layer C).
 
-    Prefers the Muse observation's ``visible_object`` (falling back to
-    ``control_symbol``), so SAM localizes the actual control rather than
+    Every control item in the observation (top-level plus validated
+    nested controls) is interpreted against the claim; the first
+    supporting item wins, then the first claim-relevant (feature
+    matching) item, then top-level order — so SAM localizes the control
+    the claim is actually about instead of an unrelated object that
+    shares the photo. The concept comes from the winning item's
+    ``visible_object`` (falling back to ``control_symbol``), never from
     an abstract capability name. Legacy rows without control
-    identification fall back to the claim text; when neither yields a
+    identification fall back to the claim text; when no item yields a
     concept phrase the caller records UNCLEAR without spending.
-    Returns (concept, target_source).
+    Returns (concept, target_source, control_index).
     """
     extra = target.extra or {}
-    candidates = [
-        str(extra.get("visible_object", "") or ""),
-        str(extra.get("control_symbol", "") or ""),
-    ]
-    for candidate in candidates:
-        if candidate.strip() and candidate.strip().lower() != "none":
-            concept = sanitize_concept(candidate)
-            if concept:
-                return concept, "observed_object"
     if "visible_object" not in extra:
-        return sanitize_concept(claim_text), "claim_fallback"
-    return "", "unavailable"
+        return sanitize_concept(claim_text), "claim_fallback", None
+    catalog = get_catalog()
+    feature = adas_evidence.normalize_feature(claim_text)
+    ranked = []
+    for item in adas_evidence.iter_control_items(extra):
+        interpretation = adas_evidence.interpret_control(
+            catalog,
+            feature,
+            visible_object=item.visible_object,
+            control_symbol=item.control_symbol,
+            control_type=item.control_type,
+            location=item.location,
+            dedicated=item.dedicated,
+            manufacturer_context=item.manufacturer_context,
+            vehicle=vehicle,
+        )
+        ranked.append((item, interpretation))
+    ranked.sort(
+        key=lambda pair: (
+            (
+                0
+                if pair[1].supports_claim
+                else (
+                    1
+                    if pair[1].entry_id is not None and pair[1].feature == feature
+                    else 2
+                )
+            ),
+            pair[0].index,
+        )
+    )
+    for item, _ in ranked:
+        for candidate in (item.visible_object, item.control_symbol):
+            if candidate.strip() and candidate.strip().lower() != "none":
+                concept = sanitize_concept(candidate)
+                if concept:
+                    return concept, "observed_object", item.index
+    return "", "unavailable", None
 
 
 def write_mask_png(job_id, raster: bytes, width: int, height: int) -> str:
@@ -645,11 +679,13 @@ def run_sam(
     """
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
+    snapshot = get_snapshot(job)
     id_to_text = {
         entry["id"]: entry["text"]
-        for entry in get_snapshot(job).get("claims", [])
+        for entry in snapshot.get("claims", [])
         if entry.get("text")
     }
+    snapshot_vehicle = snapshot.get("vehicle")
     own_adapter = adapter or MetaSamAdapter(model_id=settings.AUDIT_SAM_MODEL_ID)
     targets = Observation.objects.filter(
         job=job, source=ObservationSource.Muse, verdict=Verdict.PRESENT
@@ -672,7 +708,9 @@ def run_sam(
             detail = f"Muse observation references unknown claim {target.claim_key!r}"
             services.fail_job(job_id, worker_id, "unknown_claim", detail)
             raise services.JobNotRunningError(f"job {job_id} has unknown claim")
-        concept, target_source = _sam_target_for(target, text)
+        concept, target_source, control_index = _sam_target_for(
+            target, text, snapshot_vehicle
+        )
         photo = target.photo
         if not concept:
             with transaction.atomic():
@@ -754,6 +792,7 @@ def run_sam(
                 extra={
                     "sam_target": concept,
                     "target_source": target_source,
+                    "control_index": control_index,
                 },
                 execution=execution,
             )
@@ -1092,7 +1131,9 @@ def _keyed_present(
 
 
 def reconcile_claim(
-    observations: list[Observation], claim_text: str = ""
+    observations: list[Observation],
+    claim_text: str = "",
+    vehicle: dict | None = None,
 ) -> tuple[str, str]:
     """Deterministic five-state rule for one claim (pure, testable).
 
@@ -1101,12 +1142,16 @@ def reconcile_claim(
     INSUFFICIENT, or NOT_VISUALLY_VERIFIABLE. CONTRADICTED and VERIFIED
     require authoritative vehicle-specific evidence (the channel exists
     for hand-supplied docs evidence).
-    Layer D (rule v3): PRESENT observations carrying control
-    identification are evaluated through the manufacturer-aware catalog;
-    a diagnostic/supportive mapping supports the claim even without SAM
-    confirmation, while unmapped or non-supportive controls explain
-    exactly why they fall short. Rows without control identification
-    keep the legacy v2 confirm rules. Returns (state, summary).
+    Layer D (rule v4): every control item in PRESENT observations
+    carrying control identification is evaluated independently through
+    the manufacturer-aware catalog; a diagnostic/supportive mapping
+    supports the claim even without SAM confirmation, while unmapped or
+    non-supportive controls explain exactly why they fall short.
+    Manufacturer-specific entries apply only when ``vehicle`` (the
+    snapshot's trusted listing metadata) falls inside their documented
+    make/model/year applicability; unknown identity rejects them. Rows
+    without control identification keep the legacy v2 confirm rules.
+    Returns (state, summary).
     """
     authoritative = [
         obs for obs in observations if obs.source == ObservationSource.AUTHORITATIVE
@@ -1132,26 +1177,31 @@ def reconcile_claim(
     keyed = _keyed_present(observations)
     v3_unknown_note = ""
     if keyed:
-        interpretations = [
-            adas_evidence.interpret_control(
-                catalog,
-                feature,
-                visible_object=str(obs.extra.get("visible_object", "")),
-                control_symbol=str(obs.extra.get("control_symbol", "") or ""),
-                control_type=str(obs.extra.get("control_type", "") or ""),
-                location=str(obs.extra.get("location", "unknown") or "unknown"),
-                dedicated=obs.extra.get("dedicated"),
-                manufacturer_context=str(
-                    obs.extra.get("manufacturer_context", "") or ""
-                ),
-            )
-            for obs in keyed
-        ]
-        supporters = [i for i in interpretations if i.supports_claim]
+        candidates = []
+        for obs in keyed:
+            for item in adas_evidence.iter_control_items(obs.extra or {}):
+                candidates.append(
+                    (
+                        adas_evidence.interpret_control(
+                            catalog,
+                            feature,
+                            visible_object=item.visible_object,
+                            control_symbol=item.control_symbol,
+                            control_type=item.control_type,
+                            location=item.location,
+                            dedicated=item.dedicated,
+                            manufacturer_context=item.manufacturer_context,
+                            vehicle=vehicle,
+                        ),
+                        obs,
+                        item.index,
+                    )
+                )
+        supporters = [c for c in candidates if c[0].supports_claim]
         if supporters:
-            best = max(
+            best, best_obs, best_index = max(
                 supporters,
-                key=lambda i: adas_evidence.STRENGTH_RANK[i.strength],
+                key=lambda c: adas_evidence.STRENGTH_RANK[c[0].strength],
             )
             sam_present = any(
                 obs.source == ObservationSource.SAM and obs.verdict == Verdict.PRESENT
@@ -1163,17 +1213,21 @@ def reconcile_claim(
                 else "SAM localization unavailable; mapping stands on the "
                 "identified control alone"
             )
+            photo_ref = (
+                str(best_obs.photo_id)[:8] if best_obs.photo_id is not None else "?"
+            )
             return (
                 EvidenceState.VISUALLY_SUPPORTED,
                 (
                     f"{best.explanation} [{best.strength}; {sam_note}; "
-                    f"catalog {catalog.version}/{best.entry_id}; photo evidence "
+                    f"catalog {catalog.version}/{best.entry_id}; "
+                    f"control #{best_index} (photo {photo_ref}); photo evidence "
                     "only, not capability or condition proof]"
                 ),
             )
-        strongest = max(
-            interpretations,
-            key=lambda i: adas_evidence.STRENGTH_RANK.get(i.strength, -1),
+        strongest, _, _ = max(
+            candidates,
+            key=lambda c: adas_evidence.STRENGTH_RANK.get(c[0].strength, -1),
         )
         v3_unknown_note = (
             f"{strongest.explanation}; "
@@ -1238,13 +1292,17 @@ def run_reconcile(job_id, worker_id: str) -> int:
         observations = list(
             Observation.objects.filter(job=job, claim_key=claim).order_by("created_at")
         )
-        state, summary = reconcile_claim(observations, text)
+        vehicle = snapshot.get("vehicle")
+        state, summary = reconcile_claim(observations, text, vehicle)
         recheck_ran = any(o.source == ObservationSource.RECHECK for o in observations)
         state_without, _ = reconcile_claim(
             [o for o in observations if o.source != ObservationSource.RECHECK],
             text,
+            vehicle,
         )
-        interpretation = adas_evidence.explain_claim(get_catalog(), observations, text)
+        interpretation = adas_evidence.explain_claim(
+            get_catalog(), observations, text, vehicle
+        )
         with transaction.atomic():
             services.fence_evidence_write(job_id, worker_id)
             AuditFinding.objects.update_or_create(
@@ -1255,7 +1313,7 @@ def run_reconcile(job_id, worker_id: str) -> int:
                     "state": state,
                     "summary": summary,
                     "evidence": {
-                        "rule": "v3",
+                        "rule": "v4",
                         "recheck_ran": recheck_ran,
                         "recheck_changed_finding": recheck_ran
                         and state_without != state,

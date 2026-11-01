@@ -1,0 +1,100 @@
+{
+  "eval": "reconcile",
+  "rule": "v4-eligibility-per-control",
+  "cases_version": 4,
+  "passed": 13,
+  "total": 13,
+  "cases": [
+    {
+      "id": "kia-acc-supported",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "observed 'vehicle with distance bars' (Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance) is diagnostic evidence for adaptive_cruise_control per Smart Cruise Control (SCC) [diagnostic; confirmed by SAM localization; catalog 2026-11-01/v1/kia-forte-2021-scc-distance; control #0 (photo 79ee6883); photo evidence only, not capability or condition proof]",
+      "pass": true
+    },
+    {
+      "id": "kia-lka-supported",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "observed 'vehicle between lane lines' (Dedicated LKA button on the instrument panel on the lower left-hand side of the driver; cluster lane indicator white (standby) / green (steering)) is diagnostic evidence for lane_keeping_assist per Lane Keeping Assist (LKA) [diagnostic; confirmed by SAM localization; catalog 2026-11-01/v1/kia-forte-2019-2024-lka-button; control #0 (photo 79ee6883); photo evidence only, not capability or condition proof]",
+      "pass": true
+    },
+    {
+      "id": "vw-golf-cannot-borrow-kia-lka",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'vehicle between lane lines' matches catalog entry kia-forte-2019-2024-lka-button, but entry is not verified for Volkswagen Golf 2022; verified for Kia Forte (2019, 2020, 2021, 2022, 2023, 2024) only; catalog 2026-11-01/v1 offers no support for lane_keeping_assist",
+      "pass": true
+    },
+    {
+      "id": "toyota-cannot-borrow-kia-acc",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'vehicle with distance bars' matches catalog entry kia-forte-2021-scc-distance, but entry is not verified for Toyota Camry 2020; verified for Kia Forte (2021, 2022) only; catalog 2026-11-01/v1 offers no support for adaptive_cruise_control",
+      "pass": true
+    },
+    {
+      "id": "year-out-of-range",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'vehicle with distance bars' matches catalog entry kia-forte-2021-scc-distance, but entry covers model years 2021, 2022; audit vehicle is a 2024; catalog 2026-11-01/v1 offers no support for adaptive_cruise_control",
+      "pass": true
+    },
+    {
+      "id": "missing-vehicle-identity",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'vehicle with distance bars' matches catalog entry kia-forte-2021-scc-distance, but audit vehicle identity is unknown; entry verified for Kia Forte (2021, 2022) only; catalog 2026-11-01/v1 offers no support for adaptive_cruise_control",
+      "pass": true
+    },
+    {
+      "id": "nested-lka-supports",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "observed 'vehicle between lane lines' (Dedicated LKA button on the instrument panel on the lower left-hand side of the driver; cluster lane indicator white (standby) / green (steering)) is diagnostic evidence for lane_keeping_assist per Lane Keeping Assist (LKA) [diagnostic; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-forte-2019-2024-lka-button; control #1 (photo 79ee6883); photo evidence only, not capability or condition proof]",
+      "pass": true
+    },
+    {
+      "id": "multi-control-acc-supported",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "observed 'vehicle with distance bars' (Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance) is diagnostic evidence for adaptive_cruise_control per Smart Cruise Control (SCC) [diagnostic; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-forte-2021-scc-distance; control #0 (photo 79ee6883); photo evidence only, not capability or condition proof]",
+      "pass": true
+    },
+    {
+      "id": "generic-cruise-not-acc",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'cruise set and resume buttons' maps to cruise_control (Cruise control (conventional)), not to the claimed adaptive_cruise_control; Evidence of conventional cruise only. Without a distance/follow function these controls say nothing about adaptive capability.; catalog 2026-11-01/v1 offers no support for adaptive_cruise_control",
+      "pass": true
+    },
+    {
+      "id": "stalk-menu-not-centering",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'driver assistance button' is a general assistance control (Driver-assistance button on the end face of the turn-signal lever (E617); opens/configures assistance systems alongside the infotainment Assistance systems menu); it does not establish any specific capability; catalog 2026-11-01/v1 offers no support for lane_centering_assist",
+      "pass": true
+    },
+    {
+      "id": "lka-not-centering",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'vehicle between lane lines' maps to lane_keeping_assist (Lane Keeping Assist (LKA)), not to the claimed lane_centering_assist; NOT Lane Following Assist (LFA): LFA is Kia's separate lane-centering system with steering-wheel buttons. LKA button existence does not establish LFA, ACC, or hands-free capability.; catalog 2026-11-01/v1 offers no support for lane_centering_assist",
+      "pass": true
+    },
+    {
+      "id": "context-conflict-listing-governs",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "observed 'vehicle with distance bars' (Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance) is diagnostic evidence for adaptive_cruise_control per Smart Cruise Control (SCC) [diagnostic; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-forte-2021-scc-distance; control #0 (photo 79ee6883); photo evidence only, not capability or condition proof]",
+      "pass": true
+    },
+    {
+      "id": "legacy-confirm-kept",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "Muse sighting confirmed by SAM localization (photo evidence only; not capability proof)",
+      "pass": true
+    }
+  ]
+}

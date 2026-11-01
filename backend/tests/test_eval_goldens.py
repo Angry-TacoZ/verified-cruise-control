@@ -9,7 +9,7 @@ from pathlib import Path
 from audits.models import Observation
 from audits.pipeline import reconcile_claim
 
-GOLDEN_VERSIONS = ("v2", "v3")
+GOLDEN_VERSIONS = ("v2", "v4")
 
 
 def _load(version):
@@ -39,7 +39,7 @@ def test_reconcile_goldens():
                 )
                 for item in case["observations"]
             ]
-            state, _ = reconcile_claim(rows, case.get("claim", ""))
+            state, _ = reconcile_claim(rows, case.get("claim", ""), case.get("vehicle"))
             if state != case["expected"]:
                 failures.append(
                     f"{version}/{case['id']}: expected {case['expected']}, got {state}"

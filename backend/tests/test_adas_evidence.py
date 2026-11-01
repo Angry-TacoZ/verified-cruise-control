@@ -8,13 +8,19 @@ and must never invent equipment knowledge.
 from __future__ import annotations
 
 import json
+import uuid
+from types import SimpleNamespace
 
 import pytest
 
 from audits import adas_evidence
 from audits.adas_evidence import (
     Catalog,
+    CatalogEntry,
+    entry_applicable,
+    explain_claim,
     interpret_control,
+    iter_control_items,
     load_catalog,
     match_entry,
     normalize_feature,
@@ -31,6 +37,7 @@ def test_catalog_loads_with_provenance(catalog):
     assert len(catalog.entries) == 6
     for entry in catalog.entries:
         assert entry.sources, entry.id
+        assert entry.scope in ("manufacturer_specific", "general"), entry.id
         assert entry.certainty in ("confirmed", "provisional", "definitional")
         assert entry.strength in (
             "diagnostic",
@@ -57,6 +64,7 @@ def test_catalog_extensible_new_manufacturer(tmp_path, catalog):
     raw["entries"].append(
         {
             "id": "toyota-camry-2023-dallas-test-only",
+            "scope": "manufacturer_specific",
             "manufacturer": "Toyota",
             "models": ["Camry"],
             "model_years": [2023],
@@ -135,6 +143,7 @@ def test_match_dedicated_acc_button(catalog):
         control_symbol="vehicle with distance bars",
         location="steering_wheel",
         dedicated=True,
+        vehicle=FORTE_2021,
     )
     assert result.supports_claim is True
     assert result.strength == "diagnostic"
@@ -162,6 +171,17 @@ def test_match_generic_cruise_not_acc(catalog):
     # but the entry is non-diagnostic even there: buttons alone never
     # prove a system. What matters is it never supports ACC.
     assert cruise.supports_claim is False
+    # The general mapping resolves identically with or without vehicle
+    # identity: it is explicitly documented as cross-manufacturer.
+    camry = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        visible_object="cruise set and resume buttons",
+        location="steering_wheel",
+        vehicle=CAMRY_2020,
+    )
+    assert camry.entry_id == "generic-cruise-set-res"
+    assert camry.supports_claim is False
 
 
 def test_match_forte_lka_dash_button(catalog):
@@ -173,6 +193,7 @@ def test_match_forte_lka_dash_button(catalog):
         location="left_dashboard",
         dedicated=True,
         manufacturer_context="Kia Forte",
+        vehicle=FORTE_2021,
     )
     assert result.entry_id == "kia-forte-2019-2024-lka-button"
     assert result.supports_claim is True
@@ -190,6 +211,7 @@ def test_match_stalk_menu_non_diagnostic(catalog):
         location="stalk",
         dedicated=True,
         manufacturer_context="VW Jetta GLI",
+        vehicle=JETTA_2022,
     )
     assert result.entry_id == "vw-jetta-gli-assist-stalk"
     assert result.supports_claim is False
@@ -204,6 +226,7 @@ def test_match_location_mismatch_downgrades(catalog):
         control_symbol="vehicle between lane lines",
         location="steering_wheel",
         dedicated=True,
+        vehicle=FORTE_2021,
     )
     assert result.entry_id == "kia-forte-2019-2024-lka-button"
     assert result.strength == "supportive"
@@ -219,12 +242,16 @@ def test_match_shared_control_downgrades(catalog):
         visible_object="following-distance control",
         location="steering_wheel",
         dedicated=False,
+        vehicle=FORTE_2021,
     )
     assert result.strength == "supportive"
     assert result.supports_claim is True
 
 
-def test_match_other_manufacturer_downgrades(catalog):
+def test_match_other_manufacturer_rejected(catalog):
+    # F1 correction: a manufacturer mismatch rejects the entry instead of
+    # merely downgrading it — a weakened match could still support the
+    # wrong vehicle's claim.
     result = interpret_control(
         catalog,
         "lane_keeping_assist",
@@ -233,10 +260,12 @@ def test_match_other_manufacturer_downgrades(catalog):
         location="left_dashboard",
         dedicated=True,
         manufacturer_context="Volkswagen Golf",
+        vehicle=GOLF_2022,
     )
     assert result.entry_id == "kia-forte-2019-2024-lka-button"
-    assert result.strength == "supportive"
-    assert "different vehicle" in result.location_note
+    assert result.supports_claim is False
+    assert result.strength == "unknown"
+    assert "not verified for" in result.explanation
 
 
 def test_match_unknown_control(catalog):
@@ -264,6 +293,7 @@ def test_match_tie_is_unknown(tmp_path):
         "entries": [
             {
                 "id": f"tie-{i}",
+                "scope": "general",
                 "manufacturer": None,
                 "models": [],
                 "model_years": [],
@@ -299,6 +329,7 @@ def test_interpret_feature_mismatch_no_promotion(catalog):
         control_symbol="vehicle between lane lines",
         location="left_dashboard",
         dedicated=True,
+        vehicle=FORTE_2021,
     )
     assert lka_for_centering.supports_claim is False
     assert "not to the claimed lane_centering_assist" in (lka_for_centering.explanation)
@@ -308,6 +339,7 @@ def test_interpret_feature_mismatch_no_promotion(catalog):
         visible_object="following-distance button",
         location="steering_wheel",
         dedicated=True,
+        vehicle=FORTE_2021,
     )
     assert acc_for_steering.supports_claim is False
 
@@ -324,3 +356,579 @@ def test_steering_wheel_lanes_icon_is_not_auto_classified(catalog):
     )
     assert result.supports_claim is False
     assert result.entry_id is None
+
+
+# --- F1: vehicle-specific catalog applicability -----------------------
+
+FORTE_2021 = {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"}
+GOLF_2022 = {"year": 2022, "make": "Volkswagen", "model": "Golf", "trim": ""}
+CAMRY_2020 = {"year": 2020, "make": "Toyota", "model": "Camry", "trim": "SE"}
+JETTA_2022 = {"year": 2022, "make": "Volkswagen", "model": "Jetta", "trim": ""}
+
+
+def test_applicable_kia_acc_supported(catalog):
+    result = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        visible_object="following-distance button",
+        control_symbol="vehicle with distance bars",
+        location="steering_wheel",
+        dedicated=True,
+        vehicle=FORTE_2021,
+    )
+    assert result.supports_claim is True
+    assert result.strength == "diagnostic"
+    assert result.entry_id == "kia-forte-2021-scc-distance"
+
+
+def test_applicable_kia_lka_supported(catalog):
+    result = interpret_control(
+        catalog,
+        "lane_keeping_assist",
+        visible_object="lane keeping assist button",
+        control_symbol="vehicle between lane lines",
+        location="left_dashboard",
+        dedicated=True,
+        vehicle=FORTE_2021,
+    )
+    assert result.supports_claim is True
+    assert result.strength == "diagnostic"
+
+
+def test_vw_golf_cannot_borrow_kia_lka(catalog):
+    result = interpret_control(
+        catalog,
+        "lane_keeping_assist",
+        visible_object="lane keeping assist button",
+        control_symbol="vehicle between lane lines",
+        location="left_dashboard",
+        dedicated=True,
+        vehicle=GOLF_2022,
+    )
+    assert result.entry_id == "kia-forte-2019-2024-lka-button"
+    assert result.supports_claim is False
+    assert result.strength == "unknown"
+    assert "Kia Forte" in result.explanation
+    assert "Volkswagen Golf" in result.explanation
+
+
+def test_toyota_cannot_borrow_kia_acc(catalog):
+    result = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+        manufacturer_context="Toyota Camry",
+        vehicle=CAMRY_2020,
+    )
+    assert result.supports_claim is False
+    assert "not verified for" in result.explanation
+
+
+def test_model_year_out_of_range_rejected(catalog):
+    kwargs = {
+        "visible_object": "following-distance button",
+        "location": "steering_wheel",
+        "dedicated": True,
+    }
+    too_new = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        **kwargs,
+        vehicle={**FORTE_2021, "year": 2024},
+    )
+    assert too_new.supports_claim is False
+    assert "2021" in too_new.explanation and "2022" in too_new.explanation
+    in_range = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        **kwargs,
+        vehicle={**FORTE_2021, "year": 2022},
+    )
+    assert in_range.supports_claim is True
+
+
+def test_missing_vehicle_rejects_specific_entry(catalog):
+    result = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+        manufacturer_context="Kia Forte",
+        vehicle=None,
+    )
+    assert result.entry_id == "kia-forte-2021-scc-distance"
+    assert result.supports_claim is False
+    assert result.strength == "unknown"
+    assert "identity" in result.explanation
+
+
+def test_incomplete_identity_rejected(catalog):
+    kwargs = {
+        "visible_object": "following-distance button",
+        "location": "steering_wheel",
+        "dedicated": True,
+    }
+    for vehicle in ({}, {"make": "Kia"}, {"make": "Kia", "model": "Forte"}):
+        result = interpret_control(
+            catalog, "adaptive_cruise_control", **kwargs, vehicle=vehicle
+        )
+        assert result.supports_claim is False, vehicle
+    # Year unknown while make/model known is still too uncertain.
+    assert (
+        interpret_control(
+            catalog,
+            "adaptive_cruise_control",
+            **kwargs,
+            vehicle={"make": "Kia", "model": "Forte", "year": None},
+        ).supports_claim
+        is False
+    )
+
+
+def test_missing_vin_does_not_invalidate_metadata(catalog):
+    assert "vin" not in FORTE_2021
+    result = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+        vehicle=dict(FORTE_2021),
+    )
+    assert result.supports_claim is True
+
+
+def test_context_conflict_cannot_override_listing(catalog):
+    result = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+        manufacturer_context="Volkswagen Jetta dashboard",
+        vehicle=FORTE_2021,
+    )
+    assert result.supports_claim is True
+    assert result.strength == "diagnostic"
+    assert "listing metadata governs" in result.location_note
+
+
+def _general_catalog() -> Catalog:
+    entry = CatalogEntry(
+        id="test-general-follow-function",
+        scope="general",
+        manufacturer=None,
+        models=(),
+        model_years=(),
+        trim=None,
+        official_feature_name="Follow-distance function (test)",
+        feature="adaptive_cruise_control",
+        control_category="button",
+        control_description="test-only general mapping",
+        symbol="test",
+        locations=("steering_wheel",),
+        dedicated=True,
+        strength="supportive",
+        match_keywords=("zztestfollow",),
+        distinctions="test only",
+        cannot_infer=(),
+        sources=({"doc": "test"},),
+        certainty="definitional",
+        certainty_note="test",
+    )
+    return Catalog(
+        version="test", feature_ids=("adaptive_cruise_control",), entries=(entry,)
+    )
+
+
+def test_general_entry_applies_across_manufacturers():
+    catalog = _general_catalog()
+    for vehicle in (CAMRY_2020, FORTE_2021, None, {}):
+        result = interpret_control(
+            catalog,
+            "adaptive_cruise_control",
+            visible_object="zztestfollow button",
+            location="steering_wheel",
+            dedicated=True,
+            vehicle=vehicle,
+        )
+        assert result.supports_claim is True, vehicle
+        assert result.strength == "supportive"
+
+
+def test_entry_applicable_unit(catalog):
+    entry = catalog.by_id("kia-forte-2021-scc-distance")
+    assert entry_applicable(entry, FORTE_2021) == (True, "applicable")
+    eligible, reason = entry_applicable(entry, CAMRY_2020)
+    assert eligible is False
+    assert "Toyota Camry" in reason
+    assert entry_applicable(entry, None)[0] is False
+    general = catalog.by_id("generic-cruise-set-res")
+    assert entry_applicable(general, None) == (True, "general mapping")
+
+
+def test_model_name_containment(catalog):
+    entry = catalog.by_id("kia-forte-2019-2024-lka-button")
+    assert entry_applicable(entry, {**FORTE_2021, "model": "Forte5"})[0] is True
+    assert entry_applicable(entry, {**FORTE_2021, "model": "K5"})[0] is False
+
+
+def test_year_string_coerced_uncertain_rejected(catalog):
+    kwargs = {
+        "visible_object": "following-distance button",
+        "location": "steering_wheel",
+        "dedicated": True,
+    }
+    coerced = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        **kwargs,
+        vehicle={**FORTE_2021, "year": "2021"},
+    )
+    assert coerced.supports_claim is True
+    vague = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        **kwargs,
+        vehicle={**FORTE_2021, "year": "unknown"},
+    )
+    assert vague.supports_claim is False
+
+
+def test_trim_gating_with_synthetic_entry():
+    base = CatalogEntry(
+        id="test-trim-gt",
+        scope="manufacturer_specific",
+        manufacturer="Kia",
+        models=("Forte",),
+        model_years=(2021,),
+        trim="GT",
+        official_feature_name="Test",
+        feature="adaptive_cruise_control",
+        control_category="button",
+        control_description="test",
+        symbol="test",
+        locations=("steering_wheel",),
+        dedicated=True,
+        strength="supportive",
+        match_keywords=("zztrimtest",),
+        distinctions="test",
+        cannot_infer=(),
+        sources=({"doc": "test"},),
+        certainty="definitional",
+        certainty_note="test",
+    )
+    catalog = Catalog(
+        version="test", feature_ids=("adaptive_cruise_control",), entries=(base,)
+    )
+    kwargs = {"visible_object": "zztrimtest control", "location": "steering_wheel"}
+    assert (
+        interpret_control(
+            catalog,
+            "adaptive_cruise_control",
+            **kwargs,
+            vehicle={**FORTE_2021, "trim": "GT"},
+        ).supports_claim
+        is True
+    )
+    assert (
+        interpret_control(
+            catalog,
+            "adaptive_cruise_control",
+            **kwargs,
+            vehicle={**FORTE_2021, "trim": "LX"},
+        ).supports_claim
+        is False
+    )
+    assert (
+        interpret_control(
+            catalog,
+            "adaptive_cruise_control",
+            **kwargs,
+            vehicle={**FORTE_2021, "trim": ""},
+        ).supports_claim
+        is False
+    )
+
+
+def _entry_dict(**overrides):
+    entry = {
+        "id": "test-entry",
+        "scope": "manufacturer_specific",
+        "manufacturer": "Kia",
+        "models": ["Forte"],
+        "model_years": [2021],
+        "trim": None,
+        "official_feature_name": "Test",
+        "feature": "adaptive_cruise_control",
+        "control_category": "button",
+        "control_description": "test",
+        "symbol": "test",
+        "locations": ["steering_wheel"],
+        "dedicated": True,
+        "strength": "supportive",
+        "match_keywords": ["testkw"],
+        "distinctions": "test",
+        "cannot_infer": [],
+        "sources": [{"doc": "test"}],
+        "certainty": "definitional",
+        "certainty_note": "test",
+    }
+    entry.update(overrides)
+    return {
+        "catalog_version": "test",
+        "feature_ids": ["adaptive_cruise_control"],
+        "entries": [entry],
+    }
+
+
+def test_scope_validation(tmp_path):
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps(_entry_dict()), encoding="utf-8")
+    assert load_catalog(good).entries[0].scope == "manufacturer_specific"
+    for bad_kwargs in (
+        {"scope": "universal"},
+        {"scope": "general", "manufacturer": "Kia"},
+        {"scope": "general", "models": ["Forte"]},
+        {"scope": "manufacturer_specific", "manufacturer": ""},
+        {"scope": "manufacturer_specific", "models": []},
+    ):
+        path = tmp_path / "bad.json"
+        path.write_text(json.dumps(_entry_dict(**bad_kwargs)), encoding="utf-8")
+        with pytest.raises(ValueError, match="test-entry"):
+            load_catalog(path)
+    missing = _entry_dict()
+    del missing["entries"][0]["scope"]
+    path = tmp_path / "missing.json"
+    path.write_text(json.dumps(missing), encoding="utf-8")
+    with pytest.raises(ValueError, match="test-entry"):
+        load_catalog(path)
+
+
+# --- F2: per-control evidence items -----------------------------------
+
+
+def test_control_items_top_level_only():
+    items = iter_control_items(
+        {
+            "visible_object": "button",
+            "location": "stalk",
+            "dedicated": False,
+            "manufacturer_context": "Kia",
+        }
+    )
+    assert len(items) == 1
+    top = items[0]
+    assert top.index == 0
+    assert top.visible_object == "button"
+    assert top.location == "stalk"
+    assert top.dedicated is False
+    assert top.manufacturer_context == "Kia"
+
+
+def test_control_items_nested_extraction_and_inheritance():
+    items = iter_control_items(
+        {
+            "visible_object": "button cluster",
+            "location": "steering_wheel",
+            "dedicated": True,
+            "manufacturer_context": "Kia Forte",
+            "controls": [
+                {
+                    "visible_object": "following-distance button",
+                    "control_symbol": "DISTANCE",
+                    "location": "steering_wheel",
+                },
+                {"visible_object": "lane keeping button"},
+            ],
+        }
+    )
+    assert [item.index for item in items] == [0, 1, 2]
+    assert items[1].control_symbol == "DISTANCE"
+    # Nested items inherit only the photo-level manufacturer context:
+    # dedication and location are never copied across controls.
+    assert items[1].dedicated is None
+    assert items[1].manufacturer_context == "Kia Forte"
+    assert items[2].location == "unknown"
+    assert items[2].dedicated is None
+
+
+def test_control_items_dedup_restatement():
+    items = iter_control_items(
+        {
+            "visible_object": "following-distance button",
+            "location": "steering_wheel",
+            "controls": [
+                {
+                    "visible_object": "Following-Distance Button",
+                    "location": "steering_wheel",
+                }
+            ],
+        }
+    )
+    assert len(items) == 1
+
+
+def test_control_items_skips_empty_and_non_dict():
+    items = iter_control_items(
+        {
+            "visible_object": "cluster",
+            "controls": [
+                {"visible_object": "  "},
+                "nope",
+                {"visible_object": "real button"},
+            ],
+        }
+    )
+    assert [item.visible_object for item in items] == ["cluster", "real button"]
+
+
+def test_control_items_ignores_non_list():
+    items = iter_control_items({"visible_object": "cluster", "controls": "nope"})
+    assert len(items) == 1
+
+
+def test_control_items_capped_at_five():
+    items = iter_control_items(
+        {
+            "visible_object": "top",
+            "controls": [{"visible_object": f"b{i}"} for i in range(6)],
+        }
+    )
+    assert len(items) == 5
+
+
+# --- F3: explanation matches the supporting finding --------------------
+
+PRESENT = adas_evidence.Verdict.PRESENT
+
+
+def _obs_row(photo_id=None, **extra):
+    return SimpleNamespace(
+        id=uuid.uuid4(),
+        photo_id=photo_id or uuid.uuid4(),
+        verdict=PRESENT,
+        extra={"visible_object": "control", **extra},
+    )
+
+
+def test_explain_prefers_supporter_over_unrelated_diagnostic(catalog):
+    lka_row = _obs_row(
+        visible_object="lane keeping assist button",
+        control_symbol="vehicle between lane lines",
+        location="left_dashboard",
+        dedicated=True,
+    )
+    acc_row = _obs_row(
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+    )
+    # The unrelated diagnostic control comes first: strength-only
+    # selection would present it as the ACC justification.
+    result = explain_claim(
+        catalog, [lka_row, acc_row], "adaptive cruise control", FORTE_2021
+    )
+    assert result["supports_claim"] is True
+    assert result["entry_id"] == "kia-forte-2021-scc-distance"
+    assert result["observation_id"] == str(acc_row.id)
+    assert result["photo_id"] == str(acc_row.photo_id)
+    assert result["control_index"] == 0
+    assert len(result["interpretations"]) == 2
+
+
+def test_explain_two_supporters_picks_stronger(catalog):
+    shared = _obs_row(
+        visible_object="following-distance control",
+        location="steering_wheel",
+        dedicated=False,
+    )
+    dedicated = _obs_row(
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+    )
+    result = explain_claim(
+        catalog, [shared, dedicated], "adaptive cruise control", FORTE_2021
+    )
+    assert result["supports_claim"] is True
+    assert result["strength"] == "diagnostic"
+    assert result["observation_id"] == str(dedicated.id)
+
+
+def test_explain_supportive_and_conflicting(catalog):
+    support = _obs_row(
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+    )
+    conflict = _obs_row(
+        visible_object="cruise set and resume buttons",
+        location="steering_wheel",
+    )
+    result = explain_claim(
+        catalog, [support, conflict], "adaptive cruise control", FORTE_2021
+    )
+    assert result["supports_claim"] is True
+    assert result["entry_id"] == "kia-forte-2021-scc-distance"
+    kept = result["interpretations"]
+    assert [entry["supports_claim"] for entry in kept] == [True, False]
+    assert kept[1]["entry_id"] == "generic-cruise-set-res"
+
+
+def test_explain_no_supporters_states_limitation(catalog):
+    row = _obs_row(
+        visible_object="cruise set and resume buttons",
+        location="steering_wheel",
+    )
+    result = explain_claim(catalog, [row], "adaptive cruise control", FORTE_2021)
+    assert result["supports_claim"] is False
+    assert result["entry_id"] == "generic-cruise-set-res"
+    assert "not to the claimed adaptive_cruise_control" in result["explanation"]
+    assert result["observation_id"] == str(row.id)
+    assert result["photo_id"] == str(row.photo_id)
+
+
+def test_explain_multi_photo_provenance(catalog):
+    photo_a, photo_b = uuid.uuid4(), uuid.uuid4()
+    weak = _obs_row(
+        photo_id=photo_a,
+        visible_object="cruise set and resume buttons",
+        location="steering_wheel",
+    )
+    strong = _obs_row(
+        photo_id=photo_b,
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+    )
+    result = explain_claim(
+        catalog, [weak, strong], "adaptive cruise control", FORTE_2021
+    )
+    assert result["photo_id"] == str(photo_b)
+    assert result["entry_id"] == "kia-forte-2021-scc-distance"
+    assert {entry["photo_id"] for entry in result["interpretations"]} == {
+        str(photo_a),
+        str(photo_b),
+    }
+
+
+def test_explain_returns_none_without_keyed_rows(catalog):
+    rows = [
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            photo_id=uuid.uuid4(),
+            verdict=adas_evidence.Verdict.ABSENT,
+            extra={"visible_object": "following-distance button"},
+        ),
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            photo_id=uuid.uuid4(),
+            verdict=PRESENT,
+            extra={"notes": "no control identification"},
+        ),
+    ]
+    assert explain_claim(catalog, rows, "adaptive cruise control", FORTE_2021) is None

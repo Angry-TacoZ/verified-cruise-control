@@ -65,11 +65,19 @@ Budget fields (exact names):
   fired, retries included) and `cost_usd` (string, or `null` when
   billing is unknown — never silently zero).
 - Observations carry `sam_target` (+ `target_source`: `observed_object`
-  or `claim_fallback`), crop-scoped recheck rows carry `source_crop_id`
-  and `source_claim_key`, and crop rows carry `changed_observation` /
-  `changed_finding`. `finding.evidence.interpretation` holds the
-  deterministic Layer D interpretation (`observed_object`, `location`,
-  `catalog_entry`, `reference`, `strength`, `cannot_infer`).
+  or `claim_fallback`, and `control_index`: which control item in the
+  source observation was localized), crop-scoped recheck rows carry
+  `source_crop_id` and `source_claim_key`, and crop rows carry
+  `changed_observation` / `changed_finding`.
+  `finding.evidence.interpretation` holds the deterministic Layer D
+  interpretation (`observed_object`, `location`, `catalog_entry`,
+  `reference`, `strength`, `cannot_infer`) plus provenance
+  (`observation_id`, `photo_id`, `control_index`) and the full
+  per-control `interpretations` list (every evaluated control item,
+  supporting or not). Manufacturer-specific entries apply only when
+  the snapshot vehicle falls inside their documented make/model/year
+  applicability; the audit snapshot carries a `vehicle` block
+  (year/make/model/trim, never the VIN).
 
 Job statuses: `queued` → `running` → `complete`; `paused` (budget
 blocker, resumable by a fresh job via `/retry`); `failed`

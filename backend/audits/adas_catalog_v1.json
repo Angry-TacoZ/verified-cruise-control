@@ -14,6 +14,7 @@
   "entries": [
     {
       "id": "kia-forte-2021-scc-distance",
+      "scope": "manufacturer_specific",
       "manufacturer": "Kia",
       "models": ["Forte"],
       "model_years": [2021, 2022],
@@ -53,6 +54,7 @@
     },
     {
       "id": "kia-forte-2019-2024-lka-button",
+      "scope": "manufacturer_specific",
       "manufacturer": "Kia",
       "models": ["Forte"],
       "model_years": [2019, 2020, 2021, 2022, 2023, 2024],
@@ -86,6 +88,7 @@
     },
     {
       "id": "vw-jetta-gli-assist-stalk",
+      "scope": "manufacturer_specific",
       "manufacturer": "Volkswagen",
       "models": ["Jetta GLI", "Jetta"],
       "model_years": [2021, 2022, 2023],
@@ -127,6 +130,7 @@
     },
     {
       "id": "generic-cruise-set-res",
+      "scope": "general",
       "manufacturer": null,
       "models": [],
       "model_years": [],
@@ -161,6 +165,7 @@
     },
     {
       "id": "kia-lfa-steering-buttons",
+      "scope": "manufacturer_specific",
       "manufacturer": "Kia",
       "models": ["K5", "Seltos", "Forte"],
       "model_years": [2021, 2022, 2023, 2024],
@@ -199,6 +204,7 @@
     },
     {
       "id": "vw-lane-assist-naming",
+      "scope": "manufacturer_specific",
       "manufacturer": "Volkswagen",
       "models": ["Jetta GLI", "Jetta", "Golf"],
       "model_years": [2021, 2022, 2023, 2024, 2025, 2026],

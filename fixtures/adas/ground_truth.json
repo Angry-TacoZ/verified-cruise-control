@@ -1,5 +1,6 @@
 {
   "_note": "Ground truth for the synthetic ADAS schematics in this directory. These drawings are stick-figure-level schematics: they exercise the pipeline's SHAPE handling (bytes, hashing, batching, mapping of scripted observations), NOT model recognition quality. No test scores a model against these images.",
+  "vehicle": {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"},
   "claims": ["adaptive cruise control", "lane keeping assist"],
   "photos": [
     {
