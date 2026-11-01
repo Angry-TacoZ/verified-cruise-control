@@ -86,13 +86,17 @@ with sockets blocked and keys unset: import never calls providers.
 
 One listing → one audit job (`AuditJob`), processed stage by stage:
 
-1. Local deterministic screening (claims + photo snapshot) → 2. Muse
-   full-image analysis (one photo × ≤6 claims per call, 4096 output
-   tokens) → 3. SAM 3.1 localization of PRESENT sightings → 4. Pillow
-   box crops → 5. conditional Muse crop re-analysis (documented
-   ambiguity only) → 6. deterministic reconciliation (five-state
-   taxonomy: `verified`, `visually_supported`, `insufficient_evidence`,
-   `not_visually_verifiable`, `contradicted`) → findings + evidence.
+1. Local deterministic screening (claims + photo snapshot, original
+   SHA-256 integrity verified before any spend) → 2. Muse full-image
+   analysis (one photo × ≤6 claims per call, 4096 output tokens, prompt
+   m2 with observed-object fields) → 3. SAM 3.1 localization of the
+   actual observed objects (`sam_target`, never abstract claims) → 4.
+   Pillow box crops → 5. conditional Muse crop re-analysis (that crop's
+   originating claim only, documented ambiguity only) → 6.
+   manufacturer-aware evidence mapping + deterministic reconciliation
+   (five-state taxonomy: `verified`, `visually_supported`,
+   `insufficient_evidence`, `not_visually_verifiable`, `contradicted`)
+   → findings + evidence + interpretation.
 
 Key mechanics (all covered by `backend/tests/test_audits*.py`):
 
@@ -113,6 +117,17 @@ Key mechanics (all covered by `backend/tests/test_audits*.py`):
   allowance. Unknown cost, call-cap, or spend-cap pauses the job with
   an exact code; `model_calls_made` counts model attempts only
   (`calls_made` counts ledger rows, local stages included).
+- **Ownership fencing**: evidence writes are fenced to the current
+  worker (`fence_evidence_write` conditional heartbeat touch inside the
+  write transaction); a worker that lost its lease keeps its spend
+  accounting via `settle_call()` but cannot persist observations,
+  masks, crops, or findings, nor advance stages. Late responses from a
+  superseded worker are recorded financially and discarded as evidence.
+- **Four-layer ADAS recognition** (`docs/adas-catalog.md`): advertised
+  capability → observed physical object → SAM object localization →
+  deterministic catalog mapping. Crop rechecks are scoped to the
+  originating claim, dedupe is crop-aware, and each crop records
+  whether it changed the observation and the final classification.
 - **No exactly-once billing claim**: a provider call that finished
   server-side microseconds before a crash may go unsettled; providers
   offer no idempotency keys here. The ledger records what the app can

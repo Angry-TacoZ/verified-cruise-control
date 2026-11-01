@@ -102,6 +102,21 @@ can read this repository and can serve arbitrary listing pages.
   requests never run inference inline, and a server restart cannot
   silently abandon or double-fire a call — jobs resume from durable
   stage results, and completed observations are never re-requested.
+- Ownership fencing separates money from evidence: a worker that lost
+  its lease still settles spend via `settle_call()`, but every evidence
+  write (observations, masks, crops, findings) and every stage advance
+  is fenced to the current owner — late responses from superseded
+  workers are recorded financially and discarded as evidence.
+- Original-bytes integrity is verified against the queue-time snapshot
+  (metadata + file presence + SHA-256) during screening, before any
+  provider call; mismatches fail with `evidence_tampered` /
+  `evidence_metadata_drift` and never spend. Resume re-runs screening,
+  so corruption after a restart is caught too.
+- Catalog provenance: manufacturer mappings resolve from the versioned
+  `adas_catalog_v1.json` only — Muse's general automotive knowledge
+  never silently upgrades an unknown. Downloaded manual documents are
+  treated as untrusted data; references record document identity, the
+  URL actually consulted, and access date so mappings stay inspectable.
 - Residual billing truth: caps are application-side headroom, not
   provider-side guarantees. A call that finished server-side just
   before a crash may go unsettled. No exactly-once billing is

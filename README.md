@@ -192,10 +192,20 @@ Run one (needs `VCC_INFERENCE_ENABLED=1` plus `BASETEN_API_KEY` and
 1. `./scripts/dev.ps1` (the audit worker starts in its own window), or
    `./scripts/start-audit-worker.ps1` standalone.
 2. In the mother app, open a listing → **Run audit**. This only queues
-   the job (`202`); the worker claims it and runs screening → Muse →
-   SAM → crops → conditional recheck → reconcile.
+   the job (`202`); the worker claims it and runs screening (incl.
+   SHA-256 integrity) → Muse → SAM → crops → conditional recheck →
+   reconcile.
 3. Findings, observations, crops, and the cost ledger appear in the
    audit panel; `/api/audits/{job_id}/evidence` exposes the same data.
+
+Muse names physical controls (button, symbol, location); the
+versioned ADAS reference catalog (`docs/adas-catalog.md`) maps those
+to documented vehicle capabilities; SAM localizes the named object —
+never an abstract feature; deterministic reconcile assigns the final
+state plus an inspectable interpretation (observed object, reference,
+strength, cannot-infer list). Dedicated controls (e.g. a following-
+distance button) can yield `visually_supported`; generic ones never
+promote upward.
 
 Spend controls (see `docs/security.md`): every provider call reserves
 worst-case attempts + spend before firing; per-job call and spend caps
@@ -240,15 +250,19 @@ in CI.
 - Reconciliation is conservative by design: photo-only audits reach
   `contradicted`/`verified` only with authoritative backing, so most
   real listings land in `insufficient_evidence` until more sources exist.
+  The v1 ADAS catalog covers only Kia Forte and VW Jetta/GLI mappings
+  (provisional sourcing); every other vehicle resolves to documented
+  unknown rather than a guessed support.
 - Single local operator, single pairing token family, no multi-user auth.
 - SQLite + local disk only; no backups, no replication.
 
 ## Roadmap
 
 - **PR #2 (this branch)**: live Muse Spark Open 1026 + SAM 3.1
-  integration, standalone audit worker, durable jobs, Pillow crops,
-  deterministic reconciliation, five-state findings, baseline evals
-  with real cost accounting.
+  integration, standalone audit worker, ownership-fenced durable jobs,
+  SHA-verified evidence, Pillow crops, manufacturer-aware ADAS
+  evidence mapping, deterministic reconciliation, five-state findings,
+  baseline evals with real cost accounting.
 - Later: dealership extractor pack, reviewer QA workflow, evidence packets,
   packaging hardening.
 

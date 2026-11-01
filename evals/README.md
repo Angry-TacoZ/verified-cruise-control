@@ -36,11 +36,16 @@ cost per listing · malformed-input reliability.
 
 ## Current status
 
-- `cases/v2/reconcile_goldens.json`: 14 hand-labeled reconcile cases; run
-  with `python evals/run.py reconcile` (zero inference). Pinned in CI by
-  `backend/tests/test_eval_goldens.py`. v2 supersedes v1 with conservative
-  Rule E classification (absence is never contradiction); v1 cases and
-  results are preserved as versioned history.
+- `cases/v3/reconcile_goldens.json`: 13 hand-labeled reconcile cases over
+  manufacturer-aware interpretation + SAM target fixtures; run with
+  `python evals/run.py reconcile` (zero inference). Pinned in CI by
+  `backend/tests/test_eval_goldens.py`. v3 supersedes v2 with Layer D
+  catalog-driven support (diagnostic/supportive catalog mappings can
+  yield `visually_supported`, documented unknown cannot); v1/v2 cases
+  and results are preserved as versioned history.
+- `cases/v2/reconcile_goldens.json`: 14 hand-labeled reconcile cases
+  under the pre-catalog conservative classifier; v2 supersedes v1
+  (absence is never contradiction). Both retained for history.
 - `cases/v1/muse_fixture_ground_truth.json`: unsupported-inference eval
   over the 3 synthetic fixture photos (no honest output may claim a
   feature is present). Run with `python evals/run.py muse-live`: one live

@@ -64,6 +64,12 @@ Budget fields (exact names):
 - Execution rows in `/evidence` carry `attempts` (external requests
   fired, retries included) and `cost_usd` (string, or `null` when
   billing is unknown — never silently zero).
+- Observations carry `sam_target` (+ `target_source`: `observed_object`
+  or `claim_fallback`), crop-scoped recheck rows carry `source_crop_id`
+  and `source_claim_key`, and crop rows carry `changed_observation` /
+  `changed_finding`. `finding.evidence.interpretation` holds the
+  deterministic Layer D interpretation (`observed_object`, `location`,
+  `catalog_entry`, `reference`, `strength`, `cannot_infer`).
 
 Job statuses: `queued` → `running` → `complete`; `paused` (budget
 blocker, resumable by a fresh job via `/retry`); `failed`
