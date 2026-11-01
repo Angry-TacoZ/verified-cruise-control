@@ -63,6 +63,8 @@ python evals/run.py realworld-live --manifest evals/realworld/manifest.pilot.jso
 
 Live runs refuse without `VCC_LIVE_SMOKE=1`, configured provider keys,
 and a worst-case spend bound (cases x modes x per-job cap) under
-`--max-spend`. SAM localization additionally requires `VCC_LIVE_SAM=1`;
+`--max-spend`. Every call additionally passes `EvalBudget` pre-call
+reservations (attempt + spend headroom, unknown-cost freeze) with a
+JSONL spend ledger. SAM localization additionally requires `VCC_LIVE_SAM=1`;
 without it the SAM stage is recorded as not measured, not as zero.
 Never run live evals in CI.

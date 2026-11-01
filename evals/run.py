@@ -51,11 +51,16 @@ from audits.pipeline import (
     reconcile_claim,
 )
 from audits.realworld import (
+    BudgetRefused,
+    EvalBudget,
+    build_eval_observation,
     estimate_spend,
+    muse_verdict,
     render_markdown,
     score_case,
     summarize,
     validate_manifest,
+    write_ledger,
 )
 from django.conf import settings
 
@@ -231,16 +236,8 @@ def run_realworld_dryrun(
     }
 
 
-def _chargeable(cost, spent: float, max_spend: float, what: str) -> float:
-    """Fail closed on unknown cost; abort before exceeding the bound."""
-    if cost is None:
-        raise SystemExit(f"refusing: {what} returned unknown cost (unknown != $0)")
-    total = spent + float(cost)
-    if float(cost) > max_spend or total > max_spend:
-        raise SystemExit(
-            f"refusing: {what} cost {cost} would exceed bound ${max_spend}"
-        )
-    return total
+def _refuse(message: str) -> None:
+    raise SystemExit(f"refusing: {message}")
 
 
 def run_realworld_live(
@@ -277,116 +274,167 @@ def run_realworld_live(
     muse_adapter = BasetenMuseAdapter()
     muse_adapter.require_configured()
 
-    spent = 0.0
+    # F1: every provider call below runs through pre-call reservations.
+    # Attempt headroom mirrors each adapter's own bounded retry policy
+    # (Muse: first try + up to 2 retries; SAM: first try + up to 3).
+    per_call = str(settings.AUDIT_SPEND_CAP_USD)
+    budget = EvalBudget(
+        # Authorization verified above (VCC_LIVE_SMOKE + configured keys).
+        authorized=True,
+        max_spend_usd=str(max_spend),
+        max_attempts_total=preflight["muse_calls_planned"] * 3
+        + preflight["sam_calls_planned"] * 4,
+        reserve_usd_per_call=per_call,
+    )
+    ledger_path = RESULTS / f"{date.today().isoformat()}-realworld-live.ledger.jsonl"
+
+    def flush():
+        write_ledger(ledger_path, budget)
+
     rows = []
     raw = []
-    for case in cases:
-        photo_rel = case["photo"]["path"]
-        data = (photos_root / photo_rel).read_bytes()
-        claim = case["claim"]
-        entries = [{"id": claim["claim_id"], "text": claim["advertised"]}]
-        photo_id = case["id"]
-        attachment = ImageAttachment(
-            photo_id=photo_id, mime_type=MIME[Path(photo_rel).suffix.lower()], data=data
-        )
-        for mode in ("baseline", "reference"):
-            if mode == "reference":
-                block = build_reference_block([claim["advertised"]])
-                if block:
-                    system = build_system_instructions(block)
-                    prompt_version = REFERENCE_PROMPT_VERSION
+    try:
+        for case in cases:
+            photo_rel = case["photo"]["path"]
+            data = (photos_root / photo_rel).read_bytes()
+            claim = case["claim"]
+            entries = [{"id": claim["claim_id"], "text": claim["advertised"]}]
+            photo_id = case["id"]
+            attachment = ImageAttachment(
+                photo_id=photo_id,
+                mime_type=MIME[Path(photo_rel).suffix.lower()],
+                data=data,
+            )
+            for mode in ("baseline", "reference"):
+                if mode == "reference":
+                    block = build_reference_block([claim["advertised"]])
+                    if block:
+                        system = build_system_instructions(block)
+                        prompt_version = REFERENCE_PROMPT_VERSION
+                    else:
+                        # No RSA guidance maps to this claim: reference mode
+                        # degrades to the baseline prompt; record the fallback.
+                        system = SYSTEM_INSTRUCTIONS
+                        prompt_version = PROMPT_VERSION
                 else:
-                    # No RSA guidance maps to this claim: reference mode
-                    # degrades to the baseline prompt; record the fallback.
                     system = SYSTEM_INSTRUCTIONS
                     prompt_version = PROMPT_VERSION
-            else:
-                system = SYSTEM_INSTRUCTIONS
-                prompt_version = PROMPT_VERSION
-            request = MuseRequest(
-                prompt_version=prompt_version,
-                system_instructions=system,
-                user_text=build_user_text(entries, [photo_id]),
-                photo_ids=(photo_id,),
-                images=(attachment,),
-                max_output_tokens=MUSE_MAX_OUTPUT_TOKENS,
-            )
-            result = muse_adapter.analyze(request)
-            spent = _chargeable(
-                result.usage.estimated_cost_usd,
-                spent,
-                max_spend,
-                f"Muse {case['id']} {mode}",
-            )
-            obs = result.observations[0] if result.observations else {}
-            visible = str(obs.get("visible_object", "") or "")
-            if obs.get("ambiguous"):
-                verdict = "unclear"
-            elif visible.strip().lower() == "none":
-                verdict = "absent"
-            else:
-                verdict = "present"
-            sam_target = visible if verdict == "present" else ""
-            sam_masks = 0
-            sam_status = "skipped" if not include_sam else "no-target"
-            if include_sam and sam_target:
-                from PIL import Image as PILImage
-
-                with PILImage.open(photos_root / photo_rel) as img:
-                    width, height = img.size
-                sam_request = SamRequest(
-                    photo=attachment,
-                    image_width=width,
-                    image_height=height,
-                    concept=sam_target,
+                request = MuseRequest(
+                    prompt_version=prompt_version,
+                    system_instructions=system,
+                    user_text=build_user_text(entries, [photo_id]),
+                    photo_ids=(photo_id,),
+                    images=(attachment,),
+                    max_output_tokens=MUSE_MAX_OUTPUT_TOKENS,
                 )
-                sam_result = sam_adapter.analyze(sam_request)
-                spent = _chargeable(
-                    sam_result.usage.estimated_cost_usd,
-                    spent,
-                    max_spend,
-                    f"SAM {case['id']} {mode}",
-                )
-                sam_masks = len(sam_result.records or [])
-                sam_status = "localized" if sam_masks else "no-mask"
-            state, _summary = reconcile_claim(
-                [
-                    Observation(
-                        source="muse",
-                        verdict=verdict,
-                        photo_id=uuid.uuid4(),
-                        extra={"visible_object": visible},
+                try:
+                    result = budget.guarded(
+                        f"Muse {case['id']} {mode}",
+                        muse_adapter,
+                        request,
+                        max_attempts=3,
                     )
-                ],
-                claim["advertised"],
-                case["vehicle"],
-            )
-            recorded = {
-                "case_id": case["id"],
-                "mode": mode,
-                "status": "scored",
-                "state": state,
-                "prompt_version": prompt_version,
-                "control": visible,
-                "interpretation": "supports"
-                if state in ("verified", "visually_supported")
-                else ("unknown" if verdict == "unclear" else "insufficient"),
-                "sam_target": sam_target,
-                "sam_masks": sam_masks,
-                "sam_status": sam_status,
-            }
-            rows.append(score_case(case, recorded))
-            raw.append(
-                {
+                except BudgetRefused as exc:
+                    _refuse(str(exc))
+                flush()
+                obs_list = list(result.observations or [])
+                if not obs_list:
+                    # Empty model output is not evidence: record the gap,
+                    # never reconcile a fabricated observation.
+                    recorded = {
+                        "case_id": case["id"],
+                        "mode": mode,
+                        "status": "missing-observation",
+                        "prompt_version": prompt_version,
+                    }
+                    rows.append(score_case(case, recorded))
+                    raw.append(
+                        {
+                            "case_id": case["id"],
+                            "mode": mode,
+                            "prompt_version": prompt_version,
+                            "muse_observation": None,
+                            "sam_status": "skipped",
+                            "sam_masks": 0,
+                            "state": None,
+                        }
+                    )
+                    continue
+                obs = obs_list[0]
+                verdict = muse_verdict(obs)
+                visible = str(obs.get("visible_object", "") or "")
+                # F2: reconcile the complete validated observation —
+                # symbols, locations, dedicated flags, nested controls —
+                # not a visible_object-only projection.
+                eval_obs = build_eval_observation(
+                    obs, claim_id=claim["claim_id"], photo_id=photo_id
+                )
+                sam_target = visible if verdict == "present" else ""
+                sam_masks = 0
+                sam_status = "skipped" if not include_sam else "no-target"
+                if include_sam and sam_target:
+                    from PIL import Image as PILImage
+
+                    with PILImage.open(photos_root / photo_rel) as img:
+                        width, height = img.size
+                    sam_request = SamRequest(
+                        photo=attachment,
+                        image_width=width,
+                        image_height=height,
+                        concept=sam_target,
+                    )
+                    try:
+                        sam_result = budget.guarded(
+                            f"SAM {case['id']} {mode}",
+                            sam_adapter,
+                            sam_request,
+                            max_attempts=4,
+                        )
+                    except BudgetRefused as exc:
+                        _refuse(str(exc))
+                    flush()
+                    sam_masks = len(sam_result.records or [])
+                    sam_status = "localized" if sam_masks else "no-mask"
+                state, _summary = reconcile_claim(
+                    [eval_obs],
+                    claim["advertised"],
+                    case["vehicle"],
+                )
+                recorded = {
                     "case_id": case["id"],
                     "mode": mode,
-                    "prompt_version": prompt_version,
-                    "muse_observation": obs,
-                    "sam_status": sam_status,
-                    "sam_masks": sam_masks,
+                    "status": "scored",
                     "state": state,
+                    "prompt_version": prompt_version,
+                    "control": visible,
+                    "nested_control_count": len(obs.get("controls") or []),
+                    "interpretation": "supports"
+                    if state in ("verified", "visually_supported")
+                    else ("unknown" if verdict == "unclear" else "insufficient"),
+                    "sam_target": sam_target,
+                    "sam_masks": sam_masks,
+                    "sam_status": sam_status,
                 }
-            )
+                rows.append(score_case(case, recorded))
+                raw.append(
+                    {
+                        "case_id": case["id"],
+                        "mode": mode,
+                        "prompt_version": prompt_version,
+                        "muse_observation": obs,
+                        "sam_status": sam_status,
+                        "sam_masks": sam_masks,
+                        "state": state,
+                    }
+                )
+    except SystemExit:
+        raise
+    except Exception as exc:  # noqa: BLE001 - any failure aborts with ledger flushed
+        raise SystemExit(f"aborting live eval after provider error: {exc}")
+    finally:
+        # Durable history: reservations, settlements, and unknown-cost
+        # freezes survive interruption instead of dying with the process.
+        flush()
     summary = summarize(manifest_path.stem, rows)
     return {
         "eval": "realworld-live",
@@ -399,7 +447,9 @@ def run_realworld_live(
         "rows": rows,
         "raw": raw,
         "spend_preflight_usd": preflight,
-        "cost_usd": spent,
+        "cost_usd": str(budget.spent),
+        "spend_ledger": budget.totals(),
+        "spend_ledger_path": ledger_path.name,
         "markdown": render_markdown(manifest_path.stem, summary, rows),
     }
 

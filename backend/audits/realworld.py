@@ -13,8 +13,12 @@ pre-flight bound is cases x modes x per-job ``spend_cap_usd`` (see
 from __future__ import annotations
 
 import hashlib
+import uuid
 from decimal import Decimal
 from pathlib import Path
+
+from audits.models import Observation
+from audits.pipeline import control_extra
 
 MANIFEST_VERSION = "realworld-v1"
 
@@ -65,6 +69,12 @@ REQUIRED_TRUTH_KEYS = frozenset(
         "ambiguity",
     }
 )
+
+# Optional independent localization ground truth: a human-verified label
+# stating whether SAM should localize the observed object in this photo.
+# Absent by default — localization is then reported as not measured, never
+# inferred from text agreement.
+LOCALIZATION_OUTCOMES = ("localized", "no-mask")
 
 
 def _no_forbidden(obj, where: str) -> None:
@@ -141,6 +151,22 @@ def validate_case(case: dict) -> dict:
         raise ValueError(
             f"case {case['id']}: bad expected_state {truth['expected_state']!r}"
         )
+    localization = truth.get("localization")
+    if localization is not None:
+        if not isinstance(localization, dict):
+            raise ValueError(f"case {case['id']}: localization must be an object")
+        if localization.get("verified_outcome") not in LOCALIZATION_OUTCOMES:
+            raise ValueError(
+                f"case {case['id']}: bad localization.verified_outcome "
+                f"{localization.get('verified_outcome')!r}"
+            )
+        if not localization.get("verified_by") or not isinstance(
+            localization.get("verified_by"), str
+        ):
+            raise ValueError(
+                f"case {case['id']}: localization.verified_by must name the "
+                "independent verification method"
+            )
     return case
 
 
@@ -179,6 +205,106 @@ def validate_manifest(manifest, photos_root=None) -> list:
     return cases
 
 
+# Tokens too generic to identify a control on their own: sharing only
+# these must never count as a match.
+_CONTROL_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "of",
+        "and",
+        "or",
+        "for",
+        "to",
+        "in",
+        "on",
+        "with",
+        "button",
+        "buttons",
+        "control",
+        "controls",
+        "switch",
+        "icon",
+    }
+)
+
+
+def _control_tokens(text: str) -> frozenset:
+    import re
+
+    return frozenset(
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if token not in _CONTROL_STOPWORDS
+    )
+
+
+def control_matches(predicted: str, expected: str) -> bool:
+    """Decide whether a predicted control names the expected object.
+
+    Exact match (after case/whitespace normalization) wins; otherwise
+    the substantive token sets must be equal, or the smaller must be
+    contained in the larger with at least two shared tokens. Empty on
+    either side never matches, and sharing only generic words
+    ("button", "control", "icon", ...) never matches either.
+    """
+    predicted_norm = " ".join((predicted or "").split()).lower()
+    expected_norm = " ".join((expected or "").split()).lower()
+    if not predicted_norm or not expected_norm:
+        return False
+    if predicted_norm == expected_norm:
+        return True
+    predicted_tokens = _control_tokens(predicted_norm)
+    expected_tokens = _control_tokens(expected_norm)
+    if not predicted_tokens or not expected_tokens:
+        return False
+    if predicted_tokens == expected_tokens:
+        return True
+    shared = predicted_tokens & expected_tokens
+    return len(shared) >= 2 and (
+        predicted_tokens <= expected_tokens or expected_tokens <= predicted_tokens
+    )
+
+
+def muse_verdict(item: dict) -> str:
+    """Map one validated Muse observation to present/absent/unclear.
+
+    Production-identical rule (mirrors ``pipeline._verdict``): ambiguous
+    is unclear, literal "none" is absent, anything else is present.
+    """
+    if item.get("ambiguous"):
+        return "unclear"
+    if str(item.get("visible_object", "") or "").strip().lower() == "none":
+        return "absent"
+    return "present"
+
+
+def build_eval_observation(item: dict, *, claim_id: str, photo_id: str) -> Observation:
+    """Build an unsaved Observation carrying the complete validated data.
+
+    Extra uses the production projection (localization flags plus full
+    Layer B control identification: symbols, locations, dedicated flags,
+    manufacturer context, and validated nested ``controls``), so the
+    existing interpretation and reconciliation machinery sees exactly
+    what production would persist — nothing dropped, nothing invented.
+    """
+    return Observation(
+        source="muse",
+        verdict=muse_verdict(item),
+        photo_id=uuid.uuid4(),
+        rationale=str(item.get("description", "") or ""),
+        extra={
+            "claim_id": claim_id,
+            "eval_photo_id": str(photo_id),
+            "supports_localization": bool(item.get("supports_localization")),
+            "needs_crop": bool(item.get("needs_crop")),
+            "needs_other_view": bool(item.get("needs_other_view")),
+            **control_extra(item),
+        },
+    )
+
+
 def score_case(case: dict, recorded: dict) -> dict:
     """Deterministically score one recorded model output against ground truth.
 
@@ -200,9 +326,7 @@ def score_case(case: dict, recorded: dict) -> dict:
     interpretation = recorded.get("interpretation")
     sam_target = (recorded.get("sam_target") or "").strip().lower()
 
-    control_correct = bool(control) and (
-        control == visible or control in visible or visible in control
-    )
+    control_correct = control_matches(control, visible)
     predicted_positive = state in ("verified", "visually_supported")
     truth_positive = expected_state in ("verified", "visually_supported")
 
@@ -217,11 +341,17 @@ def score_case(case: dict, recorded: dict) -> dict:
         "insufficient",
         "unknown",
     )
-    sam_ok = (
-        bool(sam_target)
-        and bool(control)
-        and (sam_target in control or control in sam_target)
-    )
+    # Target SELECTION correctness: the SAM prompt named the independently
+    # established object (text agreement only — never localization proof).
+    sam_target_selected = control_matches(sam_target, visible)
+    # LOCALIZATION correctness is scored only against an independent
+    # verified label; otherwise it stays None (not measured).
+    sam_masks = recorded.get("sam_masks", 0) or 0
+    localization_gt = (truth.get("localization") or {}).get("verified_outcome")
+    if localization_gt is None:
+        sam_localization_correct = None
+    else:
+        sam_localization_correct = (sam_masks > 0) == (localization_gt == "localized")
 
     return {
         "case_id": case_id,
@@ -235,7 +365,9 @@ def score_case(case: dict, recorded: dict) -> dict:
         "support_correct": bool(predicted_positive and truth_positive),
         "hallucinated_positive": hallucinated_positive,
         "unsupported_equipped": unsupported_equipped,
-        "sam_target_ok": sam_ok,
+        "sam_target_selected": sam_target_selected,
+        "sam_masks_observed": sam_masks,
+        "sam_localization_correct": sam_localization_correct,
         "interpretation_match": interpretation == truth["interpretation"],
         "recorded_prompt_version": recorded.get("prompt_version"),
     }
@@ -270,9 +402,18 @@ def _mode_stats(rows: list) -> dict:
         ),
         "hallucination_count": hall,
         "unsupported_count": unsup,
-        "sam_target_ok": sum(1 for r in scored if r.get("sam_target_ok")),
+        "sam_target_selected": sum(1 for r in scored if r.get("sam_target_selected")),
+        "sam_localization_measured": sum(
+            1 for r in scored if r.get("sam_localization_correct") is not None
+        ),
+        "sam_localization_accuracy": _rate(
+            sum(1 for r in scored if r.get("sam_localization_correct") is True),
+            sum(1 for r in scored if r.get("sam_localization_correct") is not None),
+        ),
         "missing_or_unreadable": sum(
-            1 for r in rows if r.get("status") in ("missing-photo", "unreadable")
+            1
+            for r in rows
+            if r.get("status") in ("missing-photo", "unreadable", "missing-observation")
         ),
         "insufficient_unknown_rate": _rate(
             sum(
@@ -335,6 +476,179 @@ def estimate_spend(
         "worst_case_usd": str(cap * jobs),
         "spend_cap_usd_per_job": str(cap),
     }
+
+
+class BudgetRefused(Exception):
+    """A provider call was refused before sending: unauthorized, over the
+    call-count allowance, over the spend bound, or frozen by unknown cost."""
+
+
+class EvalBudget:
+    """Pre-call reservation ledger for offline evaluation (no Django job).
+
+    Mirrors the production ``reserve_call``/``settle_call`` semantics in a
+    dependency-free form: every provider call is reserved BEFORE it is
+    sent — call-count headroom (first try plus bounded retries) and spend
+    headroom (full per-call reserve) — and settled AFTER with actual
+    attempts, provider, and cost. Unknown cost freezes further spending
+    instead of settling as zero. Every event is appended to ``records``
+    so a crash between reservation and settlement stays visible.
+    """
+
+    def __init__(
+        self,
+        *,
+        authorized: bool,
+        max_spend_usd: str,
+        max_attempts_total: int,
+        reserve_usd_per_call: str,
+    ) -> None:
+        self.authorized = authorized
+        self.max_spend = Decimal(max_spend_usd)
+        self.max_attempts_total = max_attempts_total
+        self.reserve_usd = Decimal(reserve_usd_per_call)
+        self.spent = Decimal(0)
+        self.reserved_spend = Decimal(0)
+        self.attempts_used = 0
+        self.attempts_reserved = 0
+        self.unknown_cost = False
+        self.records: list = []
+        self._outstanding: dict = {}
+        self._seq = 0
+
+    def _record(self, event: str, label: str, *, outstanding=False, **fields) -> None:
+        self._seq += 1
+        self.records.append(
+            {
+                "seq": self._seq,
+                "event": event,
+                "label": label,
+                "outstanding": outstanding,
+                **fields,
+            }
+        )
+
+    def reserve(self, label: str, *, max_attempts: int) -> str:
+        """Reserve headroom for one provider call; returns a token.
+
+        Refuses (raising ``BudgetRefused``) without authorization, after
+        unknown cost, or when attempts or spend headroom is insufficient.
+        """
+        if not self.authorized:
+            raise BudgetRefused(f"{label}: eval inference not authorized")
+        if self.unknown_cost:
+            raise BudgetRefused(f"{label}: spend frozen after unknown cost")
+        if max_attempts < 1:
+            raise BudgetRefused(f"{label}: max_attempts must be >= 1")
+        if self.attempts_used + self.attempts_reserved + max_attempts > (
+            self.max_attempts_total
+        ):
+            raise BudgetRefused(
+                f"{label}: needs {max_attempts} attempt(s), "
+                f"{self.max_attempts_total - self.attempts_used - self.attempts_reserved} left"
+            )
+        if self.spent + self.reserved_spend + self.reserve_usd > self.max_spend:
+            raise BudgetRefused(
+                f"{label}: ${self.reserve_usd} headroom exceeds remaining "
+                f"${self.max_spend - self.spent - self.reserved_spend}"
+            )
+        token = f"{label}#{self._seq + 1}"
+        self._outstanding[token] = {
+            "label": label,
+            "max_attempts": max_attempts,
+            "reserve_usd": str(self.reserve_usd),
+        }
+        self.attempts_reserved += max_attempts
+        self.reserved_spend += self.reserve_usd
+        self._record(
+            "reserved",
+            label,
+            outstanding=True,
+            max_attempts=max_attempts,
+            reserve_usd=str(self.reserve_usd),
+        )
+        return token
+
+    def settle(
+        self,
+        token: str,
+        *,
+        attempts: int,
+        cost_usd,
+        provider: str,
+    ) -> None:
+        """Release a reservation and book actuals. ``cost_usd=None`` (or an
+        error status) records unknown billing and freezes the ledger."""
+        held = self._outstanding.pop(token, None)
+        label = (held or {}).get("label", token)
+        self.attempts_reserved = max(
+            0, self.attempts_reserved - (held or {}).get("max_attempts", 0)
+        )
+        self.reserved_spend = max(
+            Decimal(0), self.reserved_spend - Decimal(str(self.reserve_usd))
+        )
+        self.attempts_used += attempts
+        if cost_usd is None:
+            self.unknown_cost = True
+            self._record(
+                "settled-unknown",
+                label,
+                attempts=attempts,
+                provider=provider,
+            )
+            return
+        self.spent += Decimal(str(cost_usd))
+        self._record(
+            "settled",
+            label,
+            attempts=attempts,
+            cost_usd=str(Decimal(str(cost_usd))),
+            provider=provider,
+        )
+
+    def guarded(self, label: str, adapter, request, *, max_attempts: int):
+        """Reserve, run one adapter call, and settle with observed usage.
+
+        The adapter never fires unless reservation succeeds. Provider
+        exceptions settle as unknown cost (freezing the ledger) and are
+        re-raised so the run aborts instead of silently continuing.
+        """
+        token = self.reserve(label, max_attempts=max_attempts)
+        try:
+            result = adapter.analyze(request)
+        except Exception:
+            attempts = getattr(adapter, "last_attempts", max_attempts)
+            self.settle(
+                token,
+                attempts=attempts,
+                cost_usd=None,
+                provider=getattr(adapter, "provider_name", "?"),
+            )
+            raise
+        usage = result.usage
+        self.settle(
+            token,
+            attempts=1 + (usage.retries or 0),
+            cost_usd=usage.estimated_cost_usd,
+            provider=usage.provider,
+        )
+        return result
+
+    def totals(self) -> dict:
+        return {
+            "spent_usd": str(self.spent),
+            "attempts_used": self.attempts_used,
+            "unknown_cost": self.unknown_cost,
+            "outstanding": sorted(self._outstanding),
+        }
+
+
+def write_ledger(path, budget: EvalBudget) -> None:
+    """Persist every ledger event as JSONL so interruption preserves history."""
+    import json
+
+    lines = [json.dumps(record) for record in budget.records]
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def render_markdown(manifest_id: str, summary: dict, rows: list) -> str:
@@ -408,12 +722,20 @@ def render_markdown(manifest_id: str, summary: dict, rows: list) -> str:
             "count",
         ),
         (
-            "SAM target-ok count",
-            base["sam_target_ok"],
+            "SAM target-selection count",
+            base["sam_target_selected"],
             base["n"],
-            ref["sam_target_ok"],
+            ref["sam_target_selected"],
             ref["n"],
             "count",
+        ),
+        (
+            "SAM localization accuracy",
+            base["sam_localization_accuracy"],
+            base["sam_localization_measured"],
+            ref["sam_localization_accuracy"],
+            ref["sam_localization_measured"],
+            "rate",
         ),
         (
             "Insufficient/unknown rate",

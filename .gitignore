@@ -88,3 +88,4 @@ evals/realworld/photos/*
 evals/realworld/manifest.*.json
 !evals/realworld/manifest.example.json
 evals/results/*-realworld-*.json
+evals/results/*-realworld-live.ledger.jsonl

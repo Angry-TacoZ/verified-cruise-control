@@ -453,11 +453,13 @@ def get_catalog() -> adas_evidence.Catalog:
     return _CATALOG
 
 
-def _control_extra(item: dict) -> dict:
+def control_extra(item: dict) -> dict:
     """Carry Layer B control identification into the observation row.
 
     Only keys the validator accepted are copied (all already capped);
     absent optionals stay absent so legacy-shaped items are unchanged.
+
+    Public so offline evaluation builds production-identical extras.
     """
     return {key: item[key] for key in _CONTROL_EXTRA_KEYS if key in item}
 
@@ -631,7 +633,7 @@ def run_muse(
                                 ),
                                 "needs_crop": bool(item.get("needs_crop")),
                                 "needs_other_view": bool(item.get("needs_other_view")),
-                                **_control_extra(item),
+                                **control_extra(item),
                             },
                             "execution": execution,
                         },
@@ -1146,7 +1148,7 @@ def run_recheck(
                         "extra": {
                             "crop_ref": crop.storage_ref,
                             "changed": prior is not None and prior != verdict,
-                            **_control_extra(item),
+                            **control_extra(item),
                         },
                         "execution": execution,
                     },

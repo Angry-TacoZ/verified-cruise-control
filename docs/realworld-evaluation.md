@@ -60,7 +60,10 @@ still requires authoritative vehicle-specific confirmation.
 regression is claimed either way.** What *is* measured:
 
 - Scorer self-test (dry-run on the 2 committed synthetic cases, 4
-  recorded vectors incl. one deliberate overclaim):
+  recorded vectors incl. one deliberate overclaim). The scorer now
+  uses token-based `control_matches` (no empty or generic-only
+  matches) and splits SAM target selection from localization, the
+  latter reported as not measured without independent labels:
   control accuracy 0.50/0.50, final-state accuracy 0.50/1.00,
   unsupported-inference count 1 (baseline) / 0 (reference),
   hallucinated-positive count 0/0, `paired_cases=2`. These vectors
@@ -104,9 +107,13 @@ equivalent — the RSA guide is never equipment proof).
 `realworld-live` refuses unless `VCC_LIVE_SMOKE=1` **and** provider
 keys are configured **and** the worst-case bound (cases x modes x the
 app's own per-job `spend_cap_usd`, default $2.00) fits `--max-spend`.
-Per-call costs settle through the existing usage records; unknown
-cost aborts the run (unknown != $0), and cumulative spend past the
-bound aborts before the next call. SAM runs only with `VCC_LIVE_SAM=1`
+Every call additionally passes `EvalBudget` pre-call reservations
+(call-count headroom covering bounded retries plus full per-call spend
+reserve, mirroring production `reserve_call`/`settle_call`); refusals
+and provider errors abort the run. Settlements book actual attempts,
+provider, and cost; unknown cost freezes the ledger (never zero), and
+every event flushes to a JSONL ledger so interruption preserves
+history. SAM runs only with `VCC_LIVE_SAM=1`
 plus a Meta key; otherwise the report records `sam_status: skipped`
 and SAM metrics render "not measured", never zero. CI contains no
 live path (live-smoke tests skip without keys). Preflight math is
@@ -138,6 +145,8 @@ estimate.
 4. Consider a per-job (not per-case) live runner once the worker API
    exposes `reference_mode` per job, so evals exercise the exact
    production stage path instead of the adapter-direct path used
-   here. Current live path reuses the same prompt builders,
-   validators, and reconciler — but the wiring differs, and that
-   difference must stay labeled until unified.
+   here. Current live path reuses the same prompt builders and the
+   production-identical observation extra (`build_eval_observation` /
+   `control_extra`, incl. nested controls), validators, and
+   reconciler — but the stage wiring differs, and that difference
+   must stay labeled until unified.
