@@ -1,0 +1,365 @@
+{
+  "reference_version": "2026-09-rsa-v1",
+  "source_document": "Road Safety Authority, Advanced Driver Assistance Systems (ADAS), September 2026 (21 pages)",
+  "source_note": "General driver-education guide with EU/IE regulatory context (incl. GSR2). Generic knowledge only: not a manufacturer equipment catalog and not vehicle-specific proof. Page numbers below are physical PDF pages; printed footers read one lower (e.g. PDF p. 13 == 'Page 12 of 21'). Definitions are concise paraphrases, not quotations; no illustrations are reproduced.",
+  "market_scope": "European Union / Ireland driver guidance; generic across manufacturers",
+  "entries": [
+    {
+      "id": "cruise_control",
+      "names": ["Cruise Control", "conventional cruise", "speed control"],
+      "definition": "Maintains a driver-selected speed via throttle (and sometimes engine braking/brakes on descents); does not react to traffic ahead.",
+      "assistance_mode": "continuous",
+      "symbols": [
+        {
+          "description": "Speedometer dial with needle and set-arrow; alternatively a CRUISE/SET dashboard text telltale.",
+          "location_hint": "instrument cluster telltale; set speed shown on cluster or screen",
+          "page": 13,
+          "limitation": "Telltale artwork varies by manufacturer; text vs icon forms both occur."
+        }
+      ],
+      "indicator_location": "instrument cluster",
+      "confusable_with": ["adaptive_cruise_control"],
+      "visual_support": "A speedometer-only or CRUISE/SET telltale, or ON/SET/RES buttons with no distance function, supports conventional cruise at most.",
+      "cannot_prove": "Never proves adaptive cruise control, gap-keeping, or stop-and-go capability.",
+      "sources": [{"section": "6.1", "page": 13}],
+      "scope": "general",
+      "limitations": "Generic description; some systems also brake on descents."
+    },
+    {
+      "id": "adaptive_cruise_control",
+      "names": ["Adaptive Cruise Control", "ACC", "Smart Cruise Control", "SCC"],
+      "definition": "Cruise control that additionally uses radar or cameras to detect vehicles ahead and adjusts speed to maintain a driver-selected following gap; some systems stop and restart in traffic.",
+      "assistance_mode": "continuous",
+      "symbols": [
+        {
+          "description": "Speedometer dial with a car silhouette above it and a set-arrow; alternatively an icon showing a car with distance bars.",
+          "location_hint": "instrument cluster; set speed and sometimes following distance displayed nearby",
+          "page": 13,
+          "limitation": "Artwork varies; distance-bars motif is the ACC-specific cue, not the speedometer alone."
+        }
+      ],
+      "indicator_location": "instrument cluster",
+      "confusable_with": ["cruise_control", "acc_stop_and_go", "active_driving_assistance"],
+      "visual_support": "A dedicated following-distance control, or a car-with-distance-bars indicator, is meaningful visual support subject to correct identification and vehicle applicability.",
+      "cannot_prove": "A speedometer-only or generic cruise control does not prove ACC. A following-distance control does not automatically establish Stop & Go.",
+      "sources": [{"section": "6.1", "page": 13}],
+      "scope": "general",
+      "limitations": "Stop/restart ability differs between implementations; guide does not enumerate which."
+    },
+    {
+      "id": "acc_stop_and_go",
+      "names": ["ACC with Stop & Go", "stop and go", "stop/start traffic assist"],
+      "definition": "ACC variant able to bring the vehicle to a stop in traffic and resume motion; a subset of ACC implementations.",
+      "assistance_mode": "continuous",
+      "symbols": [],
+      "indicator_location": "instrument cluster",
+      "confusable_with": ["adaptive_cruise_control"],
+      "visual_support": "No distinct symbol is documented in the guide; do not infer from a following-distance control alone.",
+      "cannot_prove": "A following-distance control or ACC indicator does not establish low-speed stopping/resumption behavior.",
+      "sources": [{"section": "6.1", "page": 13}],
+      "scope": "general",
+      "limitations": "Guide mentions the capability in one sentence; no identification criteria given."
+    },
+    {
+      "id": "lane_departure_warning",
+      "names": ["Lane Departure Warning", "LDW"],
+      "definition": "Warns (visual, audible, or vibration) when the vehicle drifts out of its lane without indicating; does not intervene.",
+      "assistance_mode": "warn",
+      "symbols": [
+        {
+          "description": "Tilted car crossing dashed lane lines.",
+          "location_hint": "instrument cluster telltale",
+          "page": 16,
+          "limitation": "Illustrative; exact glyph varies by manufacturer."
+        }
+      ],
+      "indicator_location": "instrument cluster",
+      "confusable_with": ["lane_keeping_assist", "lane_centering_assist"],
+      "visual_support": "A car-crossing-lane-lines motif supports a warning-only interpretation, not steering intervention.",
+      "cannot_prove": "Never proves corrective steering, continuous centering, or hands-free capability.",
+      "sources": [{"section": "6.4", "page": 16}, {"section": "3.1", "page": 6}],
+      "scope": "general",
+      "limitations": "Requires visible lane markings; guide stresses degraded performance on poor roads/weather."
+    },
+    {
+      "id": "lane_keeping_assist",
+      "names": ["Lane Keeping Assist", "Lane Keep Assist", "LKA"],
+      "definition": "Provides light steering input (or braking adjustment) to help keep the vehicle in lane when approaching or crossing a line without indicating.",
+      "assistance_mode": "intervene",
+      "symbols": [
+        {
+          "description": "Front-view car positioned between dashed lane lines.",
+          "location_hint": "instrument cluster; related controls may sit on wheel, stalk, or left dashboard depending on manufacturer",
+          "page": 16,
+          "limitation": "Same car-between-lanes motif is reused across lane-assistance meanings; manufacturer documentation decides."
+        }
+      ],
+      "indicator_location": "instrument cluster",
+      "confusable_with": ["lane_departure_warning", "lane_centering_assist"],
+      "visual_support": "A documented dedicated LKA control (button or cluster indicator) is meaningful support subject to vehicle applicability.",
+      "cannot_prove": "Never automatically establishes continuous centering, highway assistance, or hands-free driving.",
+      "sources": [{"section": "6.4", "page": 16}, {"section": "3.2", "page": 6}],
+      "scope": "general",
+      "limitations": "Intervention style (steering vs braking) varies; guide does not enumerate per-manufacturer behavior."
+    },
+    {
+      "id": "lane_centering_assist",
+      "names": ["Lane Centering Assistance", "Lane Following Assist", "LFA", "continuous centering", "Active lane guidance"],
+      "definition": "Continuously steers to keep the vehicle at or near lane centre (RSA 'Active systems' tier), especially on motorways; distinct from warning (LDW) and corrective keeping (LKA).",
+      "assistance_mode": "continuous",
+      "symbols": [
+        {
+          "description": "No standalone centering glyph is documented; the guide illustrates supervision via the hands-on-steering-wheel alert (wheel with hands plus text).",
+          "location_hint": "instrument cluster",
+          "page": 16,
+          "limitation": "Absence of a dedicated icon means centering must be established through manufacturer documentation, not generic symbols."
+        }
+      ],
+      "indicator_location": "instrument cluster",
+      "confusable_with": ["lane_keeping_assist", "lane_departure_warning", "active_driving_assistance", "hands_free_driving"],
+      "visual_support": "A general lane icon or LKA control does not establish centering; only manufacturer-documented centering evidence counts.",
+      "cannot_prove": "Never proves hands-free driving; never inferred from LKA/LDW icons alone.",
+      "sources": [{"section": "6.4", "page": 16}, {"section": "3.3", "page": 6}],
+      "scope": "general",
+      "limitations": "Guide discusses continuous centering within wider lane-assistance text; terminology normalized here to the distinct capability."
+    },
+    {
+      "id": "active_driving_assistance",
+      "names": ["Active Driving Assistance", "combined longitudinal and lateral assistance", "LCA+ACC"],
+      "definition": "Simultaneous use of lane centering assistance and adaptive cruise control as one supervised support feature; the driver must constantly supervise and retains responsibility.",
+      "assistance_mode": "continuous",
+      "symbols": [],
+      "indicator_location": "instrument cluster",
+      "confusable_with": ["lane_centering_assist", "adaptive_cruise_control", "hands_free_driving"],
+      "visual_support": "Requires evidence of both longitudinal and lateral components; one component alone never establishes the combination.",
+      "cannot_prove": "Never proves hands-free driving; supervision requirement is part of the definition.",
+      "sources": [{"section": "3.3", "page": 6}],
+      "scope": "general",
+      "limitations": "Marketing names for combined systems vary widely and are not enumerated here."
+    },
+    {
+      "id": "forward_collision_warning",
+      "names": ["Forward Collision Warning", "FCW", "Forward Collision Alert"],
+      "definition": "Monitors the road ahead with radar/cameras and alerts the driver (visual, audible, vibration) to a potential collision with a vehicle, pedestrian, or object; does not brake.",
+      "assistance_mode": "warn",
+      "symbols": [
+        {
+          "description": "Two cars (or a car with a starburst/arrow motif); warning state may flash lights, sounds, or seat vibration.",
+          "location_hint": "instrument cluster telltale",
+          "page": 14,
+          "limitation": "Alert iconography overlaps with general warning symbols; context matters."
+        }
+      ],
+      "indicator_location": "instrument cluster",
+      "confusable_with": ["automatic_emergency_braking"],
+      "visual_support": "A two-cars or collision-alert telltale supports warning capability only.",
+      "cannot_prove": "Never proves automatic braking; detection hardware or a generic warning icon does not establish AEB.",
+      "sources": [{"section": "6.2", "page": 14}, {"section": "3.1", "page": 6}],
+      "scope": "general",
+      "limitations": "May miss obstacles in poor weather or with blocked/dirty sensors."
+    },
+    {
+      "id": "automatic_emergency_braking",
+      "names": ["Advanced Emergency Braking", "Automatic Emergency Braking", "AEB", "Collision Mitigating Braking"],
+      "definition": "Detects an imminent frontal collision and automatically applies the brakes when the driver does not respond, avoiding or mitigating impact.",
+      "assistance_mode": "intervene",
+      "symbols": [
+        {
+          "description": "Car with radar-wave arcs (collision-mitigating-braking motif).",
+          "location_hint": "instrument cluster telltale",
+          "page": 21,
+          "limitation": "Telltale confirms the warning/display side, not that auto-braking hardware is fitted."
+        }
+      ],
+      "indicator_location": "instrument cluster",
+      "confusable_with": ["forward_collision_warning", "reverse_emergency_braking"],
+      "visual_support": "A warning telltale alone supports FCW at most; AEB needs manufacturer documentation of auto-brake fitment.",
+      "cannot_prove": "A warning icon or visible sensor housing does not prove automatic braking will occur.",
+      "sources": [{"section": "6.2", "page": 14}, {"section": "3.2", "page": 6}],
+      "scope": "general",
+      "limitations": "Forward systems only; reverse and cross-traffic variants are separate capabilities."
+    },
+    {
+      "id": "rear_cross_traffic_warning",
+      "names": ["Rear Cross Traffic Warning", "Rear Cross-Traffic Alert", "RCTW", "RCTA"],
+      "definition": "Detects vehicles (and some systems VRUs/objects) approaching from the side at the rear while reversing and warns the driver.",
+      "assistance_mode": "warn",
+      "symbols": [],
+      "indicator_location": "mirrors, cluster, or infotainment",
+      "confusable_with": ["reverse_emergency_braking", "blind_spot_monitoring"],
+      "visual_support": "Side/rear mirror or cluster warning indicators support warning capability only.",
+      "cannot_prove": "Never proves automatic rear braking.",
+      "sources": [{"section": "3.1", "page": 6}, {"section": "6.6", "page": 18}],
+      "scope": "general",
+      "limitations": "Guide treats rear cross-traffic alert as an advanced BSM/BSIS level."
+    },
+    {
+      "id": "reverse_emergency_braking",
+      "names": ["Reverse Advanced Emergency Braking", "rear automatic braking", "rear auto brake"],
+      "definition": "Automatically brakes while in reverse to avoid or mitigate a detected rear collision.",
+      "assistance_mode": "intervene",
+      "symbols": [],
+      "indicator_location": "instrument cluster or infotainment",
+      "confusable_with": ["rear_cross_traffic_warning"],
+      "visual_support": "Warning indicators alone do not establish auto-braking; needs documented fitment.",
+      "cannot_prove": "A reversing camera or parking sensors do not prove automatic rear braking.",
+      "sources": [{"section": "3.2", "page": 6}],
+      "scope": "general",
+      "limitations": "One-line treatment in the guide; identification criteria minimal."
+    },
+    {
+      "id": "intelligent_speed_assistance",
+      "names": ["Intelligent Speed Assistance", "Intelligent Speed Assistant", "ISA", "speed limiter display", "speed alert"],
+      "definition": "Reads speed limits (camera sign recognition plus GPS/map data) and responds when exceeded, at advisory (information), supportive (warning), or intervening (active speed limiting, overridable) levels.",
+      "assistance_mode": "warn",
+      "symbols": [
+        {
+          "description": "Current speed-limit roundel (e.g. circled '70') shown on cluster or infotainment; exceedance adds flashing symbols, sounds, or pedal feedback.",
+          "location_hint": "instrument cluster or infotainment screen",
+          "page": 15,
+          "limitation": "Sign-recognition display confirms the display function, not which ISA level is fitted."
+        }
+      ],
+      "indicator_location": "instrument cluster or infotainment",
+      "confusable_with": [],
+      "visual_support": "A displayed speed limit supports sign-recognition display; active limiting needs documented evidence.",
+      "cannot_prove": "A speed-limit display does not prove intervening (active-control) ISA.",
+      "sources": [{"section": "6.3", "page": 15}, {"section": "3.3", "page": 6}],
+      "scope": "general",
+      "limitations": "May misread temporary or unclear signs; level must be established per vehicle."
+    },
+    {
+      "id": "reversing_camera",
+      "names": ["Reversing Camera", "backup camera", "rear-view camera"],
+      "definition": "Displays the area behind the vehicle (often with guidelines) when reverse gear is engaged.",
+      "assistance_mode": "inform",
+      "symbols": [],
+      "indicator_location": "infotainment screen",
+      "confusable_with": ["semi_automatic_parking", "fully_automatic_parking"],
+      "visual_support": "A rear camera view supports a camera display only.",
+      "cannot_prove": "A backup camera never proves automated parking functionality.",
+      "sources": [{"section": "6.5", "page": 17}, {"section": "3.4", "page": 6}],
+      "scope": "general",
+      "limitations": "Display aid only; no steering or braking authority implied."
+    },
+    {
+      "id": "parking_sensors",
+      "names": ["Parking Sensors", "proximity sensors", "ultrasonic sensors", "park distance control"],
+      "definition": "Ultrasonic sensors detect nearby obstacles during parking and give audio/visual warnings with increasing frequency as distance closes.",
+      "assistance_mode": "warn",
+      "symbols": [],
+      "indicator_location": "infotainment sensor graphics; audible beeps",
+      "confusable_with": ["semi_automatic_parking", "fully_automatic_parking"],
+      "visual_support": "Sensor graphics or beep patterns support warning-only proximity sensing.",
+      "cannot_prove": "Sensors alone never prove steering or braking automation.",
+      "sources": [{"section": "6.5", "page": 17}, {"section": "3.4", "page": 6}],
+      "scope": "general",
+      "limitations": "May miss very small, low, or moving objects; dirty sensors degrade performance."
+    },
+    {
+      "id": "semi_automatic_parking",
+      "names": ["Semi-Automatic Park Assist", "semi-automated parking", "park assist"],
+      "definition": "Steers into a parking space while the driver controls speed, braking, and gear selection; driver supervises throughout.",
+      "assistance_mode": "intervene",
+      "symbols": [
+        {
+          "description": "On-screen messages indicating the park-assist mode is active (semi vs full distinguished by stated driver responsibilities, not by icon alone).",
+          "location_hint": "infotainment screen",
+          "page": 17,
+          "limitation": "Guide pairs semi and full modes under one caption; the icon alone does not resolve the level."
+        }
+      ],
+      "indicator_location": "infotainment screen",
+      "confusable_with": ["reversing_camera", "parking_sensors", "fully_automatic_parking"],
+      "visual_support": "An explicit semi-automatic mode message supports supervised steering automation with driver-controlled speed/braking.",
+      "cannot_prove": "Camera views or sensor graphics alone never prove automated steering.",
+      "sources": [{"section": "6.5", "page": 17}, {"section": "3.4", "page": 6}],
+      "scope": "general",
+      "limitations": "Driver-responsibility split must be established; icons alone are ambiguous."
+    },
+    {
+      "id": "fully_automatic_parking",
+      "names": ["Fully Automatic Park Assist", "fully automated parking", "remote parking assistance"],
+      "definition": "Controls steering, acceleration, braking, and gear changes to park with minimal driver input (including driver-outside remote variants); driver still supervises.",
+      "assistance_mode": "intervene",
+      "symbols": [
+        {
+          "description": "Same park-assist mode messaging family as semi-automatic; level resolved by stated responsibilities, not iconography.",
+          "location_hint": "infotainment screen",
+          "page": 17,
+          "limitation": "See semi-automatic limitation; remote operation needs explicit evidence."
+        }
+      ],
+      "indicator_location": "infotainment screen",
+      "confusable_with": ["reversing_camera", "parking_sensors", "semi_automatic_parking"],
+      "visual_support": "Only an explicit full-automation or remote-parking mode indication counts, subject to documentation.",
+      "cannot_prove": "Never inferred from cameras, sensors, or semi-automatic indications.",
+      "sources": [{"section": "6.5", "page": 17}, {"section": "3.4", "page": 6}],
+      "scope": "general",
+      "limitations": "Rare fitment; default assumption must be the lower automation level."
+    },
+    {
+      "id": "blind_spot_monitoring",
+      "names": ["Blind Spot Monitoring", "Blind Spot Information System", "BSM", "BSIS", "blind spot warning"],
+      "definition": "Detects vehicles (and some systems VRUs) in blind spots and warns, usually via a mirror or cluster light; advanced systems may add steering/braking assist, and rear cross-traffic alert is an advanced level.",
+      "assistance_mode": "warn",
+      "symbols": [
+        {
+          "description": "Two cars with radiating waves (monitoring motif); active state shows a light in the door mirror or cluster.",
+          "location_hint": "door mirror or instrument cluster",
+          "page": 21,
+          "limitation": "Warn vs active-assist levels share indicator families; intervention needs documentation."
+        }
+      ],
+      "indicator_location": "door mirror or instrument cluster",
+      "confusable_with": ["rear_cross_traffic_warning"],
+      "visual_support": "A mirror/cluster blind-spot light supports warning capability; steering/braking assist needs documented evidence.",
+      "cannot_prove": "A warning light never proves active steering or braking intervention.",
+      "sources": [{"section": "6.6", "page": 18}, {"section": "3.1", "page": 6}],
+      "scope": "general",
+      "limitations": "May miss fast vehicles, small objects, or motorcycles; dirt/weather degrade sensors."
+    },
+    {
+      "id": "driver_drowsiness_attention",
+      "names": ["Driver Drowsiness & Attention Warning", "DDAW", "Driver Status Monitoring", "driver attention warning", "coffee break alert"],
+      "definition": "Estimates drowsiness or distraction from driving patterns (and some systems eye/head tracking) and issues take-a-break warnings; may lack a continuous active indicator.",
+      "assistance_mode": "warn",
+      "symbols": [
+        {
+          "description": "Coffee cup with steam (driver-status motif); some systems show cluster symbols only when warning.",
+          "location_hint": "instrument cluster on warning",
+          "page": 21,
+          "limitation": "Absence of an indicator does not mean the system is absent; it may warn only."
+        }
+      ],
+      "indicator_location": "instrument cluster",
+      "confusable_with": [],
+      "visual_support": "A coffee-cup or take-a-break message supports the warning function when active.",
+      "cannot_prove": "Absence of a telltale proves nothing; driver-monitoring capability is not established from generic cluster icons.",
+      "sources": [{"section": "6.7", "page": 19}, {"section": "3.5", "page": 6}],
+      "scope": "general",
+      "limitations": "Indirect systems infer from behavior and miss cases; direct (camera) vs indirect types differ."
+    },
+    {
+      "id": "tyre_pressure_monitoring",
+      "names": ["Tyre Pressure Monitoring System", "TPMS", "tire pressure warning"],
+      "definition": "Monitors per-tyre air pressure and warns (light or message, sometimes per-tyre readings) when pressure falls below recommended levels.",
+      "assistance_mode": "warn",
+      "symbols": [
+        {
+          "description": "Horseshoe/tyre cross-section with an exclamation mark (tyre-pressure warning).",
+          "location_hint": "instrument cluster",
+          "page": 20,
+          "limitation": "Warning absence does not mean pressures were recently checked."
+        }
+      ],
+      "indicator_location": "instrument cluster",
+      "confusable_with": [],
+      "visual_support": "The horseshoe-exclamation telltale or per-tyre pressure display supports TPMS fitment.",
+      "cannot_prove": "Does not establish any other ADAS capability; out of scope for audit claims but useful as a negative control.",
+      "sources": [{"section": "6.8", "page": 20}, {"section": "3.7", "page": 7}],
+      "scope": "general",
+      "limitations": "Informational for the audit pipeline; included for symbol-reference completeness."
+    }
+  ]
+}
