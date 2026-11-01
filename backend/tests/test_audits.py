@@ -2542,6 +2542,171 @@ def test_reconcile_legacy_rows_keep_v2_confirm(listing, photos):
     assert "confirmed by SAM localization" in summary
 
 
+def _sam_row(job, photo, verdict, claim="c1", **extra):
+    return Observation.objects.create(
+        job=job,
+        claim_key=claim,
+        photo=photo,
+        source=ObservationSource.SAM,
+        verdict=verdict,
+        extra=extra,
+    )
+
+
+def test_sam_corroboration_requires_same_photo(listing, photos):
+    job = _running_job(listing)
+    _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="following-distance button",
+        control_symbol="vehicle with distance bars",
+        location="steering_wheel",
+        dedicated=True,
+    )
+    _keyed_row(
+        job,
+        photos[1],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="cruise set and resume buttons",
+        location="steering_wheel",
+    )
+    _sam_row(
+        job,
+        photos[1],
+        Verdict.PRESENT,
+        sam_target="cruise set and resume buttons",
+        target_source="observed_object",
+        control_index=0,
+    )
+    state, summary = pipeline.reconcile_claim(
+        list(Observation.objects.filter(job=job)),
+        "adaptive cruise control",
+        FORTE_2021,
+    )
+    assert state == "visually_supported"
+    assert "confirmed by SAM localization" not in summary
+    assert "different photo or control" in summary
+
+
+def test_sam_corroboration_requires_same_control(listing, photos):
+    job = _running_job(listing)
+    muse_row = _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="following-distance control",
+        location="steering_wheel",
+        dedicated=False,
+        controls=[
+            {
+                "visible_object": "SCC distance button",
+                "control_symbol": "distance bars",
+                "location": "steering_wheel",
+            }
+        ],
+    )
+    _sam_row(
+        job,
+        photos[0],
+        Verdict.PRESENT,
+        sam_target="following-distance control",
+        target_source="observed_object",
+        control_index=0,
+        source_observation_id=str(muse_row.id),
+    )
+    state, summary = pipeline.reconcile_claim(
+        list(Observation.objects.filter(job=job)),
+        "adaptive cruise control",
+        FORTE_2021,
+    )
+    assert state == "visually_supported"
+    assert "confirmed by SAM localization" not in summary
+    assert "different photo or control" in summary
+
+
+def test_sam_corroboration_matched_control_confirms(listing, photos):
+    job = _running_job(listing)
+    muse_row = _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+    )
+    _sam_row(
+        job,
+        photos[0],
+        Verdict.PRESENT,
+        sam_target="following-distance button",
+        target_source="observed_object",
+        control_index=0,
+        source_observation_id=str(muse_row.id),
+    )
+    state, summary = pipeline.reconcile_claim(
+        list(Observation.objects.filter(job=job)),
+        "adaptive cruise control",
+        FORTE_2021,
+    )
+    assert state == "visually_supported"
+    assert "confirmed by SAM localization" in summary
+
+
+def test_recheck_supporter_not_sam_confirmed(listing, photos):
+    job = _running_job(listing)
+    muse_row = _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        visible_object="cruise set and resume buttons",
+        location="steering_wheel",
+    )
+    _sam_row(
+        job,
+        photos[0],
+        Verdict.PRESENT,
+        sam_target="cruise set and resume buttons",
+        target_source="observed_object",
+        control_index=0,
+        source_observation_id=str(muse_row.id),
+    )
+    _keyed_row(
+        job,
+        photos[0],
+        ObservationSource.RECHECK,
+        Verdict.PRESENT,
+        visible_object="following-distance button",
+        location="steering_wheel",
+        dedicated=True,
+    )
+    state, summary = pipeline.reconcile_claim(
+        list(Observation.objects.filter(job=job)),
+        "adaptive cruise control",
+        FORTE_2021,
+    )
+    assert state == "visually_supported"
+    assert "confirmed by SAM localization" not in summary
+    assert "different photo or control" in summary
+
+
+def test_legacy_confirm_requires_same_photo(listing, photos):
+    job = _running_job(listing)
+    _obs_row(job, photos[0], ObservationSource.Muse, Verdict.PRESENT, claim="c1")
+    _obs_row(job, photos[1], ObservationSource.SAM, Verdict.PRESENT, claim="c1")
+    state, summary = pipeline.reconcile_claim(
+        list(Observation.objects.filter(job=job)), "adaptive cruise control"
+    )
+    assert state == "insufficient_evidence"
+    assert "confirmed by SAM localization" not in summary
+    assert "no confirmed sighting" in summary
+
+
 def test_reconcile_lane_tiers_never_promote(listing, photos):
     job = _running_job(listing)
     _keyed_row(
@@ -2922,7 +3087,7 @@ def test_sam_localizes_nested_control_and_records_index(listing, photos, enabled
     listing.model = "Forte"
     listing.save(update_fields=["year", "make", "model"])
     job = _running_job(listing)
-    _keyed_row(
+    muse_row = _keyed_row(
         job,
         photos[0],
         ObservationSource.Muse,
@@ -2944,6 +3109,7 @@ def test_sam_localizes_nested_control_and_records_index(listing, photos, enabled
     assert sam.concepts == ["following-distance button"]
     obs = Observation.objects.get(job=job, source=ObservationSource.SAM)
     assert obs.extra["control_index"] == 1
+    assert obs.extra["source_observation_id"] == str(muse_row.id)
 
 
 def test_sam_skips_unsanitizable_target_without_spend(listing, photos, enabled):

@@ -327,23 +327,29 @@ def load_catalog(path: Path | None = None) -> Catalog:
     return Catalog(version=version, feature_ids=feature_ids, entries=tuple(entries))
 
 
-def _match_score(entry: CatalogEntry, haystack: str) -> int:
-    """Count entry keywords present in the observed-control text.
+def _match_detail(entry: CatalogEntry, haystack: str) -> tuple[int, int, int]:
+    """(keyword hits, phrase hits, matched chars) in observed-control text.
 
     Multi-word keywords match as phrases; single words match on word
     boundaries, so "cruise" never matches "cruiser".
     """
     score = 0
+    phrases = 0
+    chars = 0
     for keyword in entry.match_keywords:
         phrase = keyword.strip().lower()
         if not phrase:
             continue
         if " " in phrase:
-            if phrase in haystack:
-                score += 1
-        elif re.search(rf"\b{re.escape(phrase)}\b", haystack):
+            hit = phrase in haystack
+        else:
+            hit = re.search(rf"\b{re.escape(phrase)}\b", haystack) is not None
+        if hit:
             score += 1
-    return score
+            chars += len(phrase)
+            if " " in phrase:
+                phrases += 1
+    return score, phrases, chars
 
 
 def match_entry(
@@ -352,30 +358,36 @@ def match_entry(
     visible_object: str,
     control_symbol: str = "",
     control_type: str = "",
+    vehicle: dict | None = None,
 ) -> CatalogEntry | None:
     """Find the catalog entry for an observed control, if exactly one fits.
 
-    Naming-only entries never match physical controls. Score ties and
-    zero-score controls resolve to ``None`` (documented unknown) rather
-    than a guessed association.
+    Naming-only entries never match physical controls. Candidates rank
+    by identifier specificity (phrase hits, then matched characters),
+    then by verified vehicle applicability, then by raw keyword count —
+    so a documented multi-word control identifier beats a generic
+    overlapping word, and the applicable entry wins exact-specificity
+    ties. Full-key ties and zero-score controls resolve to ``None``
+    (documented unknown) rather than a guessed association. Only
+    observed-control text is matched; claim wording never enters
+    selection.
     """
     haystack = f"{visible_object} {control_symbol} {control_type}".lower()
-    best: CatalogEntry | None = None
-    best_score = 0
-    tied = False
+    scored = []
     for entry in catalog.entries:
         if entry.is_naming_only:
             continue
-        score = _match_score(entry, haystack)
+        score, phrases, chars = _match_detail(entry, haystack)
         if score <= 0:
             continue
-        if score > best_score:
-            best, best_score, tied = entry, score, False
-        elif score == best_score:
-            tied = True
-    if best is None or tied:
+        eligible, _ = entry_applicable(entry, vehicle)
+        scored.append(((phrases, chars), eligible, score, entry))
+    if not scored:
         return None
-    return best
+    scored.sort(key=lambda candidate: candidate[:3], reverse=True)
+    if len(scored) > 1 and scored[0][:3] == scored[1][:3]:
+        return None
+    return scored[0][3]
 
 
 def _downgrade(strength: str) -> str:
@@ -516,6 +528,7 @@ def interpret_control(
         visible_object=visible_object,
         control_symbol=control_symbol,
         control_type=control_type,
+        vehicle=vehicle,
     )
     observed = control_symbol or visible_object
     if entry is None:

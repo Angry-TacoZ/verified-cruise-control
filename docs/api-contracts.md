@@ -66,9 +66,13 @@ Budget fields (exact names):
   billing is unknown — never silently zero).
 - Observations carry `sam_target` (+ `target_source`: `observed_object`
   or `claim_fallback`, and `control_index`: which control item in the
-  source observation was localized), crop-scoped recheck rows carry
+  source observation was localized, and `source_observation_id`: the
+  Muse row it was localized for), crop-scoped recheck rows carry
   `source_crop_id` and `source_claim_key`, and crop rows carry
-  `changed_observation` / `changed_finding`.
+  `changed_observation` / `changed_finding`. SAM confirmation in a
+  finding summary refers to the same photograph, observation, and
+  control; a localization elsewhere is reported as such, not as
+  corroboration.
   `finding.evidence.interpretation` holds the deterministic Layer D
   interpretation (`observed_object`, `location`, `catalog_entry`,
   `reference`, `strength`, `cannot_infer`) plus provenance

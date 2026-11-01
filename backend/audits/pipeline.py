@@ -793,6 +793,7 @@ def run_sam(
                     "sam_target": concept,
                     "target_source": target_source,
                     "control_index": control_index,
+                    "source_observation_id": str(target.id),
                 },
                 execution=execution,
             )
@@ -1130,6 +1131,39 @@ def _keyed_present(
     ]
 
 
+def _sam_corroborates(
+    observations: list[Observation], best_obs: Observation, best_index: int
+) -> tuple[bool, bool]:
+    """Whether a SAM PRESENT row localizes the supporting evidence.
+
+    Rows produced by ``run_sam`` link their source Muse observation id
+    plus the localized control index, so corroboration requires the
+    same observation *and* the same control item. Legacy or hand-built
+    rows without the link match on same claim + photo instead. Returns
+    (corroborated, sam_elsewhere): the second flag records a SAM
+    localization that exists but covers different evidence.
+    """
+    corroborated = False
+    elsewhere = False
+    for obs in observations:
+        if obs.source != ObservationSource.SAM or obs.verdict != Verdict.PRESENT:
+            continue
+        extra = obs.extra or {}
+        if "source_observation_id" in extra:
+            if (
+                extra["source_observation_id"] == str(best_obs.id)
+                and extra.get("control_index", 0) == best_index
+            ):
+                corroborated = True
+            else:
+                elsewhere = True
+        elif obs.photo_id == best_obs.photo_id and obs.claim_key == best_obs.claim_key:
+            corroborated = True
+        else:
+            elsewhere = True
+    return corroborated, elsewhere
+
+
 def reconcile_claim(
     observations: list[Observation],
     claim_text: str = "",
@@ -1203,16 +1237,21 @@ def reconcile_claim(
                 supporters,
                 key=lambda c: adas_evidence.STRENGTH_RANK[c[0].strength],
             )
-            sam_present = any(
-                obs.source == ObservationSource.SAM and obs.verdict == Verdict.PRESENT
-                for obs in observations
+            corroborated, sam_elsewhere = _sam_corroborates(
+                observations, best_obs, best_index
             )
-            sam_note = (
-                "confirmed by SAM localization"
-                if sam_present
-                else "SAM localization unavailable; mapping stands on the "
-                "identified control alone"
-            )
+            if corroborated:
+                sam_note = "confirmed by SAM localization"
+            elif sam_elsewhere:
+                sam_note = (
+                    "SAM localized a different photo or control, not this "
+                    "one; mapping stands on the identified control alone"
+                )
+            else:
+                sam_note = (
+                    "SAM localization unavailable; mapping stands on the "
+                    "identified control alone"
+                )
             photo_ref = (
                 str(best_obs.photo_id)[:8] if best_obs.photo_id is not None else "?"
             )
@@ -1238,10 +1277,14 @@ def reconcile_claim(
         for obs in observations
         if not (obs.source in _MUSE_FAMILY and "visible_object" in (obs.extra or {}))
     ]
-    present_sources = {obs.source for obs in legacy if obs.verdict == Verdict.PRESENT}
-    if ObservationSource.Muse in present_sources and (
-        ObservationSource.SAM in present_sources
-    ):
+    present = [obs for obs in legacy if obs.verdict == Verdict.PRESENT]
+    muse_photos = {
+        obs.photo_id for obs in present if obs.source == ObservationSource.Muse
+    }
+    sam_photos = {
+        obs.photo_id for obs in present if obs.source == ObservationSource.SAM
+    }
+    if muse_photos & sam_photos:
         return (
             EvidenceState.VISUALLY_SUPPORTED,
             (
@@ -1249,7 +1292,7 @@ def reconcile_claim(
                 "(photo evidence only; not capability proof)"
             ),
         )
-    if ObservationSource.RECHECK in present_sources:
+    if any(obs.source == ObservationSource.RECHECK for obs in present):
         return (
             EvidenceState.VISUALLY_SUPPORTED,
             (

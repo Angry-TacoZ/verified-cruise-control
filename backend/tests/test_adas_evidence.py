@@ -932,3 +932,148 @@ def test_explain_returns_none_without_keyed_rows(catalog):
         ),
     ]
     assert explain_claim(catalog, rows, "adaptive cruise control", FORTE_2021) is None
+
+
+# --- Task 1: keyword-collision ranking ----------------------------------
+
+
+def test_collision_specific_entry_wins_for_valid_vehicle(catalog):
+    # "smart cruise button" hits the Kia SCC phrase and the generic
+    # "cruise" word: raw counts tie 1-1, but the documented phrase is
+    # the more specific identifier and the vehicle is applicable.
+    entry = match_entry(
+        catalog, visible_object="smart cruise button", vehicle=FORTE_2021
+    )
+    assert entry is not None
+    assert entry.id == "kia-forte-2021-scc-distance"
+    result = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        visible_object="smart cruise button",
+        location="steering_wheel",
+        dedicated=True,
+        vehicle=FORTE_2021,
+    )
+    assert result.supports_claim is True
+    assert result.strength == "diagnostic"
+
+
+def test_collision_wrong_vehicle_still_rejected(catalog):
+    entry = match_entry(
+        catalog, visible_object="smart cruise button", vehicle=CAMRY_2020
+    )
+    assert entry is not None
+    assert entry.id == "kia-forte-2021-scc-distance"
+    result = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        visible_object="smart cruise button",
+        location="steering_wheel",
+        dedicated=True,
+        vehicle=CAMRY_2020,
+    )
+    assert result.entry_id == "kia-forte-2021-scc-distance"
+    assert result.supports_claim is False
+    assert "not verified for" in result.explanation
+
+
+def test_applicability_breaks_specificity_tie(catalog):
+    # "scc lka button" matches one 3-letter identifier on each side:
+    # identical specificity. For a 2023 Forte only the LKA entry is
+    # applicable (the SCC entry covers 2021-2022), so it must win; for
+    # a 2021 Forte both apply and the control stays genuinely unknown.
+    forte_2023 = {**FORTE_2021, "year": 2023}
+    winner = match_entry(catalog, visible_object="scc lka button", vehicle=forte_2023)
+    assert winner is not None
+    assert winner.id == "kia-forte-2019-2024-lka-button"
+    assert (
+        match_entry(catalog, visible_object="scc lka button", vehicle=FORTE_2021)
+        is None
+    )
+    assert (
+        interpret_control(
+            catalog,
+            "lane_keeping_assist",
+            visible_object="scc lka button",
+            vehicle=forte_2023,
+        ).supports_claim
+        is True
+    )
+    assert (
+        interpret_control(
+            catalog,
+            "adaptive_cruise_control",
+            visible_object="scc lka button",
+            vehicle=forte_2023,
+        ).supports_claim
+        is False
+    )
+
+
+def test_genuine_tie_stays_unknown_with_vehicle(tmp_path):
+    raw = {
+        "catalog_version": "test",
+        "feature_ids": ["adaptive_cruise_control"],
+        "entries": [
+            {
+                "id": f"tie-{i}",
+                "scope": "general",
+                "manufacturer": None,
+                "models": [],
+                "model_years": [],
+                "official_feature_name": "Tie",
+                "feature": "adaptive_cruise_control",
+                "control_category": "button",
+                "control_description": "tie",
+                "symbol": "tie",
+                "locations": [],
+                "dedicated": True,
+                "strength": "supportive",
+                "match_keywords": ["mystery widget"],
+                "distinctions": "",
+                "cannot_infer": [],
+                "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+                "certainty": "definitional",
+                "certainty_note": "",
+            }
+            for i in range(2)
+        ],
+    }
+    path = tmp_path / "tied.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    tied = load_catalog(path)
+    assert (
+        match_entry(tied, visible_object="mystery widget", vehicle=FORTE_2021) is None
+    )
+
+
+def test_cruise_wording_never_matches_acc_entry(catalog):
+    entry = match_entry(
+        catalog, visible_object="cruise control button", vehicle=FORTE_2021
+    )
+    assert entry is not None
+    assert entry.id == "generic-cruise-set-res"
+    result = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        visible_object="cruise control button",
+        location="steering_wheel",
+        vehicle=FORTE_2021,
+    )
+    assert result.supports_claim is False
+
+
+def test_claim_wording_alone_never_establishes_acc(catalog):
+    # The model echoing the advertised feature ("adaptive cruise
+    # control") with no physical control description must not resolve
+    # to an ACC-specific entry.
+    result = interpret_control(
+        catalog,
+        "adaptive_cruise_control",
+        visible_object="adaptive cruise control",
+        location="steering_wheel",
+        dedicated=True,
+        vehicle=FORTE_2021,
+    )
+    assert result.entry_id == "generic-cruise-set-res"
+    assert result.supports_claim is False
