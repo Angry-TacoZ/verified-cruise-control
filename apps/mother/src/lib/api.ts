@@ -116,12 +116,14 @@ export interface AuditObservation {
   boxes: AuditBox[];
   rationale: string;
   extra: Record<string, unknown>;
+  source_crop_id: string | null;
   created_at: string;
 }
 
 export interface AuditCrop {
   id: string;
   source_photo_id: string;
+  source_claim_key: string;
   box: [number, number, number, number];
   width: number;
   height: number;

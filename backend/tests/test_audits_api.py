@@ -190,13 +190,34 @@ def test_evidence_bundle(operator_client, listing, enabled, no_spawn):
         source=ObservationSource.Muse,
         verdict=Verdict.ABSENT,
     )
+    sam_obs = Observation.objects.create(
+        job=job,
+        claim_key="c1",
+        photo=photo,
+        source=ObservationSource.SAM,
+        verdict=Verdict.PRESENT,
+    )
+    from audits.models import AuditCrop
+
+    crop = AuditCrop.objects.create(
+        job=job,
+        source_photo=photo,
+        source_observation=sam_obs,
+        box=[0, 0, 8, 8],
+        storage_ref="crop-provenance-1",
+        width=8,
+        height=8,
+    )
     AuditExecution.objects.create(
         job=job, stage=Stage.SCREENING, provider=Provider.LOCAL
     )
     body = operator_client.get(f"/api/audits/{job_id}/evidence").json()
-    assert len(body["observations"]) == 1
+    assert len(body["observations"]) == 2
     assert body["observations"][0]["verdict"] == "absent"
-    assert body["crops"] == []
+    assert body["observations"][0]["source_crop_id"] is None
+    assert len(body["crops"]) == 1
+    assert body["crops"][0]["id"] == str(crop.pk)
+    assert body["crops"][0]["source_claim_key"] == "c1"
     assert len(body["executions"]) == 1
     assert body["executions"][0]["cost_usd"] is None
 

@@ -765,17 +765,34 @@ def test_crop_respects_cap_and_skips_degenerate(listing, photos, enabled):
 # --- recheck stage -------------------------------------------------------
 
 
-def _crop_row(job, photo):
+def _crop_row(
+    job, photo, claim="c1", sam_verdict=Verdict.PRESENT, link=True, sam_obs=None
+):
+    import uuid
+
     from audits.models import AuditCrop
 
-    ref = "cropref1"
+    ref = uuid.uuid4().hex
     dest = pipeline.audit_dirs(job.pk)["crops"] / f"{ref}.png"
     from PIL import Image
 
     Image.new("RGB", (16, 16)).save(dest, format="PNG")
+    if link and sam_obs is None:
+        sam_obs = Observation.objects.create(
+            job=job,
+            claim_key=claim,
+            photo=photo,
+            source=ObservationSource.SAM,
+            verdict=sam_verdict,
+            boxes=[{"box": [0, 0, 16, 16], "mask_ref": None}],
+            rationale=f"1 segment(s) for concept {claim!r}",
+        )
+    elif not link:
+        sam_obs = None
     return AuditCrop.objects.create(
         job=job,
         source_photo=photo,
+        source_observation=sam_obs,
         box=[0, 0, 16, 16],
         storage_ref=ref,
         width=16,
@@ -785,44 +802,35 @@ def _crop_row(job, photo):
 
 def test_recheck_confirms_crop(listing, photos, enabled):
     job = _running_job(listing)
-    _crop_row(job, photos[0])
-    adapter = FakeMuseAdapter(
-        observations=[
-            _obs(str(photos[0].id), "c1"),
-            _obs(
-                str(photos[0].id),
-                "c2",
-                visible_object="none",
-            ),
-        ]
-    )
+    crop = _crop_row(job, photos[0])
+    adapter = FakeMuseAdapter(observations=[_obs(str(photos[0].id), "c1")])
     assert pipeline.run_recheck(job.pk, "w1", adapter) == 1
     rows = {
         o.claim_key: o.verdict
         for o in Observation.objects.filter(job=job, source=ObservationSource.RECHECK)
     }
-    assert rows == {
-        "c1": Verdict.PRESENT,
-        "c2": Verdict.ABSENT,
-    }
+    assert rows == {"c1": Verdict.PRESENT}
+    obs = Observation.objects.get(job=job, source=ObservationSource.RECHECK)
+    assert obs.source_crop_id == crop.pk
     row = AuditExecution.objects.get(
         job=job, stage=Stage.RECHECK, provider=Provider.BASETEN
     )
     assert row.usage["prompt_version"] == "m1-recheck"
+    assert row.usage["crop_id"] == str(crop.pk)
 
 
 def test_recheck_skips_covered_crops(listing, photos, enabled):
     job = _running_job(listing)
     crop = _crop_row(job, photos[0])
-    for claim in ("c1", "c2"):
-        Observation.objects.create(
-            job=job,
-            claim_key=claim,
-            photo=photos[0],
-            source=ObservationSource.RECHECK,
-            verdict=Verdict.PRESENT,
-            extra={"crop_ref": crop.storage_ref},
-        )
+    Observation.objects.create(
+        job=job,
+        claim_key="c1",
+        photo=photos[0],
+        source=ObservationSource.RECHECK,
+        source_crop=crop,
+        verdict=Verdict.PRESENT,
+        extra={"crop_ref": crop.storage_ref},
+    )
     adapter = FakeMuseAdapter(observations=[])
     assert pipeline.run_recheck(job.pk, "w1", adapter) == 0
     assert adapter.calls == 0
@@ -1181,12 +1189,7 @@ def test_recheck_runs_on_disagreement(listing, photos, enabled):
         boxes=[{"box": [0, 0, 16, 16], "mask_ref": None}],
     )
     assert pipeline.run_crop(job.pk, "w1") == 1
-    adapter = FakeMuseAdapter(
-        observations=[
-            _obs(str(photos[0].id), "c1"),
-            _obs(str(photos[0].id), "c2", visible_object="none"),
-        ]
-    )
+    adapter = FakeMuseAdapter(observations=[_obs(str(photos[0].id), "c1")])
     assert pipeline.run_recheck(job.pk, "w1", adapter) == 1
 
 
@@ -1209,12 +1212,7 @@ def test_recheck_records_changed(listing, photos, enabled):
         boxes=[{"box": [0, 0, 16, 16], "mask_ref": None}],
     )
     assert pipeline.run_crop(job.pk, "w1") == 1
-    adapter = FakeMuseAdapter(
-        observations=[
-            _obs(str(photos[0].id), "c1"),
-            _obs(str(photos[0].id), "c2", visible_object="none"),
-        ]
-    )
+    adapter = FakeMuseAdapter(observations=[_obs(str(photos[0].id), "c1")])
     assert pipeline.run_recheck(job.pk, "w1", adapter) == 1
     obs = Observation.objects.get(
         job=job, claim_key="c1", source=ObservationSource.RECHECK
@@ -2129,13 +2127,10 @@ def test_stale_sam_leaves_no_masks_or_rows(listing, photos, enabled):
 
 def test_stale_recheck_persists_nothing(listing, photos, enabled):
     job = _running_job(listing, worker="w-A")
-    _crop_row(job, photos[0])
+    crop = _crop_row(job, photos[0])
     thief = _StealingRecheckAdapter(
         job.pk,
-        observations=[
-            _obs(str(photos[0].id), "c1"),
-            _obs(str(photos[0].id), "c2", visible_object="none"),
-        ],
+        observations=[_obs(str(photos[0].id), "c1")],
     )
     with pytest.raises(services.StaleWorkerError):
         pipeline.run_recheck(job.pk, "w-A", thief)
@@ -2148,17 +2143,12 @@ def test_stale_recheck_persists_nothing(listing, photos, enabled):
     )
     # Worker B's recheck lands normally.
     clean = FakeMuseAdapter(
-        observations=[
-            _obs(str(photos[0].id), "c1", visible_object="none"),
-            _obs(str(photos[0].id), "c2", visible_object="none"),
-        ]
+        observations=[_obs(str(photos[0].id), "c1", visible_object="none")]
     )
     assert pipeline.run_recheck(job.pk, "w-B", clean) == 1
-    rows = {
-        o.claim_key: o.verdict
-        for o in Observation.objects.filter(job=job, source=ObservationSource.RECHECK)
-    }
-    assert rows == {"c1": Verdict.ABSENT, "c2": Verdict.ABSENT}
+    obs = Observation.objects.get(job=job, source=ObservationSource.RECHECK)
+    assert (obs.claim_key, obs.verdict) == ("c1", Verdict.ABSENT)
+    assert obs.source_crop_id == crop.pk
 
 
 # --- snapshot integrity verification (remediation F3) ----------------------
@@ -2252,3 +2242,154 @@ def test_restart_reverifies_before_new_calls(listing, photos, enabled):
     assert (
         Observation.objects.filter(job=job, source=ObservationSource.Muse).count() == 4
     )
+
+
+# --- crop-scoped recheck provenance (remediation F4) -----------------------
+
+
+def test_recheck_two_crops_same_claim_keep_both(listing, photos, enabled):
+    job = _running_job(listing)
+    first = _crop_row(job, photos[0])
+    sam_obs = first.source_observation
+    second = _crop_row(job, photos[0], sam_obs=sam_obs)
+    adapter = ScriptedMuseAdapter(
+        [
+            [_obs(str(photos[0].id), "c1")],
+            [_obs(str(photos[0].id), "c1")],
+        ]
+    )
+    assert pipeline.run_recheck(job.pk, "w1", adapter) == 2
+    rows = list(Observation.objects.filter(job=job, source=ObservationSource.RECHECK))
+    assert len(rows) == 2
+    assert {r.source_crop_id for r in rows} == {first.pk, second.pk}
+    assert rows[0].execution_id != rows[1].execution_id
+
+
+def test_recheck_scoped_to_crop_claim(listing, photos, enabled):
+    from audits.models import AuditCrop
+
+    job = _running_job(listing)
+    _crop_row(job, photos[0], claim="c1")
+    later = _crop_row(job, photos[0], claim="c2")
+    AuditCrop.objects.filter(pk=later.pk).update(created_at=timezone.now())
+    adapter = ScriptedMuseAdapter(
+        [
+            [_obs(str(photos[0].id), "c1")],
+            [_obs(str(photos[0].id), "c2", visible_object="none")],
+        ]
+    )
+    assert pipeline.run_recheck(job.pk, "w1", adapter) == 2
+    assert len(adapter.requests) == 2
+    texts = sorted(r.user_text for r in adapter.requests)
+    c1_text = next(t for t in texts if "- c1:" in t)
+    c2_text = next(t for t in texts if "- c2:" in t)
+    assert "- c2:" not in c1_text
+    assert "- c1:" not in c2_text
+
+
+def test_recheck_skips_unlinked_crops(listing, photos, enabled):
+    job = _running_job(listing)
+    _crop_row(job, photos[0], link=False)
+    adapter = FakeMuseAdapter(observations=[])
+    assert pipeline.run_recheck(job.pk, "w1", adapter) == 0
+    assert adapter.calls == 0
+    summary = AuditExecution.objects.filter(
+        job=job, stage=Stage.RECHECK, provider=Provider.LOCAL
+    ).latest("created_at")
+    assert summary.usage["skipped_unlinked"] == 1
+
+
+def test_recheck_disagreeing_crops_both_preserved(listing, photos, enabled):
+    job = _running_job(listing)
+    first = _crop_row(job, photos[0])
+    second = _crop_row(job, photos[0], sam_obs=first.source_observation)
+    adapter = ScriptedMuseAdapter(
+        [
+            [_obs(str(photos[0].id), "c1")],
+            [_obs(str(photos[0].id), "c1", visible_object="none")],
+        ]
+    )
+    assert pipeline.run_recheck(job.pk, "w1", adapter) == 2
+    rows = list(Observation.objects.filter(job=job, source=ObservationSource.RECHECK))
+    assert {r.source_crop_id for r in rows} == {first.pk, second.pk}
+    assert {r.verdict for r in rows} == {Verdict.PRESENT, Verdict.ABSENT}
+
+
+def test_recheck_unchanged_flag_when_confirmed(listing, photos, enabled):
+    job = _running_job(listing)
+    _obs_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        claim="c1",
+        supports_localization=True,
+        needs_crop=True,
+    )
+    _crop_row(job, photos[0])
+    adapter = FakeMuseAdapter(observations=[_obs(str(photos[0].id), "c1")])
+    assert pipeline.run_recheck(job.pk, "w1", adapter) == 1
+    obs = Observation.objects.get(job=job, source=ObservationSource.RECHECK)
+    assert obs.verdict == Verdict.PRESENT
+    assert obs.extra["changed"] is False
+
+
+def test_recheck_resume_between_crops(listing, photos, enabled):
+    from audits.models import AuditCrop
+
+    job = _running_job(listing)
+    _crop_row(job, photos[0])
+    later = _crop_row(job, photos[1])
+    AuditCrop.objects.filter(pk=later.pk).update(created_at=timezone.now())
+    first = ScriptedMuseAdapter(
+        [[_obs(str(photos[0].id), "c1")], [_obs(str(photos[1].id), "c1")]]
+    )
+    assert pipeline.run_recheck(job.pk, "w1", first) == 2
+    # A later pass (e.g. after a worker restart) re-fires nothing.
+    second = ScriptedMuseAdapter([])
+    assert pipeline.run_recheck(job.pk, "w1", second) == 0
+    assert second.calls == 0
+    assert (
+        Observation.objects.filter(job=job, source=ObservationSource.RECHECK).count()
+        == 2
+    )
+
+
+def test_recheck_per_crop_spend_attribution(listing, photos, enabled):
+    job = _running_job(listing)
+    first = _crop_row(job, photos[0])
+    second = _crop_row(job, photos[0], sam_obs=first.source_observation)
+    adapter = ScriptedMuseAdapter(
+        [
+            [_obs(str(photos[0].id), "c1")],
+            [_obs(str(photos[0].id), "c1")],
+        ],
+        cost=0.01,
+    )
+    assert pipeline.run_recheck(job.pk, "w1", adapter) == 2
+    rows = list(
+        AuditExecution.objects.filter(
+            job=job, stage=Stage.RECHECK, provider=Provider.BASETEN
+        )
+    )
+    assert len(rows) == 2
+    assert {r.usage["crop_id"] for r in rows} == {str(first.pk), str(second.pk)}
+    job.refresh_from_db()
+    assert job.spend_usd == Decimal("0.02")
+    assert sum((r.cost_usd for r in rows), Decimal(0)) == job.spend_usd
+
+
+def test_recheck_legacy_row_keeps_pair_first_wins(listing, photos, enabled):
+    job = _running_job(listing)
+    crop = _crop_row(job, photos[0])
+    Observation.objects.create(
+        job=job,
+        claim_key="c1",
+        photo=photos[0],
+        source=ObservationSource.RECHECK,
+        verdict=Verdict.PRESENT,
+        extra={"crop_ref": crop.storage_ref},
+    )
+    adapter = FakeMuseAdapter(observations=[])
+    assert pipeline.run_recheck(job.pk, "w1", adapter) == 0
+    assert adapter.calls == 0

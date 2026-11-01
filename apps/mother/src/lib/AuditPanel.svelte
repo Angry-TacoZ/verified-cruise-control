@@ -277,7 +277,11 @@
               <div>
                 <span class="font-medium">{obs.claim_key}</span>
                 <span class="text-slate-500">
-                  · {obs.source} · {obs.verdict} · photo {shortId(obs.photo_id)}</span
+                  · {obs.source} · {obs.verdict} · photo {shortId(
+                    obs.photo_id,
+                  )}{#if obs.source === 'recheck' && obs.source_crop_id}
+                    · crop {shortId(obs.source_crop_id)}{#if obs.extra?.changed === true}
+                      · changed{/if}{/if}</span
                 >
               </div>
               {#if obs.rationale}
@@ -309,7 +313,10 @@
                 loading="lazy"
               />
               <div class="p-2 text-xs text-slate-600">
-                {crop.width}×{crop.height} · photo {shortId(crop.source_photo_id)}
+                {crop.width}×{crop.height} · photo {shortId(
+                  crop.source_photo_id,
+                )}{#if crop.source_claim_key}
+                  · claim {crop.source_claim_key}{/if}
               </div>
             </li>
           {/each}

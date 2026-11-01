@@ -70,13 +70,27 @@ const evidence = {
       boxes: [{ box: [8, 8, 32, 32], mask_ref: 'a'.repeat(32), confidence: 0.9 }],
       rationale: '1 segment(s)',
       extra: {},
+      source_crop_id: null,
       created_at: '2026-10-31T00:00:30Z',
+    },
+    {
+      id: 'o2',
+      claim_key: 'c1',
+      photo_id: '33333333-3333-3333-3333-333333333333',
+      source: 'recheck',
+      verdict: 'present',
+      boxes: [],
+      rationale: 'crop confirms the button',
+      extra: { crop_ref: 'deadbeef', changed: true },
+      source_crop_id: 'c1',
+      created_at: '2026-10-31T00:00:40Z',
     },
   ],
   crops: [
     {
       id: 'c1',
       source_photo_id: '33333333-3333-3333-3333-333333333333',
+      source_claim_key: 'c1',
       box: [8, 8, 32, 32],
       width: 24,
       height: 24,
@@ -160,8 +174,11 @@ describe('AuditPanel', () => {
     });
     render(AuditPanel, { props: { listingId: LISTING } });
     expect(await screen.findByText(/\$0\.0271/)).toBeInTheDocument();
-    expect(screen.getByText('Observations (1)')).toBeInTheDocument();
+    expect(screen.getByText('Observations (2)')).toBeInTheDocument();
     expect(screen.getByText('Crops (1)')).toBeInTheDocument();
+    expect(screen.getByText(/claim c1/)).toBeInTheDocument();
+    expect(screen.getByText(/crop c1/)).toBeInTheDocument();
+    expect(screen.getByText(/changed/)).toBeInTheDocument();
     expect(screen.getByText(/cost unknown/)).toBeInTheDocument();
     const mask = screen.getByAltText('Segmentation mask 1 for adaptive cruise control');
     expect(mask.getAttribute('src')).toBe(`/api/audits/${JOB}/masks/${'a'.repeat(32)}`);

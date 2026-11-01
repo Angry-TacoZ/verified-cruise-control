@@ -174,15 +174,33 @@ class Observation(models.Model):
         blank=True,
         related_name="observations",
     )
+    source_crop = models.ForeignKey(
+        "audits.AuditCrop",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="recheck_observations",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["created_at"]
         constraints = [
+            # One observation per (job, claim, photo, source) while no
+            # crop is linked (Muse, SAM, and legacy recheck rows).
             models.UniqueConstraint(
                 fields=["job", "claim_key", "photo", "source"],
+                condition=models.Q(source_crop__isnull=True),
                 name="unique_observation_per_job_claim_photo_source",
-            )
+            ),
+            # Crop-linked rechecks are unique per crop instead, so two
+            # distinct regions for the same claim/photo each keep their
+            # own evidence and execution history.
+            models.UniqueConstraint(
+                fields=["job", "claim_key", "photo", "source", "source_crop"],
+                condition=models.Q(source_crop__isnull=False),
+                name="unique_recheck_per_job_claim_photo_crop",
+            ),
         ]
 
 

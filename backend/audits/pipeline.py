@@ -776,8 +776,8 @@ def crop_needs_recheck(crop: AuditCrop, job: AuditJob) -> bool:
     """A crop earns a paid recheck only on documented ambiguity: Muse
     explicitly asked for a closer look (needs_crop), or Muse and SAM
     disagree on the pair. Confirmed sightings are evidence as-is.
-    Crops without a recorded source observation (pre-link rows) keep the
-    old always-recheck behavior rather than silently skipping."""
+    (Crops without a linked source observation are skipped by
+    run_recheck before this check; the None branch below is defensive.)"""
     sam_obs = crop.source_observation
     if sam_obs is None:
         return True
@@ -803,146 +803,172 @@ def run_recheck(
     worker_id: str,
     adapter: BasetenMuseAdapter | None = None,
 ) -> int:
-    """Re-examine ambiguous crops with Muse, one call per crop and claim
-    chunk, bounded by the recheck cap. A crop earns calls only on
-    documented ambiguity (see crop_needs_recheck); confirmed sightings
-    are evidence as-is. Pairs already covered are skipped, and every
-    batch response is completeness-checked like the Muse stage. Returns
-    provider calls made this run."""
+    """Re-examine ambiguous crops with Muse: at most one call per crop,
+    scoped to the crop's own originating claim, bounded by the recheck
+    cap. A crop earns its call only on documented ambiguity (see
+    crop_needs_recheck); confirmed sightings are evidence as-is, and
+    crops without a linked source observation are skipped (no documented
+    relation, no spend). Coverage is crop-aware: distinct regions for the
+    same claim/photo each keep their own observation and execution
+    history, including disagreements. Returns provider calls made."""
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
     own_adapter = adapter or BasetenMuseAdapter(
         model_id=settings.AUDIT_BASETEN_MODEL_ID
     )
     cap = settings.AUDIT_MAX_RECHECKS_PER_JOB
-    snapshot = get_snapshot(job)
-    entries = [e for e in snapshot.get("claims", []) if e.get("text")]
-    covered = {
-        (claim_key, str(photo_id))
-        for claim_key, photo_id in Observation.objects.filter(
-            job=job, source=ObservationSource.RECHECK
-        ).values_list("claim_key", "photo_id")
+    id_to_text = {
+        entry["id"]: entry["text"]
+        for entry in get_snapshot(job).get("claims", [])
+        if entry.get("text")
     }
+    covered: set[tuple[str, str, str]] = set()
+    legacy_covered: set[tuple[str, str]] = set()
+    for claim_key, photo_id, crop_id in Observation.objects.filter(
+        job=job, source=ObservationSource.RECHECK
+    ).values_list("claim_key", "photo_id", "source_crop_id"):
+        if crop_id is None:
+            legacy_covered.add((claim_key, str(photo_id)))
+        else:
+            covered.add((claim_key, str(photo_id), str(crop_id)))
     calls = 0
     skipped_confirmed = 0
+    skipped_unlinked = 0
     crops_dir = audit_dirs(job_id)["crops"]
-    for crop in AuditCrop.objects.filter(job=job).order_by("created_at"):
+    crops = (
+        AuditCrop.objects.filter(job=job)
+        .select_related("source_observation", "source_photo")
+        .order_by("created_at")
+    )
+    for crop in crops:
         photo = crop.source_photo
+        sam_obs = crop.source_observation
+        if sam_obs is None:
+            skipped_unlinked += 1
+            continue
+        claim_id = sam_obs.claim_key
         if not crop_needs_recheck(crop, job):
             skipped_confirmed += 1
             continue
-        pending = [
-            entry for entry in entries if (entry["id"], str(photo.pk)) not in covered
-        ]
-        for chunk in chunked(pending, MUSE_MAX_CLAIMS_PER_CALL):
-            if calls >= cap:
-                break
-            expected = {(entry["id"], str(photo.pk)) for entry in chunk}
-            if not expected - covered:
-                continue
-            if not services.heartbeat(job_id, worker_id):
-                raise services.JobNotRunningError(
-                    f"job {job_id} stopped during recheck"
-                )
-            data = (crops_dir / f"{crop.storage_ref}.png").read_bytes()
-            context = verified_original_bytes(job_id, worker_id, photo)
-            request = MuseRequest(
-                prompt_version=RECHECK_PROMPT_VERSION,
-                system_instructions=RECHECK_SYSTEM_INSTRUCTIONS,
-                user_text=(
-                    build_user_text(chunk, [str(photo.id)])
-                    + "\n\nTwo images follow: the full photo for context, then "
-                    f"a zoomed crop from photo {photo.id}. Judge the crop with "
-                    "the full photo as context."
+        key = (claim_id, str(photo.pk), str(crop.pk))
+        if key in covered or (claim_id, str(photo.pk)) in legacy_covered:
+            continue
+        if calls >= cap:
+            break
+        expected = {(claim_id, str(photo.pk))}
+        if not services.heartbeat(job_id, worker_id):
+            raise services.JobNotRunningError(f"job {job_id} stopped during recheck")
+        data = (crops_dir / f"{crop.storage_ref}.png").read_bytes()
+        context = verified_original_bytes(job_id, worker_id, photo)
+        claim_text = id_to_text.get(claim_id, claim_id)
+        request = MuseRequest(
+            prompt_version=RECHECK_PROMPT_VERSION,
+            system_instructions=RECHECK_SYSTEM_INSTRUCTIONS,
+            user_text=(
+                build_user_text([{"id": claim_id, "text": claim_text}], [str(photo.id)])
+                + "\n\nTwo images follow: the full photo for context, then "
+                f"a zoomed crop from photo {photo.id} targeting claim "
+                f"{claim_id} ({sam_obs.rationale}). Judge only whether THIS "
+                "crop region clarifies that one claim, with the full photo "
+                "as context."
+            ),
+            photo_ids=(str(photo.id),),
+            images=(
+                ImageAttachment(
+                    photo_id=str(photo.id),
+                    mime_type=photo.mime_type,
+                    data=context,
                 ),
-                photo_ids=(str(photo.id),),
-                images=(
-                    ImageAttachment(
-                        photo_id=str(photo.id),
-                        mime_type=photo.mime_type,
-                        data=context,
-                    ),
-                    ImageAttachment(
-                        photo_id=str(photo.id), mime_type="image/png", data=data
-                    ),
+                ImageAttachment(
+                    photo_id=str(photo.id), mime_type="image/png", data=data
                 ),
-                max_output_tokens=MUSE_MAX_OUTPUT_TOKENS,
+            ),
+            max_output_tokens=MUSE_MAX_OUTPUT_TOKENS,
+        )
+        result, attempts, cost, settled = _guarded_analyze(
+            job_id,
+            worker_id,
+            own_adapter,
+            request,
+            stage=Stage.RECHECK,
+            provider=Provider.BASETEN,
+            model_id=own_adapter.model_id,
+            photo_ids=[str(photo.id)],
+        )
+        calls += 1
+        usage = result.usage
+        seen, warnings, fatal = validate_batch(result.observations, expected, set())
+        execution = services.record_execution(
+            job_id,
+            worker_id,
+            stage=Stage.RECHECK,
+            provider=Provider.BASETEN,
+            model_id=result.model,
+            photo_ids=[str(photo.id)],
+            attempts=attempts,
+            latency_ms=usage.latency_ms,
+            usage={
+                "prompt_version": usage.prompt_version,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "pricing_version": usage.pricing_version,
+                "crop_ref": crop.storage_ref,
+                "crop_id": str(crop.pk),
+                "validation_warnings": list(result.validation_warnings) + warnings,
+            },
+            cost_usd=cost,
+        )
+        if fatal is not None:
+            code, detail = fatal
+            services.fail_job(job_id, worker_id, code, detail)
+            raise ProviderResponseError(detail)
+        prior = (
+            Observation.objects.filter(
+                job=job,
+                claim_key=claim_id,
+                photo=photo,
+                source=ObservationSource.Muse,
             )
-            result, attempts, cost, settled = _guarded_analyze(
-                job_id,
-                worker_id,
-                own_adapter,
-                request,
-                stage=Stage.RECHECK,
-                provider=Provider.BASETEN,
-                model_id=own_adapter.model_id,
-                photo_ids=[str(photo.id)],
-            )
-            calls += 1
-            usage = result.usage
-            seen, warnings, fatal = validate_batch(
-                result.observations, expected, covered
-            )
-            execution = services.record_execution(
-                job_id,
-                worker_id,
-                stage=Stage.RECHECK,
-                provider=Provider.BASETEN,
-                model_id=result.model,
-                photo_ids=[str(photo.id)],
-                attempts=attempts,
-                latency_ms=usage.latency_ms,
-                usage={
-                    "prompt_version": usage.prompt_version,
-                    "input_tokens": usage.input_tokens,
-                    "output_tokens": usage.output_tokens,
-                    "pricing_version": usage.pricing_version,
-                    "crop_ref": crop.storage_ref,
-                    "validation_warnings": list(result.validation_warnings) + warnings,
-                },
-                cost_usd=cost,
-            )
-            if fatal is not None:
-                code, detail = fatal
-                services.fail_job(job_id, worker_id, code, detail)
-                raise ProviderResponseError(detail)
-            muse_verdicts = {
-                (o.claim_key, o.photo_id): o.verdict
-                for o in Observation.objects.filter(
-                    job=job, photo=photo, source=ObservationSource.Muse
-                )
-            }
-            with transaction.atomic():
-                services.fence_evidence_write(job_id, worker_id)
-                for (cid, _), item in seen.items():
-                    verdict = _verdict(item)
-                    prior = muse_verdicts.get((cid, photo.pk))
-                    _, created = Observation.objects.get_or_create(
-                        job=job,
-                        claim_key=cid,
-                        photo=photo,
-                        source=ObservationSource.RECHECK,
-                        defaults={
-                            "verdict": verdict,
-                            "rationale": item.get("description", ""),
-                            "extra": {
-                                "crop_ref": crop.storage_ref,
-                                "changed": prior is not None and prior != verdict,
-                            },
-                            "execution": execution,
+            .order_by("-created_at")
+            .values_list("verdict", flat=True)
+            .first()
+        )
+        with transaction.atomic():
+            services.fence_evidence_write(job_id, worker_id)
+            for (cid, _), item in seen.items():
+                verdict = _verdict(item)
+                _, created = Observation.objects.get_or_create(
+                    job=job,
+                    claim_key=cid,
+                    photo=photo,
+                    source=ObservationSource.RECHECK,
+                    source_crop=crop,
+                    defaults={
+                        "verdict": verdict,
+                        "rationale": item.get("description", ""),
+                        "extra": {
+                            "crop_ref": crop.storage_ref,
+                            "changed": prior is not None and prior != verdict,
                         },
-                    )
-                    if created:
-                        covered.add((cid, str(photo.pk)))
-            # Spend is booked; the recheck observations above are kept
-            # so a resumed job never re-pays for this crop.
-            _raise_if_halted(settled, job_id, Stage.RECHECK, worker_id)
+                        "execution": execution,
+                    },
+                )
+                if created:
+                    covered.add(key)
+        # Spend is booked; the recheck observation above is kept
+        # so a resumed job never re-pays for this crop.
+        _raise_if_halted(settled, job_id, Stage.RECHECK, worker_id)
     services.record_execution(
         job_id,
         worker_id,
         stage=Stage.RECHECK,
         provider=Provider.LOCAL,
-        usage={"calls": calls, "skipped_confirmed": skipped_confirmed, "cap": cap},
+        usage={
+            "calls": calls,
+            "skipped_confirmed": skipped_confirmed,
+            "skipped_unlinked": skipped_unlinked,
+            "cap": cap,
+        },
     )
     return calls
 

@@ -81,13 +81,15 @@ class ObservationOut(Schema):
     boxes: list
     rationale: str
     extra: dict
+    source_crop_id: uuid.UUID | None = None
     created_at: datetime
 
 
 class CropOut(Schema):
     id: uuid.UUID
     source_photo_id: uuid.UUID
-    box: dict
+    source_claim_key: str = ""
+    box: list
     width: int
     height: int
     has_mask: bool = False
@@ -199,6 +201,7 @@ def app_get_evidence(request, job_id: uuid.UUID):
                 "boxes": obs.boxes,
                 "rationale": obs.rationale,
                 "extra": obs.extra,
+                "source_crop_id": obs.source_crop_id,
                 "created_at": obs.created_at,
             }
             for obs in Observation.objects.filter(job=job)
@@ -207,12 +210,19 @@ def app_get_evidence(request, job_id: uuid.UUID):
             {
                 "id": crop.id,
                 "source_photo_id": crop.source_photo_id,
+                "source_claim_key": (
+                    crop.source_observation.claim_key
+                    if crop.source_observation is not None
+                    else ""
+                ),
                 "box": crop.box,
                 "width": crop.width,
                 "height": crop.height,
                 "has_mask": bool(crop.mask_storage_ref),
             }
-            for crop in AuditCrop.objects.filter(job=job)
+            for crop in AuditCrop.objects.filter(job=job).select_related(
+                "source_observation"
+            )
         ],
         "executions": [
             {
