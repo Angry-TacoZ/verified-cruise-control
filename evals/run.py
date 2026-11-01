@@ -56,13 +56,19 @@ from audits.realworld import (
     BudgetRefused,
     EvalBudget,
     LedgerFile,
+    acquire_ledger_lock,
     assert_ledger_clear,
     build_eval_observation,
     build_sam_eval_observation,
+    dataset_fingerprint,
     estimate_spend,
     fresh_ledger_path,
+    ledger_lock_path,
     muse_verdict,
+    refuse_if_blocked,
+    release_ledger_lock,
     render_markdown,
+    scan_ledger_dir,
     score_case,
     select_sam_target,
     summarize,
@@ -304,20 +310,39 @@ def run_realworld_live(
     out_dir = Path(results_dir) if results_dir is not None else RESULTS
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # F1: every provider call below runs through durable pre-call
-    # reservations. Attempt headroom mirrors each adapter's own bounded
-    # retry policy (Muse: first try + up to 2 retries; SAM: first try +
-    # up to 3). The ledger file is unique per run; pointing --ledger at
-    # an existing file resumes only when it holds no outstanding
-    # reservations, otherwise the run refuses (no auto-replay, ever).
+    # Cross-run billing safety: one dataset-wide coordination lock (atomic
+    # claim, TTL takeover for crashed holders, no new infrastructure),
+    # then an automatic scan of the ledger directory for unresolved
+    # reservations from previous runs of THIS dataset — including legacy
+    # files without dataset identity, treated conservatively. Any hit
+    # refuses before adapters are even constructed. An explicit --ledger
+    # path is additionally checked in full.
+    dataset_id = dataset_fingerprint(manifest_path)
     per_call = str(settings.AUDIT_SPEND_CAP_USD)
     run_id = uuid.uuid4().hex[:12]
+    # Scan first so a restart reports the blocking reservations (not just
+    # a held lock); then claim the dataset lock. Either order is safe:
+    # two simultaneous starters cannot both pass, because the loser hits
+    # the other's outstanding reservations or its held lock.
+    try:
+        refuse_if_blocked(scan_ledger_dir(out_dir, dataset_id))
+    except BudgetRefused as exc:
+        _refuse(str(exc))
+    lock_path = ledger_lock_path(out_dir, dataset_id)
+    try:
+        acquire_ledger_lock(lock_path, run_id)
+    except BudgetRefused as exc:
+        _refuse(str(exc))
     if ledger_path is None:
         ledger_path = fresh_ledger_path(out_dir, "realworld-live", run_id)
     else:
         ledger_path = Path(ledger_path)
         if ledger_path.exists():
-            assert_ledger_clear(ledger_path)
+            try:
+                assert_ledger_clear(ledger_path)
+            except BudgetRefused as exc:
+                release_ledger_lock(lock_path, run_id)
+                _refuse(str(exc))
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     ledger_file = LedgerFile(ledger_path)
     budget = EvalBudget(
@@ -329,6 +354,7 @@ def run_realworld_live(
         reserve_usd_per_call=per_call,
         ledger_file=ledger_file,
         run_id=run_id,
+        dataset_id=dataset_id,
     )
 
     rows = []
@@ -502,8 +528,11 @@ def run_realworld_live(
         raise SystemExit(f"aborting live eval after provider error: {exc}")
     finally:
         # Every event was already fsync'd at reservation/settlement time;
-        # closing only flushes the file handle itself.
+        # closing only flushes the file handle itself. The dataset lock is
+        # always released so a finished run never blocks the next one; a
+        # crashed holder's stale lock is taken over via TTL on next start.
         ledger_file.close()
+        release_ledger_lock(lock_path, run_id)
     summary = summarize(manifest_id, rows)
     return {
         "eval": "realworld-live",
@@ -519,6 +548,7 @@ def run_realworld_live(
         "cost_usd": str(budget.spent),
         "spend_ledger": budget.totals(),
         "spend_ledger_path": ledger_path.name,
+        "dataset_id": dataset_id,
         "markdown": render_markdown(manifest_id, summary, rows),
     }
 

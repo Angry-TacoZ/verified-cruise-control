@@ -592,35 +592,53 @@ def read_ledger(path) -> list:
     return records
 
 
-def find_outstanding(records: list) -> list:
-    """Reserved events with no matching settlement, in ledger order."""
+def find_outstanding(records: list, dataset_id=None) -> list:
+    """Reserved events with no matching settlement, in ledger order.
+
+    Settlements with unknown cost count as outstanding: the billing status
+    is unresolved, so a restart must not assume zero spend. When
+    ``dataset_id`` is given, only records for that dataset — plus legacy
+    records carrying no dataset identity, treated conservatively — block.
+    A reserved record without a token can never match a settlement.
+    """
     settled = {
         record.get("token")
         for record in records
         if record.get("event") in ("settled", "settled-unknown")
     }
-    return [
-        record
-        for record in records
-        if record.get("event") == "reserved" and record.get("token") not in settled
-    ]
+    blocking = []
+    for record in records:
+        event = record.get("event")
+        unresolved = event == "settled-unknown" or (
+            event == "reserved" and record.get("token") not in settled
+        )
+        same_dataset = dataset_id is None or record.get("dataset_id") in (
+            None,
+            dataset_id,
+        )
+        if unresolved and same_dataset:
+            blocking.append(record)
+    return blocking
 
 
-def assert_ledger_clear(path) -> None:
+def _describe_blockers(outstanding: list) -> str:
+    labels = sorted({str(item.get("label", "?")) for item in outstanding})
+    runs = sorted({str(item.get("run_id", "?")) for item in outstanding})
+    return f"{len(outstanding)} outstanding reservation(s) ({', '.join(labels)}; runs: {', '.join(runs)})"
+
+
+def assert_ledger_clear(path, dataset_id=None) -> None:
     """Fail closed when an earlier run left outstanding reservations.
 
     Never auto-replays: the operator reconciles billing externally, then
     archives or removes the file before rerunning.
     """
-    outstanding = find_outstanding(read_ledger(path))
+    outstanding = find_outstanding(read_ledger(path), dataset_id)
     if outstanding:
-        labels = ", ".join(
-            sorted({str(item.get("label", "?")) for item in outstanding})
-        )
         raise BudgetRefused(
-            f"ledger {path} has {len(outstanding)} outstanding reservation(s) "
-            f"({labels}): reconcile provider billing, then archive or remove "
-            "the file before rerunning. Calls are never auto-replayed."
+            f"ledger {path} has {_describe_blockers(outstanding)}: reconcile "
+            "provider billing, then archive or remove the file before "
+            "rerunning. Calls are never auto-replayed."
         )
 
 
@@ -629,6 +647,139 @@ def fresh_ledger_path(directory, stem: str, run_id: str):
     from datetime import date
 
     return Path(directory) / f"{date.today().isoformat()}-{stem}-{run_id}.jsonl"
+
+
+def dataset_fingerprint(manifest) -> str:
+    """Stable content-based identity for one evaluation dataset.
+
+    Derived from the manifest content (version, dataset, split, and per
+    case the id, photo hash, and claim) so renaming files cannot evade
+    cross-run protection, while a demonstrably different dataset hashes
+    differently.
+    """
+    import json as _json
+
+    if isinstance(manifest, (str, Path)):
+        manifest = _json.loads(Path(manifest).read_text(encoding="utf-8"))
+    cases = []
+    for case in manifest.get("cases", []):
+        claim = case.get("claim", {})
+        cases.append(
+            {
+                "id": case.get("id"),
+                "photo_sha256": (case.get("photo") or {}).get("sha256"),
+                "advertised": claim.get("advertised"),
+                "normalized_feature": claim.get("normalized_feature"),
+            }
+        )
+    canonical = _json.dumps(
+        {
+            "manifest_version": manifest.get("manifest_version"),
+            "dataset": manifest.get("dataset"),
+            "split": manifest.get("split"),
+            "cases": sorted(cases, key=lambda item: str(item.get("id"))),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+LEDGER_GLOB = "*-realworld-live-*.jsonl"
+LOCK_TTL_SECONDS = 600
+
+
+def ledger_lock_path(directory, dataset_id: str):
+    """Coordination lock for one dataset (no new infrastructure)."""
+    return Path(directory) / f".realworld-live.{dataset_id[:16]}.lock"
+
+
+def acquire_ledger_lock(
+    path, run_id: str, *, ttl_seconds: int = LOCK_TTL_SECONDS
+) -> dict:
+    """Claim the dataset coordination lock, or refuse.
+
+    Creation is atomic, so two simultaneous contenders cannot both win.
+    A lock older than ``ttl_seconds`` is treated as a crashed holder and
+    taken over; anything else held refuses. A malformed lock file fails
+    closed. Returns the lock payload.
+    """
+    import json as _json
+    import time as _time
+
+    payload = {"run_id": run_id, "pid": os.getpid(), "created": _time.time()}
+    line = _json.dumps(payload, sort_keys=True).encode("utf-8")
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            existing = _json.loads(Path(path).read_text(encoding="utf-8"))
+            created = float(existing.get("created", 0))
+            holder = str(existing.get("run_id", "?"))
+        except (OSError, ValueError, TypeError):
+            raise BudgetRefused(
+                f"ledger lock {path} is malformed: refusing evaluation until "
+                "it is inspected and removed by the operator."
+            )
+        if _time.time() - created <= ttl_seconds:
+            raise BudgetRefused(
+                f"another evaluation (run {holder}) holds the ledger lock "
+                f"{path}: refusing concurrent paid runs for this dataset."
+            )
+        Path(path).unlink()
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(line + b"\n")
+    return payload
+
+
+def release_ledger_lock(path, run_id: str) -> None:
+    """Release our own lock; a foreign holder's lock is left alone."""
+    import json as _json
+
+    try:
+        existing = _json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return
+    if existing.get("run_id") == run_id:
+        Path(path).unlink(missing_ok=True)
+
+
+def scan_ledger_dir(directory, dataset_id: str) -> list:
+    """Find same-dataset ledgers with outstanding reservations.
+
+    Returns ``[(path, outstanding)]`` hits. Unreadable or malformed
+    relevant files fail closed instead of being silently skipped; legacy
+    records without dataset identity are treated conservatively.
+    """
+    hits = []
+    for path in sorted(Path(directory).glob(LEDGER_GLOB)):
+        try:
+            records = read_ledger(path)
+        except (OSError, ValueError) as exc:
+            raise BudgetRefused(
+                f"ledger {path} is unreadable or malformed ({exc}): refusing "
+                "evaluation until it is inspected, reconciled, or archived."
+            )
+        outstanding = find_outstanding(records, dataset_id)
+        if outstanding:
+            hits.append((path, outstanding))
+    return hits
+
+
+def refuse_if_blocked(hits: list) -> None:
+    """Refuse new paid inference while prior reservations are unresolved."""
+    if not hits:
+        return
+    parts = [
+        f"{path.name}: {_describe_blockers(outstanding)}" for path, outstanding in hits
+    ]
+    raise BudgetRefused(
+        "refusing paid evaluation: unresolved reservations from previous "
+        f"run(s) ({'; '.join(parts)}). Reconcile provider billing, then "
+        "archive the ledger file(s) before rerunning. Unknown billing is "
+        "never zero; requests are never auto-replayed."
+    )
 
 
 class EvalBudget:
@@ -655,6 +806,7 @@ class EvalBudget:
         reserve_usd_per_call: str,
         ledger_file=None,
         run_id=None,
+        dataset_id=None,
     ) -> None:
         self.authorized = authorized
         self.max_spend = Decimal(max_spend_usd)
@@ -662,6 +814,7 @@ class EvalBudget:
         self.reserve_usd = Decimal(reserve_usd_per_call)
         self.ledger_file = ledger_file
         self.run_id = run_id or uuid.uuid4().hex[:12]
+        self.dataset_id = dataset_id
         self.spent = Decimal(0)
         self.reserved_spend = Decimal(0)
         self.attempts_used = 0
@@ -677,6 +830,7 @@ class EvalBudget:
             "seq": self._seq,
             "event": event,
             "run_id": self.run_id,
+            "dataset_id": self.dataset_id,
             "label": label,
             **fields,
         }

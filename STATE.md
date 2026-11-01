@@ -43,6 +43,12 @@ Cruise family: conventional (set speed; speedometer or CRUISE/SET telltale) vs A
 
 Draft PR open early; prompt/reference versioned; baseline reproducible; ground truth independent; local-only photos; no unauthorized media; paired comparison with denominators; mocks + regression green; backend/Ruff/Django/goldens green; mother/extension checks green; no paid inference in CI; live needs auth; no unmeasured claims; PR unmerged.
 
+## Remediation pass 3 (review of `18349d2`, 1 finding — prior head CI 4/4 green)
+
+No paid inference; no RSA/catalog/prompt/ground-truth changes; leave PR #3 open unmerged.
+
+- [ ] Cross-run billing safety (MEDIUM) — default command mints a fresh ledger per run and only checks `--ledger` files, so restarting an interrupted evaluation without `--ledger` bypasses unresolved reservations. Fix without redesigning the budget system: content-based dataset fingerprint in every record; default runs auto-scan the ledger dir for same-dataset (plus legacy/ambiguous) outstanding reservations and refuse before any provider request; cross-process lock file with TTL takeover (no new infra); explicit `--ledger` behavior preserved; documented manual recovery (reconcile, archive, never auto-replay/rewrite). Tests A–G with fakes + tmp dirs, zero network.
+
 ## Remediation pass 2 (review of `24610e0`, 2 findings)
 
 No paid inference; no RSA/catalog/photo changes; leave PR #3 open unmerged.

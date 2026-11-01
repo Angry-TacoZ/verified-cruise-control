@@ -13,15 +13,20 @@ from audits.realworld import (
     BudgetRefused,
     EvalBudget,
     LedgerFile,
+    acquire_ledger_lock,
     assert_ledger_clear,
     build_eval_observation,
     build_sam_eval_observation,
+    dataset_fingerprint,
     estimate_spend,
     find_outstanding,
     fresh_ledger_path,
+    ledger_lock_path,
     muse_verdict,
     read_ledger,
+    release_ledger_lock,
     render_markdown,
+    scan_ledger_dir,
     score_case,
     select_sam_target,
     summarize,
@@ -1039,3 +1044,283 @@ def test_sam_wrong_photo_never_corroborates():
     state, summary = reconcile_claim([muse_obs, right_sam], claim, FORTE_2021)
     assert state == "visually_supported"
     assert "confirmed by SAM localization" in summary
+
+
+def _harness_run(tmp_path, manifest, monkeypatch):
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    report = runner.run_realworld_live(
+        manifest,
+        tmp_path,
+        10.0,
+        True,
+        muse_adapter=fake_muse,
+        sam_adapter=fake_sam,
+        results_dir=tmp_path / "results",
+    )
+    return report, fake_muse, fake_sam
+
+
+def _crashed_ledger_for(manifest, directory, run_id="runDEAD"):
+    """Simulate a hard crash: reservation persisted, never settled."""
+    fingerprint = dataset_fingerprint(manifest)
+    path = directory / f"2026-01-01-realworld-live-{run_id}.jsonl"
+    handle = LedgerFile(path)
+    budget = EvalBudget(
+        authorized=True,
+        max_spend_usd="5.00",
+        max_attempts_total=12,
+        reserve_usd_per_call="2.00",
+        ledger_file=handle,
+        dataset_id=fingerprint,
+    )
+    budget.reserve(
+        "Muse case-a baseline",
+        max_attempts=3,
+        provider="fake-muse",
+        case_id="case-a",
+        mode="baseline",
+    )
+    handle.close()
+    return path, fingerprint
+
+
+def test_default_restart_refuses_unresolved(tmp_path, monkeypatch):
+    # Test A: restarting the same evaluation with the default command
+    # (no --ledger) must refuse before invoking any provider.
+    manifest = _harness_manifest(tmp_path)
+    ledgers = tmp_path / "results"
+    ledgers.mkdir()
+    _crashed_ledger_for(manifest, ledgers)
+    assert len(scan_ledger_dir(ledgers, dataset_fingerprint(manifest))) == 1
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit, match="outstanding"):
+        _harness_run(tmp_path, manifest, monkeypatch)
+
+
+def test_default_restart_makes_no_provider_call(tmp_path, monkeypatch):
+    # Test A (provider silence): the refused restart never fires adapters.
+    manifest = _harness_manifest(tmp_path)
+    ledgers = tmp_path / "results"
+    ledgers.mkdir()
+    _crashed_ledger_for(manifest, ledgers)
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit):
+        runner.run_realworld_live(
+            manifest,
+            tmp_path,
+            10.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=tmp_path / "results",
+        )
+    assert fake_muse.calls == []
+    assert fake_sam.calls == []
+
+
+def test_clean_prior_run_does_not_block(tmp_path, monkeypatch):
+    # Test B: a fully settled previous run must not block the next one.
+    manifest = _harness_manifest(tmp_path)
+    ledgers = tmp_path / "results"
+    ledgers.mkdir()
+    fingerprint = dataset_fingerprint(manifest)
+    path = ledgers / "2026-01-01-realworld-live-runOK.jsonl"
+    handle = LedgerFile(path)
+    budget = EvalBudget(
+        authorized=True,
+        max_spend_usd="5.00",
+        max_attempts_total=12,
+        reserve_usd_per_call="2.00",
+        ledger_file=handle,
+        dataset_id=fingerprint,
+    )
+    token = budget.reserve("Muse case-a baseline", max_attempts=1)
+    budget.settle(token, attempts=1, cost_usd="0.01", provider="fake-muse")
+    handle.close()
+    report, fake_muse, _unused = _harness_run(tmp_path, manifest, monkeypatch)
+    assert fake_muse.calls != []
+    assert report["spend_ledger"]["unknown_cost"] is False
+
+
+def test_explicit_ledger_still_detects_outstanding(tmp_path, monkeypatch):
+    # Test C: --ledger behavior is preserved for explicitly supplied files.
+    manifest = _harness_manifest(tmp_path)
+    explicit = tmp_path / "explicit.jsonl"
+    _crashed_ledger_for(manifest, tmp_path, run_id="runEXPL")
+    (tmp_path / "2026-01-01-realworld-live-runEXPL.jsonl").rename(explicit)
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit, match="outstanding"):
+        runner.run_realworld_live(
+            manifest,
+            tmp_path,
+            10.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=tmp_path / "results",
+            ledger_path=explicit,
+        )
+    assert fake_muse.calls == []
+
+
+def _different_manifest(manifest_a):
+    import copy
+
+    manifest = copy.deepcopy(manifest_a)
+    manifest["dataset"] = "other-probe"
+    manifest["cases"][0]["id"] = "case-z"
+    return manifest
+
+
+def test_different_dataset_not_blocked(tmp_path, monkeypatch):
+    # Test D: a crashed run for a demonstrably different dataset does not
+    # block a new evaluation.
+    manifest_a = _harness_manifest(tmp_path)
+    ledgers = tmp_path / "results"
+    ledgers.mkdir()
+    _crashed_ledger_for(manifest_a, ledgers, run_id="runAAAA")
+    manifest_b = _different_manifest(manifest_a)
+    assert dataset_fingerprint(manifest_a) != dataset_fingerprint(manifest_b)
+    report, fake_muse, _other = _harness_run(tmp_path, manifest_b, monkeypatch)
+    assert fake_muse.calls != []
+    assert report["spend_ledger"]["unknown_cost"] is False
+
+
+def test_malformed_ledger_fails_closed(tmp_path, monkeypatch):
+    # Test E: corrupted or ambiguous relevant records refuse inference.
+    manifest = _harness_manifest(tmp_path)
+    ledgers = tmp_path / "results"
+    ledgers.mkdir()
+    (ledgers / "2026-01-01-realworld-live-runBAD.jsonl").write_text(
+        '{"event": "reserved", "label": "Muse case-a baseline"\n', encoding="utf-8"
+    )
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit, match="unreadable|malformed|outstanding"):
+        runner.run_realworld_live(
+            manifest,
+            tmp_path,
+            10.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=tmp_path / "results",
+        )
+    assert fake_muse.calls == []
+    # A reserved record without a token can never match a settlement.
+    assert find_outstanding([{"event": "reserved", "label": "x"}]) != []
+
+
+def test_concurrent_start_single_winner(tmp_path):
+    # Test F: two simultaneous attempts for the same dataset cannot both
+    # pass the preflight coordination gate.
+    manifest = _harness_manifest(tmp_path)
+    fingerprint = dataset_fingerprint(manifest)
+    lock = ledger_lock_path(tmp_path, fingerprint)
+    acquire_ledger_lock(lock, "runA")
+    import pytest as _pytest
+
+    with _pytest.raises(BudgetRefused):
+        acquire_ledger_lock(lock, "runB")
+    release_ledger_lock(lock, "runA")
+    # A stale lock from a crashed holder does not disable evaluations.
+    import json
+    import time
+
+    lock.write_text(
+        json.dumps({"run_id": "runCRASH", "pid": 1, "created": time.time() - 3600}),
+        encoding="utf-8",
+    )
+    acquire_ledger_lock(lock, "runC", ttl_seconds=600)
+    release_ledger_lock(lock, "runC")
+    # A lock held by someone else is left alone on release.
+    acquire_ledger_lock(lock, "runD")
+    release_ledger_lock(lock, "not-runD")
+    assert lock.exists()
+
+
+def test_concurrent_run_refuses_while_locked(tmp_path, monkeypatch):
+    # Test F (integration): a run started while another holds the dataset
+    # lock refuses before any provider request.
+    manifest = _harness_manifest(tmp_path)
+    fingerprint = dataset_fingerprint(manifest)
+    results = tmp_path / "results"
+    results.mkdir()
+    acquire_ledger_lock(ledger_lock_path(results, fingerprint), "runOTHER")
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit, match="another evaluation|lock|outstanding|holds"):
+        runner.run_realworld_live(
+            manifest,
+            tmp_path,
+            10.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=results,
+        )
+    assert fake_muse.calls == []
+    assert fake_sam.calls == []
+
+
+def test_accounting_history_immutable(tmp_path, monkeypatch):
+    # Test G: refused or subsequent runs never modify existing events.
+    manifest = _harness_manifest(tmp_path)
+    ledgers = tmp_path / "results"
+    ledgers.mkdir()
+    crashed, _ = _crashed_ledger_for(manifest, ledgers, run_id="runFROZEN")
+    before = crashed.read_bytes()
+    import pytest as _pytest
+
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    with _pytest.raises(SystemExit):
+        runner.run_realworld_live(
+            manifest,
+            tmp_path,
+            10.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=ledgers,
+        )
+    assert crashed.read_bytes() == before
+    # A settled run appends only to its own file.
+    settled = ledgers / "2026-01-01-realworld-live-runDONE.jsonl"
+    handle = LedgerFile(settled)
+    budget = EvalBudget(
+        authorized=True,
+        max_spend_usd="5.00",
+        max_attempts_total=12,
+        reserve_usd_per_call="2.00",
+        ledger_file=handle,
+        dataset_id=dataset_fingerprint(manifest),
+    )
+    token = budget.reserve("Muse case-a baseline", max_attempts=1)
+    budget.settle(token, attempts=1, cost_usd="0.01", provider="fake-muse")
+    handle.close()
+    assert crashed.read_bytes() == before
