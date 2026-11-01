@@ -3297,3 +3297,95 @@ def test_adas_fixtures_flow_through_pipeline(enabled):
         "following-distance button",
         "lane keeping assist button",
     ]
+
+
+# --- PR #3 M2: reference-assisted recognition mode ---------------------
+
+ACC_LKA = ["adaptive cruise control", "lane keeping assist"]
+
+
+def test_reference_block_features():
+    block = pipeline.build_reference_block(ACC_LKA)
+    assert "distance" in block
+    assert "lane" in block
+    assert len(block) <= pipeline.REFERENCE_BLOCK_MAX_CHARS
+
+
+def test_reference_block_unknown_feature_falls_back_empty():
+    assert pipeline.build_reference_block(["sunroof"]) == ""
+    assert pipeline.build_reference_block([]) == ""
+
+
+def test_reference_block_dedupes_same_feature():
+    one = pipeline.build_reference_block(["adaptive cruise control"])
+    two = pipeline.build_reference_block(["adaptive cruise control", "ACC"])
+    assert one != ""
+    assert one == two
+
+
+def test_reference_block_caps_whole_snippets():
+    texts = [
+        "cruise control",
+        "adaptive cruise control",
+        "lane keeping assist",
+        "lane departure warning",
+        "lane centering",
+    ]
+    block = pipeline.build_reference_block(texts)
+    assert len(block) <= pipeline.REFERENCE_BLOCK_MAX_CHARS
+    assert block.endswith(".")
+    assert "cruise" in block.split("\n\n")[0]
+
+
+def test_baseline_prompt_unchanged(listing, photos, enabled):
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    scripts = [
+        [_batch_obs(str(photo.id), "c1"), _batch_obs(str(photo.id), "c2")]
+        for photo in photos
+    ]
+    adapter = ScriptedMuseAdapter(scripts)
+    assert pipeline.run_muse(job.pk, "w1", screened, adapter) == 4
+    for request in adapter.requests:
+        assert request.prompt_version == "m2"
+        assert request.system_instructions == pipeline.SYSTEM_INSTRUCTIONS
+        assert "RSA" not in request.system_instructions
+    rows = AuditExecution.objects.filter(job=job, stage=Stage.Muse)
+    assert rows.count() == 2
+    for row in rows:
+        assert row.usage["prompt_version"] == "m2"
+        assert row.usage["reference_version"] is None
+
+
+def test_reference_mode_appends_guidance(listing, photos, enabled):
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    scripts = [
+        [_batch_obs(str(photo.id), "c1"), _batch_obs(str(photo.id), "c2")]
+        for photo in photos
+    ]
+    adapter = ScriptedMuseAdapter(scripts)
+    assert pipeline.run_muse(job.pk, "w1", screened, adapter, reference_mode=True) == 4
+    for request in adapter.requests:
+        assert request.prompt_version == "m3"
+        assert request.system_instructions.startswith(pipeline.SYSTEM_INSTRUCTIONS)
+        assert "2026-09-rsa-v1" in request.system_instructions
+        assert "Report only visible evidence" in request.system_instructions
+    rows = AuditExecution.objects.filter(job=job, stage=Stage.Muse)
+    assert rows.count() == 2
+    for row in rows:
+        assert row.usage["prompt_version"] == "m3"
+        assert row.usage["reference_version"] == "2026-09-rsa-v1"
+
+
+def test_reference_mode_falls_back_without_mapping(listing, photos, enabled):
+    listing.advertised_claims = ["sunroof"]
+    listing.save(update_fields=["advertised_claims"])
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    scripts = [[_batch_obs(str(photo.id), "c1")] for photo in photos]
+    adapter = ScriptedMuseAdapter(scripts)
+    assert pipeline.run_muse(job.pk, "w1", screened, adapter, reference_mode=True) == 2
+    for request in adapter.requests:
+        assert request.prompt_version == "m2"
+        assert request.system_instructions == pipeline.SYSTEM_INSTRUCTIONS

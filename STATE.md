@@ -7,7 +7,7 @@ Budget: $0 authorized. No live Baseten/Meta inference without James Lane's expli
 ## Milestones
 
 - [x] M1 — Versioned structured RSA knowledge reference (`rsa_reference.json` v1, 19 concepts; loader + `guidance_for`; 10 unit tests; human-readable `docs/rsa-adas-reference.md`). PDF/pages rendered from TEMP only; nothing copyrighted committed.
-- [ ] M2 — Optional, versioned reference-assisted recognition mode (prompt m3?); baseline PR #2 behavior preserved and reproducible; no RAG, no fine-tune.
+- [x] M2 — Optional, versioned reference-assisted recognition mode (prompt m3; per-chunk RSA snippets ≤2000 chars, m2 fallback when unmapped; `reference_mode` param default off; usage rows record prompt+reference versions). Baseline m2 byte-identical; no RAG, no fine-tune. Recheck prompt unchanged (full-image stage only).
 - [ ] M3 — Real-world evaluation dataset infra (local-only photos; sanitized versioned manifests; 12–20 cases / 4+ configs target; report shortfall honestly).
 - [ ] M4 — Paired baseline-vs-reference eval harness (identical cases; per-stage metrics; machine + human reports; dev/holdout split; no tuning on holdout).
 - [ ] M5 — Live-eval gating (dry-run default; explicit auth + spend bounds required; versioned outputs; provider error handling).
