@@ -1,0 +1,46 @@
+[
+  {
+    "case_id": "synth-acc-001",
+    "mode": "baseline",
+    "status": "scored",
+    "state": "insufficient_evidence",
+    "prompt_version": "m2",
+    "control": "synthetic dashboard-style rectangle labeled ACC BTN",
+    "interpretation": "insufficient",
+    "sam_target": "synthetic rectangle",
+    "note": "dry-run scorer self-test vector; no live inference occurred"
+  },
+  {
+    "case_id": "synth-acc-001",
+    "mode": "reference",
+    "status": "scored",
+    "state": "insufficient_evidence",
+    "prompt_version": "m3",
+    "control": "synthetic dashboard-style rectangle labeled ACC BTN",
+    "interpretation": "insufficient",
+    "sam_target": "synthetic dashboard-style rectangle labeled ACC BTN",
+    "note": "dry-run scorer self-test vector; no live inference occurred"
+  },
+  {
+    "case_id": "synth-cruise-001",
+    "mode": "baseline",
+    "status": "scored",
+    "state": "visually_supported",
+    "prompt_version": "m2",
+    "control": "CRUISE button",
+    "interpretation": "supports",
+    "sam_target": "CRUISE button",
+    "note": "deliberate overclaim vector: proves the unsupported-inference flag fires"
+  },
+  {
+    "case_id": "synth-cruise-001",
+    "mode": "reference",
+    "status": "scored",
+    "state": "insufficient_evidence",
+    "prompt_version": "m3",
+    "control": "generic cruise label",
+    "interpretation": "insufficient",
+    "sam_target": "generic cruise label",
+    "note": "dry-run scorer self-test vector; no live inference occurred"
+  }
+]

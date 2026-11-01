@@ -59,3 +59,28 @@ cost per listing · malformed-input reliability.
   Live runs need explicit human approval and are never run in CI.
 - `results/2026-10-31-smoke-baseten-meta.json`: provider connectivity
   smoke baseline (not a scored eval).
+
+## Real-world paired evaluation (PR #3)
+
+Offline-first baseline (m2) vs reference-assisted (m3) harness; full
+spec in `realworld/README.md`, findings in
+`docs/realworld-evaluation.md`.
+
+- `realworld/manifest.example.json`: sanitized template (placeholder
+  SHA, no bytes). Local manifests (`manifest.<name>.json`) and
+  `realworld/photos/` are gitignored; only the template is committed.
+- `fixtures/realworld-sample/`: 2 generated PNGs with pinned SHA-256
+  plus committed dry-run recorded vectors, so CI exercises the
+  manifest → verify → score → report path with zero inference.
+- `python evals/run.py realworld-dryrun --manifest <path>
+  [--recorded <path>]`: validate, verify bytes, score, print spend
+  preflight (cases x modes x per-job `spend_cap_usd`). Always safe.
+- `python evals/run.py realworld-live --manifest <path>
+  [--max-spend N] [--skip-sam]`: paired live eval. Refuses without
+  `VCC_LIVE_SMOKE=1`, keys, and a worst-case bound under `--max-spend`;
+  SAM additionally needs `VCC_LIVE_SAM=1` or the stage reports not
+  measured. Never in CI; needs explicit human approval.
+- Splits: `dev` for iteration, `holdout` frozen — never tune on
+  holdout, never report dev numbers as validation. No live
+  comparison has been authorized; reference-assisted recognition is
+  unvalidated and stays experimental.

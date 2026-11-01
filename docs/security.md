@@ -133,6 +133,12 @@ can read this repository and can serve arbitrary listing pages.
   browser and never logged. Status endpoints expose metadata only.
 - Generated frontend/extension bundles are scanned for secrets before push
   (see PR checklist in `AGENTS.md`).
+- Real-world eval hygiene (PR #3): genuine photographs live only under
+  the gitignored `evals/realworld/photos/` overlay; manifests carry
+  SHA-256 + provenance, never VINs, owner data, or image bytes
+  (validation rejects them); live eval commands refuse in CI
+  (adapters require keys, live-smoke tests skip without them) and need
+  explicit `VCC_LIVE_SMOKE=1` / `VCC_LIVE_SAM=1` plus a spend bound.
 
 ## Known residual risks (PR #1)
 

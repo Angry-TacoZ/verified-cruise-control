@@ -1,12 +1,24 @@
-"""PR #2 eval runner: reconcile goldens (free) and live Muse quality (gated).
+"""PR #2/#3 eval runner: reconcile goldens (free) and live Muse quality (gated).
 
 Usage:
     uv run python evals/run.py reconcile            # zero inference, always safe
     uv run python evals/run.py muse-live            # 1 live call, needs approval
+    uv run python evals/run.py realworld-dryrun --manifest <path>
+                                                    # zero inference, always safe
+    uv run python evals/run.py realworld-live --manifest <path>
+                                                    # paired live eval, needs approval
 
 ``muse-live`` refuses to run unless ``VCC_LIVE_SMOKE=1`` is set, a Baseten
 key is present, and the estimated spend is under ``--max-spend`` (default
 $0.25). Never run it in CI.
+
+``realworld-dryrun`` validates a realworld-v1 manifest, verifies photo
+bytes when present, scores recorded model outputs when given, and prints
+the spend preflight. ``realworld-live`` runs baseline (m2) vs
+reference-assisted (m3) Muse observations per case plus deterministic
+reconciliation; SAM localization runs only with ``VCC_LIVE_SAM=1`` and a
+Meta key, otherwise the SAM stage is reported as not measured. Never run
+live evals in CI.
 """
 
 from __future__ import annotations
@@ -29,11 +41,23 @@ django.setup()
 
 from audits.models import Observation
 from audits.pipeline import (
+    MUSE_MAX_OUTPUT_TOKENS,
     PROMPT_VERSION,
+    REFERENCE_PROMPT_VERSION,
     SYSTEM_INSTRUCTIONS,
+    build_reference_block,
+    build_system_instructions,
     build_user_text,
     reconcile_claim,
 )
+from audits.realworld import (
+    estimate_spend,
+    render_markdown,
+    score_case,
+    summarize,
+    validate_manifest,
+)
+from django.conf import settings
 
 CASES = REPO / "evals" / "cases" / "v1"
 RESULTS = REPO / "evals" / "results"
@@ -159,21 +183,279 @@ def run_muse_live(max_spend: float) -> dict:
     }
 
 
+def _resolve_photos_root(manifest_path: Path, explicit: str | None) -> Path:
+    # Manifest photo paths are relative to the manifest's own directory
+    # (e.g. "photos/foo.jpg" beside the manifest); the override covers
+    # layouts where bytes live elsewhere.
+    if explicit:
+        return Path(explicit)
+    return manifest_path.parent
+
+
+def run_realworld_dryrun(
+    manifest_path: Path, photos_root: Path, recorded_path=None
+) -> dict:
+    """Zero-inference paired-eval rehearsal: validate, verify, score, bound."""
+    cases = validate_manifest(manifest_path, photos_root=photos_root)
+    rows = []
+    if recorded_path is not None:
+        recorded = json.loads(Path(recorded_path).read_text(encoding="utf-8"))
+        by_id = {case["id"]: case for case in cases}
+        for entry in recorded:
+            case = by_id.get(entry.get("case_id"))
+            if case is None:
+                raise SystemExit(
+                    f"recorded output for unknown case {entry.get('case_id')!r}"
+                )
+            rows.append(score_case(case, entry))
+    summary = summarize(manifest_path.stem, rows)
+    preflight = estimate_spend(
+        len(cases),
+        modes=2,
+        muse_calls_per_case=1,
+        sam_calls_per_case=1,
+        spend_cap_usd=str(settings.AUDIT_SPEND_CAP_USD),
+    )
+    return {
+        "eval": "realworld-dryrun",
+        "manifest": manifest_path.name,
+        "manifest_version": "realworld-v1",
+        "cases": len(cases),
+        "case_ids": [case["id"] for case in cases],
+        "summary": summary,
+        "rows": rows,
+        "spend_preflight_usd": preflight,
+        "markdown": render_markdown(manifest_path.stem, summary, rows),
+        "live_inference": False,
+        "cost_usd": 0,
+    }
+
+
+def _chargeable(cost, spent: float, max_spend: float, what: str) -> float:
+    """Fail closed on unknown cost; abort before exceeding the bound."""
+    if cost is None:
+        raise SystemExit(f"refusing: {what} returned unknown cost (unknown != $0)")
+    total = spent + float(cost)
+    if float(cost) > max_spend or total > max_spend:
+        raise SystemExit(
+            f"refusing: {what} cost {cost} would exceed bound ${max_spend}"
+        )
+    return total
+
+
+def run_realworld_live(
+    manifest_path: Path, photos_root: Path, max_spend: float, include_sam: bool
+) -> dict:
+    """Paired baseline (m2) vs reference-assisted (m3) live evaluation."""
+    from providers.base import ImageAttachment
+    from providers.baseten import BasetenMuseAdapter, MuseRequest
+
+    if os.environ.get("VCC_LIVE_SMOKE") != "1":
+        raise SystemExit("refusing: set VCC_LIVE_SMOKE=1 to run live evals")
+    cases = validate_manifest(manifest_path, photos_root=photos_root)
+    sam_adapter = None
+    if include_sam:
+        if os.environ.get("VCC_LIVE_SAM") != "1":
+            raise SystemExit(
+                "refusing: SAM stage needs VCC_LIVE_SAM=1 (else rerun with --skip-sam)"
+            )
+        from providers.meta import MetaSamAdapter, SamRequest
+
+        sam_adapter = MetaSamAdapter()
+        sam_adapter.require_configured()
+    preflight = estimate_spend(
+        len(cases),
+        modes=2,
+        muse_calls_per_case=1,
+        sam_calls_per_case=1 if include_sam else 0,
+        spend_cap_usd=str(settings.AUDIT_SPEND_CAP_USD),
+    )
+    if float(preflight["worst_case_usd"]) > max_spend:
+        raise SystemExit(
+            f"refusing: worst-case bound ${preflight['worst_case_usd']} exceeds --max-spend ${max_spend}"
+        )
+    muse_adapter = BasetenMuseAdapter()
+    muse_adapter.require_configured()
+
+    spent = 0.0
+    rows = []
+    raw = []
+    for case in cases:
+        photo_rel = case["photo"]["path"]
+        data = (photos_root / photo_rel).read_bytes()
+        claim = case["claim"]
+        entries = [{"id": claim["claim_id"], "text": claim["advertised"]}]
+        photo_id = case["id"]
+        attachment = ImageAttachment(
+            photo_id=photo_id, mime_type=MIME[Path(photo_rel).suffix.lower()], data=data
+        )
+        for mode in ("baseline", "reference"):
+            if mode == "reference":
+                block = build_reference_block([claim["advertised"]])
+                if block:
+                    system = build_system_instructions(block)
+                    prompt_version = REFERENCE_PROMPT_VERSION
+                else:
+                    # No RSA guidance maps to this claim: reference mode
+                    # degrades to the baseline prompt; record the fallback.
+                    system = SYSTEM_INSTRUCTIONS
+                    prompt_version = PROMPT_VERSION
+            else:
+                system = SYSTEM_INSTRUCTIONS
+                prompt_version = PROMPT_VERSION
+            request = MuseRequest(
+                prompt_version=prompt_version,
+                system_instructions=system,
+                user_text=build_user_text(entries, [photo_id]),
+                photo_ids=(photo_id,),
+                images=(attachment,),
+                max_output_tokens=MUSE_MAX_OUTPUT_TOKENS,
+            )
+            result = muse_adapter.analyze(request)
+            spent = _chargeable(
+                result.usage.estimated_cost_usd,
+                spent,
+                max_spend,
+                f"Muse {case['id']} {mode}",
+            )
+            obs = result.observations[0] if result.observations else {}
+            visible = str(obs.get("visible_object", "") or "")
+            if obs.get("ambiguous"):
+                verdict = "unclear"
+            elif visible.strip().lower() == "none":
+                verdict = "absent"
+            else:
+                verdict = "present"
+            sam_target = visible if verdict == "present" else ""
+            sam_masks = 0
+            sam_status = "skipped" if not include_sam else "no-target"
+            if include_sam and sam_target:
+                from PIL import Image as PILImage
+
+                with PILImage.open(photos_root / photo_rel) as img:
+                    width, height = img.size
+                sam_request = SamRequest(
+                    photo=attachment,
+                    image_width=width,
+                    image_height=height,
+                    concept=sam_target,
+                )
+                sam_result = sam_adapter.analyze(sam_request)
+                spent = _chargeable(
+                    sam_result.usage.estimated_cost_usd,
+                    spent,
+                    max_spend,
+                    f"SAM {case['id']} {mode}",
+                )
+                sam_masks = len(sam_result.records or [])
+                sam_status = "localized" if sam_masks else "no-mask"
+            state, _summary = reconcile_claim(
+                [
+                    Observation(
+                        source="muse",
+                        verdict=verdict,
+                        photo_id=uuid.uuid4(),
+                        extra={"visible_object": visible},
+                    )
+                ],
+                claim["advertised"],
+                case["vehicle"],
+            )
+            recorded = {
+                "case_id": case["id"],
+                "mode": mode,
+                "status": "scored",
+                "state": state,
+                "prompt_version": prompt_version,
+                "control": visible,
+                "interpretation": "supports"
+                if state in ("verified", "visually_supported")
+                else ("unknown" if verdict == "unclear" else "insufficient"),
+                "sam_target": sam_target,
+                "sam_masks": sam_masks,
+                "sam_status": sam_status,
+            }
+            rows.append(score_case(case, recorded))
+            raw.append(
+                {
+                    "case_id": case["id"],
+                    "mode": mode,
+                    "prompt_version": prompt_version,
+                    "muse_observation": obs,
+                    "sam_status": sam_status,
+                    "sam_masks": sam_masks,
+                    "state": state,
+                }
+            )
+    summary = summarize(manifest_path.stem, rows)
+    return {
+        "eval": "realworld-live",
+        "manifest": manifest_path.name,
+        "manifest_version": "realworld-v1",
+        "baseline_prompt": PROMPT_VERSION,
+        "reference_prompt": REFERENCE_PROMPT_VERSION,
+        "sam_included": include_sam,
+        "summary": summary,
+        "rows": rows,
+        "raw": raw,
+        "spend_preflight_usd": preflight,
+        "cost_usd": spent,
+        "markdown": render_markdown(manifest_path.stem, summary, rows),
+    }
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run PR #2 evals")
-    parser.add_argument("eval", choices=["reconcile", "muse-live"])
+    parser = argparse.ArgumentParser(description="Run PR #2/#3 evals")
+    parser.add_argument(
+        "eval", choices=["reconcile", "muse-live", "realworld-dryrun", "realworld-live"]
+    )
     parser.add_argument("--max-spend", type=float, default=0.25)
+    parser.add_argument("--manifest", type=str, default=None)
+    parser.add_argument("--photos-root", type=str, default=None)
+    parser.add_argument("--recorded", type=str, default=None)
+    parser.add_argument("--skip-sam", action="store_true")
     args = parser.parse_args()
     if args.eval == "reconcile":
         report = run_reconcile()
         name = f"{date.today().isoformat()}-reconcile-{GOLDENS_VERSION}.json"
-    else:
+    elif args.eval == "muse-live":
         report = run_muse_live(args.max_spend)
         name = f"{date.today().isoformat()}-muse-{PROMPT_VERSION}.json"
+    elif args.eval == "realworld-dryrun":
+        if not args.manifest:
+            raise SystemExit("realworld-dryrun needs --manifest <path>")
+        manifest_path = Path(args.manifest)
+        report = run_realworld_dryrun(
+            manifest_path,
+            _resolve_photos_root(manifest_path, args.photos_root),
+            recorded_path=args.recorded,
+        )
+        print(report["markdown"])
+        name = f"{date.today().isoformat()}-realworld-dryrun.json"
+    else:
+        if not args.manifest:
+            raise SystemExit("realworld-live needs --manifest <path>")
+        manifest_path = Path(args.manifest)
+        report = run_realworld_live(
+            manifest_path,
+            _resolve_photos_root(manifest_path, args.photos_root),
+            args.max_spend,
+            include_sam=not args.skip_sam,
+        )
+        print(report["markdown"])
+        name = f"{date.today().isoformat()}-realworld-live.json"
     dest = RESULTS / name
-    dest.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print(f"{report['passed']}/{report['total']} passed -> {dest}")
-    if report["passed"] != report["total"]:
+    dest.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+    if "summary" in report:
+        print(
+            f"paired_cases={report['summary']['paired_cases']} "
+            f"n_rows={report['summary']['n_rows']} -> {dest}"
+        )
+    else:
+        print(
+            f"{report.get('passed', '-')}/{report.get('total', '-')} passed -> {dest}"
+        )
+    if "passed" in report and "total" in report and report["passed"] != report["total"]:
         raise SystemExit("eval failures recorded")
 
 

@@ -10,10 +10,15 @@ reviewable evidence packets for a human reviewer.
 > AI results are advisory evidence for a human reviewer; the system never
 > independently certifies disputed features.
 
-**PR #1 scope (this branch):** project foundation + listing import —
-`Synthetic Listing → WXT Extension → Secure Django API → SQLite + Original
-Image Storage → Svelte Mother App`. Live AI inference ships in PR #2; PR #1
-defines the provider contracts but makes zero model calls.
+**Current scope (PR #3):** foundation + listing import (PR #1) and the
+multimodal audit engine — Muse visual observations, SAM localization,
+manufacturer-aware interpretation, deterministic five-state
+reconciliation, durable worker, enforced spend caps (PR #2) — plus an
+offline-first paired harness comparing baseline (m2) vs
+reference-assisted (m3) recognition on real-world photos
+(`evals/realworld/`, `docs/realworld-evaluation.md`). Reference-assisted
+recognition is experimental and unvalidated against live inference; no
+live model comparison has been authorized.
 
 ## Why this is more than an image describer (hackathon context)
 
@@ -28,8 +33,8 @@ is only checkable in a front-grille close-up. Verification tests every
 advertised claim against *each* relevant photo and records what each photo does
 and does not show.
 
-**How Meta models do substantive work here (planned for PR #2).** PR #1 makes
-zero model calls by design — it builds the evidence pipeline the models will
+**How Meta models do substantive work here (shipped in PR #2).** PR #1 made
+zero model calls by design — it built the evidence pipeline the models now
 consume:
 
 - **Muse Spark Open 1026** (Baseten) provides visual understanding of every

@@ -81,3 +81,10 @@ yarn-error.log*
 # OS
 [Dd]esktop.ini
 $RECYCLE.BIN/
+
+# Local real-world eval photos + private manifests (PR #3, never commit)
+evals/realworld/photos/*
+!evals/realworld/photos/.gitignore
+evals/realworld/manifest.*.json
+!evals/realworld/manifest.example.json
+evals/results/*-realworld-*.json

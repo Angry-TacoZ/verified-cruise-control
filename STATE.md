@@ -8,10 +8,10 @@ Budget: $0 authorized. No live Baseten/Meta inference without James Lane's expli
 
 - [x] M1 — Versioned structured RSA knowledge reference (`rsa_reference.json` v1, 19 concepts; loader + `guidance_for`; 10 unit tests; human-readable `docs/rsa-adas-reference.md`). PDF/pages rendered from TEMP only; nothing copyrighted committed.
 - [x] M2 — Optional, versioned reference-assisted recognition mode (prompt m3; per-chunk RSA snippets ≤2000 chars, m2 fallback when unmapped; `reference_mode` param default off; usage rows record prompt+reference versions). Baseline m2 byte-identical; no RAG, no fine-tune. Recheck prompt unchanged (full-image stage only).
-- [ ] M3 — Real-world evaluation dataset infra (local-only photos; sanitized versioned manifests; 12–20 cases / 4+ configs target; report shortfall honestly).
-- [ ] M4 — Paired baseline-vs-reference eval harness (identical cases; per-stage metrics; machine + human reports; dev/holdout split; no tuning on holdout).
-- [ ] M5 — Live-eval gating (dry-run default; explicit auth + spend bounds required; versioned outputs; provider error handling).
-- [ ] M6 — Findings documentation (what helped, what confused, gaps, follow-ups). No auto-implemented improvements.
+- [x] M3 — Dataset infra done: `realworld-v1` manifest schema + validator (`backend/audits/realworld.py`), local-only `evals/realworld/photos/` (3-level gitignore), `manifest.example.json` template, 2 synthetic CI fixtures with pinned SHA-256 + committed dry-run vectors. **Shortfall: zero genuine photographs collected** (no rights-cleared, VIN-free, ground-truth-backed photos available); 12–20 cases / 4+ configs target unmet, reported honestly.
+- [x] M4 — Paired harness done: `score_case` (per-stage correctness + hallucinated/unsupported flags), `summarize` (per-mode stats, paired overlap, denominators, "not measured" states), `render_markdown` + versioned JSON reports, dev/holdout split field. Dry-run self-test on fixtures: paired_cases=2, unsupported 1/0 baseline/reference (deliberate overclaim vector detected).
+- [x] M5 — Live gating done: `realworld-live` refuses without `VCC_LIVE_SMOKE=1` + keys + worst-case bound (cases x modes x per-job `spend_cap_usd` = app default $2.00) under `--max-spend`; unknown cost aborts; SAM needs `VCC_LIVE_SAM=1` or stage reports not measured. Verified refusal (no flag; bound exceeded) at $0 spend. Never in CI.
+- [x] M6 — Findings in `docs/realworld-evaluation.md` (measured vs unmeasured labeled; live comparison unauthorized; follow-ups listed, none auto-implemented).
 
 ## Key decisions (see also docs/decisions/ ADRs where consequential)
 
@@ -26,7 +26,8 @@ Budget: $0 authorized. No live Baseten/Meta inference without James Lane's expli
 - `backend/audits/rsa_reference.json` + loader (M1; schema TBD in M1).
 - Prompt builder changes in `backend/audits/pipeline.py` + `backend/providers/baseten.py` (M2).
 - `evals/realworld/` manifests + harness extension in `evals/run.py` (M3/M4; live gate M5).
-- `docs/rsa-adas-reference.md` (M1 human-readable) + findings doc (M6).
+- `docs/rsa-adas-reference.md` (M1 human-readable) + `docs/realworld-evaluation.md` findings (M6).
+- `backend/audits/realworld.py` + `backend/tests/test_realworld.py` (M3/M4; 16 tests) + `fixtures/realworld-sample/` (2 PNGs, manifest, dry-run vectors).
 
 ## RSA concepts extracted (M1 working notes)
 
