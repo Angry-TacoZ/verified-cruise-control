@@ -3,3 +3,5 @@
 Django==6.1.2
 django-ninja==1.7.2
 Pillow==13.0.0
+httpx==0.28.1
+meta-sam-parser==0.1.0

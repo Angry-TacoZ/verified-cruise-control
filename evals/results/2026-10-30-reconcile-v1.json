@@ -1,0 +1,79 @@
+{
+  "eval": "reconcile",
+  "rule": "reconcile v1 (audits.pipeline.reconcile_claim)",
+  "cases_version": "v1",
+  "passed": 10,
+  "total": 10,
+  "cases": [
+    {
+      "id": "all-absent",
+      "expected": "contradicted",
+      "got": "contradicted",
+      "summary": "feature absent in all 2 photo(s); no source saw it",
+      "pass": true
+    },
+    {
+      "id": "sam-confirmed",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "Muse sighting confirmed by SAM localization",
+      "pass": true
+    },
+    {
+      "id": "recheck-confirmed",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "crop recheck confirmed the feature",
+      "pass": true
+    },
+    {
+      "id": "needs-other-view",
+      "expected": "not_visually_verifiable",
+      "got": "not_visually_verifiable",
+      "summary": "photos cannot resolve this; another evidence form is needed",
+      "pass": true
+    },
+    {
+      "id": "muse-sam-disagree",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "signals disagree or are too weak to decide",
+      "pass": true
+    },
+    {
+      "id": "lonely-present",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "signals disagree or are too weak to decide",
+      "pass": true
+    },
+    {
+      "id": "unclear-no-flag",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "signals disagree or are too weak to decide",
+      "pass": true
+    },
+    {
+      "id": "empty",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "signals disagree or are too weak to decide",
+      "pass": true
+    },
+    {
+      "id": "absent-plus-sam-absent",
+      "expected": "contradicted",
+      "got": "contradicted",
+      "summary": "feature absent in all 2 photo(s); no source saw it",
+      "pass": true
+    },
+    {
+      "id": "recheck-absent-mixed",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "signals disagree or are too weak to decide",
+      "pass": true
+    }
+  ]
+}

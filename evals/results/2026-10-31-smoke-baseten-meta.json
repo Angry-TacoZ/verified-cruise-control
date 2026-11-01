@@ -1,0 +1,35 @@
+{
+  "kind": "live-model smoke result (NOT a mock regression result)",
+  "date": "2026-10-31",
+  "branch": "feat/002-multimodal-audit",
+  "harness": "backend/tests/test_live_smoke.py",
+  "approval": "James Lane, 6-call bound, $0.50 hard cap",
+  "calls": {
+    "planned": 6,
+    "executed": 6,
+    "muse_observation": 3,
+    "sam_segmentation": 3
+  },
+  "outcome": "7 passed (6 live calls + spend guard)",
+  "spend_usd": {
+    "baseten": 0.01255125,
+    "meta": 0.0075,
+    "total": 0.02005125,
+    "cap": 0.5
+  },
+  "pricing_versions": {
+    "baseten": "baseten-2026-10-31",
+    "meta": "meta-sam-2026-09-20"
+  },
+  "slug_verdict": "meta-models/muse-spark-open-1026 resolves on Baseten; no ADR needed",
+  "corrections_found_by_smoke": [
+    "Baseten rejects non-string metadata values: photo_ids sent comma-joined",
+    "SAM rejects bare geometric tokens: box/point prompts use <Nf>-headed object-prompt block",
+    "Muse does not enforce response schemas: prompt spells out the exact JSON contract"
+  ],
+  "notes": [
+    "Synthetic fixtures only (fixtures/synthetic-listings/photos).",
+    "Pre-fix 400 responses did not bill; totals above are the final green run.",
+    "No credentials or raw provider payloads in this file."
+  ]
+}

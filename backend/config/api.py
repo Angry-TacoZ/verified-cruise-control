@@ -14,6 +14,7 @@ Two instances, two trust boundaries:
 
 from ninja import NinjaAPI
 
+import audits.api as audits_api
 import evidence.api as evidence_api
 import listings.api as listings_api
 import pairing.api as pairing_api
@@ -30,3 +31,4 @@ app_api.add_router("", pairing_api.setup_router)
 app_api.add_router("", pairing_api.pairing_router)
 app_api.add_router("", listings_api.app_router)
 app_api.add_router("", evidence_api.app_router)
+app_api.add_router("", audits_api.app_router)

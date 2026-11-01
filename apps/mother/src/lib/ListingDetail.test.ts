@@ -50,6 +50,9 @@ function stubFetch(failurePayload: unknown[]) {
       if (url === `/api/listings/${listing.id}/failed-photos`) {
         return new Response(JSON.stringify(failurePayload));
       }
+      if (url === `/api/listings/${listing.id}/audits`) {
+        return new Response(JSON.stringify([]));
+      }
       throw new Error(`unexpected ${url}`);
     }),
   );

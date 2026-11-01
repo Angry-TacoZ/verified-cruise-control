@@ -36,6 +36,26 @@ cost per listing · malformed-input reliability.
 
 ## Current status
 
-No scored runs yet — PR #1 performs zero model calls by design. PR #2 will
-add `cases/v1/` (fixed ADAS extraction + localization cases) and the first
-baseline + candidate result files with real Baseten/Meta usage.
+- `cases/v4/reconcile_goldens.json`: 13 hand-labeled reconcile cases
+  with explicit audit-vehicle blocks; run with
+  `python evals/run.py reconcile` (zero inference). Pinned in CI by
+  `backend/tests/test_eval_goldens.py` alongside v2. v4 supersedes v3
+  with eligibility gating (manufacturer-specific entries apply only to
+  documented make/model/year vehicles; borrowed entries, out-of-range
+  years, and missing identity yield `insufficient_evidence`) plus
+  per-control aggregation (nested controls support independently; SAM
+  aims at the claim-relevant item). v1/v2/v3 cases and results are
+  preserved as versioned history.
+- `cases/v3/reconcile_goldens.json`: 13 hand-labeled reconcile cases
+  over manufacturer-aware interpretation without vehicle identity;
+  superseded by v4, retained for history.
+- `cases/v2/reconcile_goldens.json`: 14 hand-labeled reconcile cases
+  under the pre-catalog conservative classifier (absence is never
+  contradiction); still pinned. v1 retained for history.
+- `cases/v1/muse_fixture_ground_truth.json`: unsupported-inference eval
+  over the 3 synthetic fixture photos (no honest output may claim a
+  feature is present). Run with `python evals/run.py muse-live`: one live
+  call, refuses unless `VCC_LIVE_SMOKE=1` plus keys, cost bound $0.25.
+  Live runs need explicit human approval and are never run in CI.
+- `results/2026-10-31-smoke-baseten-meta.json`: provider connectivity
+  smoke baseline (not a scored eval).

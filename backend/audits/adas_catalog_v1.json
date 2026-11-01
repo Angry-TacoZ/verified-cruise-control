@@ -1,0 +1,241 @@
+{
+  "catalog_version": "2026-11-01/v1",
+  "note": "Initial manufacturer-aware ADAS control catalog. Small by design: each entry is independently verifiable from the cited source. Certainty describes confidence in the REFERENCE's applicability (confirmed = official document directly verified; provisional = manual mirror or excerpt; definitional = true by control semantics). No manual illustrations are reproduced.",
+  "feature_ids": [
+    "adaptive_cruise_control",
+    "cruise_control",
+    "lane_departure_warning",
+    "lane_keeping_assist",
+    "lane_centering_assist",
+    "highway_assist",
+    "travel_assist",
+    "hands_free_driving"
+  ],
+  "entries": [
+    {
+      "id": "kia-forte-2021-scc-distance",
+      "scope": "manufacturer_specific",
+      "manufacturer": "Kia",
+      "models": ["Forte"],
+      "model_years": [2021, 2022],
+      "trim": null,
+      "official_feature_name": "Smart Cruise Control (SCC)",
+      "feature": "adaptive_cruise_control",
+      "control_category": "button",
+      "control_description": "Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance",
+      "symbol": "follow-distance / vehicle-gap indicator",
+      "locations": ["steering_wheel"],
+      "dedicated": true,
+      "strength": "diagnostic",
+      "match_keywords": ["distance", "follow", "following", "gap", "scc", "smart cruise"],
+      "distinctions": "Conventional cruise SET/RES/+/- buttons without a distance function are not ACC evidence. Distance adjustment is the ACC-specific function.",
+      "cannot_infer": [
+        "lane_keeping_assist",
+        "lane_centering_assist",
+        "highway_assist",
+        "hands_free_driving"
+      ],
+      "sources": [
+        {
+          "doc": "Kia Forte 2021 Features & Functions Guide, Smart Cruise Control (SCC), page 20",
+          "url": "https://www.manualslib.com/manual/3265020/Kia-Forte-2021.html?page=20",
+          "section": "Smart Cruise Control (SCC): To set the vehicle distance",
+          "accessed": "2026-11-01"
+        },
+        {
+          "doc": "Kia Feature Tips BD_M_SCC (2022), Smart Cruise Control quick tips",
+          "url": "https://owners.kia.us/content/tech-kia/pages/contact-kia.html/globalassets/pdfs/b22_feat_tips/bd_m_scc_kia_020922.pdf",
+          "section": "Smart Cruise Control",
+          "accessed": "2026-11-01"
+        }
+      ],
+      "certainty": "provisional",
+      "certainty_note": "Guide text verified via search excerpts quoting the document; direct page/PDF fetch was blocked in this environment. Official Kia documents; mirror URLs recorded."
+    },
+    {
+      "id": "kia-forte-2019-2024-lka-button",
+      "scope": "manufacturer_specific",
+      "manufacturer": "Kia",
+      "models": ["Forte"],
+      "model_years": [2019, 2020, 2021, 2022, 2023, 2024],
+      "trim": null,
+      "official_feature_name": "Lane Keeping Assist (LKA)",
+      "feature": "lane_keeping_assist",
+      "control_category": "button",
+      "control_description": "Dedicated LKA button on the instrument panel on the lower left-hand side of the driver; cluster lane indicator white (standby) / green (steering)",
+      "symbol": "lane-assistance button; cluster lane indicator with white/green state semantics",
+      "locations": ["left_dashboard", "instrument_cluster"],
+      "dedicated": true,
+      "strength": "diagnostic",
+      "match_keywords": ["lka", "lane keeping", "lane keep", "vehicle between"],
+      "distinctions": "NOT Lane Following Assist (LFA): LFA is Kia's separate lane-centering system with steering-wheel buttons. LKA button existence does not establish LFA, ACC, or hands-free capability.",
+      "cannot_infer": [
+        "lane_centering_assist",
+        "adaptive_cruise_control",
+        "highway_assist",
+        "hands_free_driving"
+      ],
+      "sources": [
+        {
+          "doc": "Kia Forte 2019-2024 (BD) Owner's Manual, Driving your vehicle / Lane Keeping Assist (LKA) system / LKA operation",
+          "url": "https://www.kiforte.com/kia_forte_lka_operation-272.html",
+          "section": "LKA operation: LKA button location; indicator states",
+          "accessed": "2026-11-01"
+        }
+      ],
+      "certainty": "provisional",
+      "certainty_note": "Manual text verified in full via a manual mirror; official Kia PDF not directly fetched. Location (instrument panel lower-left) and dedicated function are explicit in the text."
+    },
+    {
+      "id": "vw-jetta-gli-assist-stalk",
+      "scope": "manufacturer_specific",
+      "manufacturer": "Volkswagen",
+      "models": ["Jetta GLI", "Jetta"],
+      "model_years": [2021, 2022, 2023],
+      "trim": null,
+      "official_feature_name": "Driver assistance systems menu",
+      "feature": null,
+      "control_category": "stalk button",
+      "control_description": "Driver-assistance button on the end face of the turn-signal lever (E617); opens/configures assistance systems alongside the infotainment Assistance systems menu",
+      "symbol": "assistance-system button on stalk end face",
+      "locations": ["stalk", "infotainment"],
+      "dedicated": false,
+      "strength": "non_diagnostic",
+      "match_keywords": ["stalk", "assistance menu", "assist syst", "e617", "lever"],
+      "distinctions": "A menu opener: accessing assistance settings does not prove any particular system (lane keeping, centering, ACC) is installed or enabled. Do not infer per-system capability from this control alone.",
+      "cannot_infer": [
+        "lane_departure_warning",
+        "lane_keeping_assist",
+        "lane_centering_assist",
+        "adaptive_cruise_control",
+        "highway_assist",
+        "hands_free_driving"
+      ],
+      "sources": [
+        {
+          "doc": "Volkswagen Service Training: lane departure warning operation (E617 driver assistance systems button on turn signal lever face)",
+          "url": "https://www.ifixit.com/Device/Volkswagen_Service_Training",
+          "section": "Lane departure warning: switching on/off via E617",
+          "accessed": "2026-11-01"
+        },
+        {
+          "doc": "Volkswagen Jetta 2021 Quick Start Guide (official vw.com PDF): Assist Syst. vehicle settings menu",
+          "url": "https://www.vw.com/content/dam/vwcom/my22/pdf/2021_Jetta_QSG.pdf",
+          "section": "Vehicle settings: Assist Syst.",
+          "accessed": "2026-11-01"
+        }
+      ],
+      "certainty": "provisional",
+      "certainty_note": "Verified via document excerpts; arrangement varies by model year and equipment, so this entry is intentionally non-diagnostic."
+    },
+    {
+      "id": "generic-cruise-set-res",
+      "scope": "general",
+      "manufacturer": null,
+      "models": [],
+      "model_years": [],
+      "trim": null,
+      "official_feature_name": "Cruise control (conventional)",
+      "feature": "cruise_control",
+      "control_category": "button",
+      "control_description": "Generic ON/SET/RES/+/- cruise buttons with no follow-distance function",
+      "symbol": "cruise on/set/resume markings",
+      "locations": ["steering_wheel"],
+      "dedicated": false,
+      "strength": "non_diagnostic",
+      "match_keywords": ["cruise", "set", "resume", "res", "on/off", "cancel"],
+      "distinctions": "Evidence of conventional cruise only. Without a distance/follow function these controls say nothing about adaptive capability.",
+      "cannot_infer": [
+        "adaptive_cruise_control",
+        "lane_keeping_assist",
+        "lane_centering_assist",
+        "highway_assist",
+        "hands_free_driving"
+      ],
+      "sources": [
+        {
+          "doc": "Definitional: a control exposing only set/resume/on-off with no distance function cannot be ACC-specific",
+          "url": "",
+          "section": "",
+          "accessed": "2026-11-01"
+        }
+      ],
+      "certainty": "definitional",
+      "certainty_note": "True by control semantics, not by manual lookup."
+    },
+    {
+      "id": "kia-lfa-steering-buttons",
+      "scope": "manufacturer_specific",
+      "manufacturer": "Kia",
+      "models": ["K5", "Seltos", "Forte"],
+      "model_years": [2021, 2022, 2023, 2024],
+      "trim": null,
+      "official_feature_name": "Lane Following Assist (LFA)",
+      "feature": "lane_centering_assist",
+      "control_category": "button",
+      "control_description": "Lane Following Assist controls on the steering wheel (right side on K5); maintains the vehicle between lane markings",
+      "symbol": "lane-following / steering-assist wheel control",
+      "locations": ["steering_wheel", "instrument_cluster"],
+      "dedicated": true,
+      "strength": "supportive",
+      "match_keywords": ["lane following", "lfa", "centering", "lane follow", "steering assist"],
+      "distinctions": "Kia LFA is the centering-tier system, distinct from LKA (dash button). Supportive rather than diagnostic here because wheel-button identification alone is weaker than the LKA dash-button case.",
+      "cannot_infer": [
+        "hands_free_driving",
+        "highway_assist",
+        "adaptive_cruise_control"
+      ],
+      "sources": [
+        {
+          "doc": "Kia K5 2024 Quick Start: LFA buttons on right side of steering wheel",
+          "url": "https://www.manualslib.com/manual/3441346/Kia-K5-2024.html",
+          "section": "Lane Following Assist (LFA)",
+          "accessed": "2026-11-01"
+        },
+        {
+          "doc": "Kia Seltos Feature Tips: LFA maintains the vehicle between the lanes",
+          "url": "https://owners.kia.us/content/tech-kia/pages/seltos.html",
+          "section": "Lane Following Assist (LFA)",
+          "accessed": "2026-11-01"
+        }
+      ],
+      "certainty": "provisional",
+      "certainty_note": "Verified via document excerpts; wheel-button layout varies by model."
+    },
+    {
+      "id": "vw-lane-assist-naming",
+      "scope": "manufacturer_specific",
+      "manufacturer": "Volkswagen",
+      "models": ["Jetta GLI", "Jetta", "Golf"],
+      "model_years": [2021, 2022, 2023, 2024, 2025, 2026],
+      "trim": null,
+      "official_feature_name": "Lane Assist (Lane Keeping System)",
+      "feature": "lane_keeping_assist",
+      "control_category": "naming",
+      "control_description": "Volkswagen's 'Lane Assist' naming denotes corrective-steering lane keeping (active above ~35 mph), not lane centering or Travel Assist",
+      "symbol": "",
+      "locations": [],
+      "dedicated": false,
+      "strength": "supportive",
+      "match_keywords": ["lane assist"],
+      "distinctions": "VW Lane Assist is keeping-tier. Travel Assist (centering + ACC combination) and hands-free require their own evidence.",
+      "cannot_infer": [
+        "lane_centering_assist",
+        "highway_assist",
+        "travel_assist",
+        "hands_free_driving",
+        "adaptive_cruise_control"
+      ],
+      "sources": [
+        {
+          "doc": "Volkswagen Jetta GLI 2021 Owner's Manual: Lane Assist corrective steering above 35 mph",
+          "url": "https://www.carmanuals2.com/volkswagen/jetta-gli-2021-owner-s-manual-34054",
+          "section": "Lane Assist: how it works",
+          "accessed": "2026-11-01"
+        }
+      ],
+      "certainty": "provisional",
+      "certainty_note": "Naming/interpretation entry (no physical control). Verified via manual excerpts."
+    }
+  ]
+}

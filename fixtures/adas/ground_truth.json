@@ -1,0 +1,45 @@
+{
+  "_note": "Ground truth for the synthetic ADAS schematics in this directory. These drawings are stick-figure-level schematics: they exercise the pipeline's SHAPE handling (bytes, hashing, batching, mapping of scripted observations), NOT model recognition quality. No test scores a model against these images.",
+  "vehicle": {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line"},
+  "claims": ["adaptive cruise control", "lane keeping assist"],
+  "photos": [
+    {
+      "file": "steering-acc-cluster.png",
+      "observations": {
+        "c1": {
+          "visible_object": "following-distance button",
+          "control_symbol": "DISTANCE",
+          "control_type": "button",
+          "location": "steering_wheel",
+          "dedicated": true,
+          "expected_entry": "kia-forte-2021-scc-distance",
+          "expected_strength": "diagnostic"
+        },
+        "c2": null
+      }
+    },
+    {
+      "file": "dash-lka-button.png",
+      "observations": {
+        "c1": null,
+        "c2": {
+          "visible_object": "lane keeping assist button",
+          "control_symbol": "vehicle between lane lines",
+          "control_type": "button",
+          "location": "left_dashboard",
+          "dedicated": true,
+          "manufacturer_context": "Kia Forte",
+          "expected_entry": "kia-forte-2019-2024-lka-button",
+          "expected_strength": "diagnostic"
+        }
+      }
+    },
+    {
+      "file": "stalk-assist-menu.png",
+      "observations": {
+        "c1": null,
+        "c2": null
+      }
+    }
+  ]
+}

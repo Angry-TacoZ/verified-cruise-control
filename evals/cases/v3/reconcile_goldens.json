@@ -1,0 +1,252 @@
+{
+  "version": 3,
+  "rule": "v3-manufacturer-aware",
+  "catalog_version": "2026-11-01/v1",
+  "notes": "Rule v3 pins Layer D behavior: PRESENT observations carrying control identification are evaluated through the manufacturer-aware catalog (diagnostic/supportive mappings support even without SAM; unmapped or non-supportive controls explain why they fall short). Rows without control identification keep the legacy v2 confirm rules (see also the legacy-confirm case below and the untouched v2 file).",
+  "changes_from_v2": "v2 cases had no control identification, so SAM confirmation alone could support a claim. v3 requires a catalog mapping for identified controls: generic cruise buttons plus SAM localization no longer support ACC, while a dedicated following-distance button supports ACC even when SAM fails.",
+  "cases": [
+    {
+      "id": "acc-dedicated-button-sam-confirmed",
+      "claim": "adaptive cruise control",
+      "expected": "visually_supported",
+      "why": "Dedicated documented ACC control, SAM-confirmed.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "following-distance button",
+            "control_symbol": "vehicle with distance bars",
+            "control_type": "button",
+            "location": "steering_wheel",
+            "dedicated": true
+          }
+        },
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "acc-dedicated-button-sam-absent",
+      "claim": "adaptive cruise control",
+      "expected": "visually_supported",
+      "why": "Diagnostic catalog mapping stands without SAM; a localization miss must not erase strong visual evidence.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "following-distance button",
+            "control_symbol": "vehicle with distance bars",
+            "control_type": "button",
+            "location": "steering_wheel",
+            "dedicated": true
+          }
+        },
+        {"source": "sam", "verdict": "absent", "photo": 0}
+      ]
+    },
+    {
+      "id": "acc-generic-cruise-sam-confirmed",
+      "claim": "adaptive cruise control",
+      "expected": "insufficient_evidence",
+      "why": "SAM confirms the buttons exist, but generic cruise buttons are non-diagnostic for ACC.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "cruise set and resume buttons",
+            "control_type": "button",
+            "location": "steering_wheel"
+          }
+        },
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "lka-forte-dash-supported",
+      "claim": "lane keeping assist",
+      "expected": "visually_supported",
+      "why": "Documented dedicated LKA control at its documented non-wheel location.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "lane keeping assist button",
+            "control_symbol": "vehicle between lane lines",
+            "control_type": "button",
+            "location": "left_dashboard",
+            "dedicated": true,
+            "manufacturer_context": "Kia Forte"
+          }
+        }
+      ]
+    },
+    {
+      "id": "lka-evidence-centering-claim",
+      "claim": "lane centering",
+      "expected": "insufficient_evidence",
+      "why": "Lane keeping evidence never promotes to lane centering.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "lane keeping assist button",
+            "control_symbol": "vehicle between lane lines",
+            "control_type": "button",
+            "location": "left_dashboard",
+            "dedicated": true
+          }
+        },
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "gli-stalk-menu-centering",
+      "claim": "lane centering",
+      "expected": "insufficient_evidence",
+      "why": "A documented assistance menu opener establishes no specific system, even localized.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "driver assistance button",
+            "control_type": "stalk button",
+            "location": "stalk",
+            "manufacturer_context": "VW Jetta GLI"
+          }
+        },
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "ldw-claim-lka-evidence",
+      "claim": "lane departure warning",
+      "expected": "insufficient_evidence",
+      "why": "Keeping-tier evidence does not establish the warning-tier claim either; tiers stay distinct both directions.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "lane keeping assist button",
+            "control_symbol": "vehicle between lane lines",
+            "location": "left_dashboard",
+            "dedicated": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "highway-claim-acc-evidence",
+      "claim": "highway driving assist",
+      "expected": "insufficient_evidence",
+      "why": "ACC alone never establishes highway assistance.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "following-distance button",
+            "location": "steering_wheel",
+            "dedicated": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "lfa-centering-supported",
+      "claim": "lane following assist",
+      "expected": "visually_supported",
+      "why": "Supportive catalog mapping for the centering tier suffices.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "lane following assist button",
+            "control_type": "button",
+            "location": "steering_wheel",
+            "dedicated": true,
+            "manufacturer_context": "Kia K5"
+          }
+        }
+      ]
+    },
+    {
+      "id": "handsfree-claim-centering-evidence",
+      "claim": "hands-free driving",
+      "expected": "insufficient_evidence",
+      "why": "Centering-tier evidence never establishes hands-free capability.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "lane following assist button",
+            "control_type": "button",
+            "location": "steering_wheel",
+            "dedicated": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "unmapped-control-sam-confirmed",
+      "claim": "adaptive cruise control",
+      "expected": "insufficient_evidence",
+      "why": "An identified-but-uncataloged object plus SAM confirmation is still a documented unknown, not support.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "present",
+          "photo": 0,
+          "extra": {
+            "visible_object": "chrome door handle",
+            "location": "center_console"
+          }
+        },
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "legacy-confirm-unchanged",
+      "claim": "adaptive cruise control",
+      "expected": "visually_supported",
+      "why": "Rows without control identification keep the v2 SAM-confirm rule.",
+      "observations": [
+        {"source": "muse", "verdict": "present", "photo": 0},
+        {"source": "sam", "verdict": "present", "photo": 0}
+      ]
+    },
+    {
+      "id": "ambiguous-symbol-unreadable",
+      "claim": "adaptive cruise control",
+      "expected": "insufficient_evidence",
+      "why": "An unreadable symbol is UNCLEAR, never support.",
+      "observations": [
+        {
+          "source": "muse",
+          "verdict": "unclear",
+          "photo": 0,
+          "extra": {
+            "visible_object": "partially obscured button, symbol unreadable"
+          }
+        }
+      ]
+    }
+  ]
+}

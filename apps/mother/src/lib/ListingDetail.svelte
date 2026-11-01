@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ApiError, backend, type Listing, type Photo, type PhotoFailure } from './api';
+  import AuditPanel from './AuditPanel.svelte';
 
   let { id }: { id: string } = $props();
 
@@ -171,5 +172,7 @@
         {/each}
       </ul>
     {/if}
+
+    <AuditPanel listingId={listing.id} />
   {/if}
 </section>
