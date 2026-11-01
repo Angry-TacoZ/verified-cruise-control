@@ -1231,29 +1231,25 @@ def test_malformed_ledger_fails_closed(tmp_path, monkeypatch):
 
 def test_concurrent_start_single_winner(tmp_path):
     # Test F: two simultaneous attempts for the same dataset cannot both
-    # pass the preflight coordination gate.
+    # pass the preflight coordination gate. The lock is an OS-held file
+    # descriptor with no TTL, so there is nothing to expire.
     manifest = _harness_manifest(tmp_path)
     fingerprint = dataset_fingerprint(manifest)
     lock = ledger_lock_path(tmp_path, fingerprint)
-    acquire_ledger_lock(lock, "runA")
+    held = acquire_ledger_lock(lock, "runA")
     import pytest as _pytest
 
     with _pytest.raises(BudgetRefused):
         acquire_ledger_lock(lock, "runB")
-    release_ledger_lock(lock, "runA")
-    # A stale lock from a crashed holder does not disable evaluations.
-    import json
-    import time
-
-    lock.write_text(
-        json.dumps({"run_id": "runCRASH", "pid": 1, "created": time.time() - 3600}),
-        encoding="utf-8",
-    )
-    acquire_ledger_lock(lock, "runC", ttl_seconds=600)
-    release_ledger_lock(lock, "runC")
-    # A lock held by someone else is left alone on release.
-    acquire_ledger_lock(lock, "runD")
-    release_ledger_lock(lock, "not-runD")
+    # A foreign release request never releases someone else's lock.
+    release_ledger_lock(lock, "not-runA")
+    with _pytest.raises(BudgetRefused):
+        acquire_ledger_lock(lock, "runC")
+    held.release()
+    # After a clean release the next run proceeds. The lock file itself
+    # is intentionally left on disk (diagnostics only, never unlinked).
+    follow = acquire_ledger_lock(lock, "runD")
+    follow.release()
     assert lock.exists()
 
 
@@ -1264,14 +1260,152 @@ def test_concurrent_run_refuses_while_locked(tmp_path, monkeypatch):
     fingerprint = dataset_fingerprint(manifest)
     results = tmp_path / "results"
     results.mkdir()
-    acquire_ledger_lock(ledger_lock_path(results, fingerprint), "runOTHER")
+    other = acquire_ledger_lock(ledger_lock_path(results, fingerprint), "runOTHER")
     runner = _load_eval_runner()
     fake_muse = _HarnessMuseAdapter()
     fake_sam = _HarnessSamAdapter()
     monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
     import pytest as _pytest
 
-    with _pytest.raises(SystemExit, match="another evaluation|lock|outstanding|holds"):
+    try:
+        with _pytest.raises(
+            SystemExit, match="another evaluation|lock|outstanding|holds"
+        ):
+            runner.run_realworld_live(
+                manifest,
+                tmp_path,
+                10.0,
+                True,
+                muse_adapter=fake_muse,
+                sam_adapter=fake_sam,
+                results_dir=results,
+            )
+    finally:
+        other.release()
+    assert fake_muse.calls == []
+    assert fake_sam.calls == []
+
+
+def test_stale_lock_content_never_blocks(tmp_path):
+    # F1: lock-file content (timestamps, run ids) is diagnostics only.
+    # Stale, ancient, or garbage content with no live holder never
+    # blocks the next run; ownership is proved by the OS lock alone.
+    import json as _json
+    import time as _time
+
+    manifest = _harness_manifest(tmp_path)
+    lock = ledger_lock_path(tmp_path, dataset_fingerprint(manifest))
+    lock.write_text(
+        _json.dumps({"run_id": "runCRASH", "pid": 1, "created": _time.time() - 7200}),
+        encoding="utf-8",
+    )
+    first = acquire_ledger_lock(lock, "runNEXT")
+    first.release()
+    lock.write_text("{ not valid json", encoding="utf-8")
+    second = acquire_ledger_lock(lock, "runAFTER")
+    second.release()
+
+
+def test_crashed_process_releases_dataset_lock(tmp_path):
+    # F1: the lock is OS-owned, so duration never matters. A second
+    # process cannot take it while the holder lives (however long that
+    # is — there is no TTL to expire), and the OS releases it when the
+    # holder dies, so the next run proceeds after a crash.
+    import subprocess
+    import sys as _sys
+
+    import pytest as _pytest
+
+    manifest = _harness_manifest(tmp_path)
+    lock = ledger_lock_path(tmp_path, dataset_fingerprint(manifest))
+    backend = Path(__file__).resolve().parents[1]
+    child = (
+        "import os, sys, time; "
+        "sys.path.insert(0, sys.argv[1]); "
+        "os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings'); "
+        "import django; django.setup(); "
+        "from audits.realworld import acquire_ledger_lock; "
+        "lock = acquire_ledger_lock(sys.argv[2], 'runCHILD'); "
+        "print('ready', flush=True); "
+        "time.sleep(60)"
+    )
+    proc = subprocess.Popen(
+        [_sys.executable, "-c", child, str(backend), str(lock)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    try:
+        line = proc.stdout.readline().strip()
+        if line != "ready":
+            proc.wait(timeout=60)
+            _pytest.fail(f"lock-holder child failed to start: {line!r}")
+        # Holder is alive: a concurrent start refuses, whenever it tries.
+        with _pytest.raises(BudgetRefused):
+            acquire_ledger_lock(lock, "runPARENT")
+        # Simulate a crash: hard-kill the holder without any cleanup.
+        proc.kill()
+        proc.wait(timeout=60)
+        # The OS releases the lock on process death: recovery proceeds.
+        # Handle teardown can lag process exit slightly on Windows, so
+        # poll briefly instead of assuming instant release.
+        import time as _time
+
+        deadline = _time.time() + 30
+        while True:
+            try:
+                follow = acquire_ledger_lock(lock, "runPARENT")
+                break
+            except BudgetRefused:
+                if _time.time() >= deadline:
+                    raise
+                _time.sleep(0.5)
+        follow.release()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=60)
+
+
+def test_custom_filename_ledger_blocks_default_restart(tmp_path, monkeypatch):
+    # F2: discovery is content-based, not filename-based. A same-dataset
+    # ledger with outstanding reservations blocks a default restart even
+    # under a custom filename, before any provider call. Well-formed
+    # non-ledger JSONL and empty files are ignored.
+    manifest = _harness_manifest(tmp_path)
+    fingerprint = dataset_fingerprint(manifest)
+    ledgers = tmp_path / "results"
+    ledgers.mkdir()
+    (ledgers / "notes.jsonl").write_text('{"note": "not a ledger"}\n', encoding="utf-8")
+    (ledgers / "empty.jsonl").write_text("\n", encoding="utf-8")
+    custom = ledgers / "friday-run-notes.jsonl"
+    handle = LedgerFile(custom)
+    budget = EvalBudget(
+        authorized=True,
+        max_spend_usd="5.00",
+        max_attempts_total=12,
+        reserve_usd_per_call="2.00",
+        ledger_file=handle,
+        dataset_id=fingerprint,
+    )
+    budget.reserve(
+        "Muse case-a baseline",
+        max_attempts=3,
+        provider="fake-muse",
+        case_id="case-a",
+        mode="baseline",
+    )
+    handle.close()
+    hits = scan_ledger_dir(ledgers, fingerprint)
+    assert len(hits) == 1
+    assert hits[0][0].name == "friday-run-notes.jsonl"
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit, match="outstanding"):
         runner.run_realworld_live(
             manifest,
             tmp_path,
@@ -1279,10 +1413,29 @@ def test_concurrent_run_refuses_while_locked(tmp_path, monkeypatch):
             True,
             muse_adapter=fake_muse,
             sam_adapter=fake_sam,
-            results_dir=results,
+            results_dir=tmp_path / "results",
         )
     assert fake_muse.calls == []
     assert fake_sam.calls == []
+
+
+def test_custom_filename_torn_ledger_fails_closed(tmp_path):
+    # F2: a custom-named file carrying ledger identity but torn content
+    # fails closed instead of being skipped as "unrelated".
+    manifest = _harness_manifest(tmp_path)
+    fingerprint = dataset_fingerprint(manifest)
+    ledgers = tmp_path / "results"
+    ledgers.mkdir()
+    import json as _json
+
+    import pytest as _pytest
+
+    first = {"event": "reserved", "token": "tok1", "run_id": "runX"}
+    (ledgers / "renamed.jsonl").write_text(
+        _json.dumps(first) + "\n{ torn content\n", encoding="utf-8"
+    )
+    with _pytest.raises(BudgetRefused):
+        scan_ledger_dir(ledgers, fingerprint)
 
 
 def test_accounting_history_immutable(tmp_path, monkeypatch):

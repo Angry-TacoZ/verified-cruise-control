@@ -88,4 +88,6 @@ evals/realworld/photos/*
 evals/realworld/manifest.*.json
 !evals/realworld/manifest.example.json
 evals/results/*-realworld-*.json
-evals/results/*-realworld-live.ledger.jsonl
+# Live spend ledgers (any filename: custom renames stay local) + lock files
+evals/results/*.jsonl
+evals/results/.realworld-live.*.lock

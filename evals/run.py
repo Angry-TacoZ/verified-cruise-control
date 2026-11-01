@@ -66,7 +66,6 @@ from audits.realworld import (
     ledger_lock_path,
     muse_verdict,
     refuse_if_blocked,
-    release_ledger_lock,
     render_markdown,
     scan_ledger_dir,
     score_case,
@@ -310,13 +309,16 @@ def run_realworld_live(
     out_dir = Path(results_dir) if results_dir is not None else RESULTS
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Cross-run billing safety: one dataset-wide coordination lock (atomic
-    # claim, TTL takeover for crashed holders, no new infrastructure),
-    # then an automatic scan of the ledger directory for unresolved
-    # reservations from previous runs of THIS dataset — including legacy
-    # files without dataset identity, treated conservatively. Any hit
-    # refuses before adapters are even constructed. An explicit --ledger
-    # path is additionally checked in full.
+    # Cross-run billing safety: one dataset-wide coordination lock (an
+    # OS-backed exclusive lock held open for the whole run — no TTL, so a
+    # live evaluation can never lose it by running long; the OS releases
+    # it if the holder process dies), then an automatic content-based
+    # scan of the ledger directory for unresolved reservations from
+    # previous runs of THIS dataset — including legacy files without
+    # dataset identity, treated conservatively, and ledgers saved under
+    # custom filenames. Any hit refuses before adapters are even
+    # constructed. An explicit --ledger path is additionally checked
+    # in full.
     dataset_id = dataset_fingerprint(manifest_path)
     per_call = str(settings.AUDIT_SPEND_CAP_USD)
     run_id = uuid.uuid4().hex[:12]
@@ -330,7 +332,7 @@ def run_realworld_live(
         _refuse(str(exc))
     lock_path = ledger_lock_path(out_dir, dataset_id)
     try:
-        acquire_ledger_lock(lock_path, run_id)
+        dataset_lock = acquire_ledger_lock(lock_path, run_id)
     except BudgetRefused as exc:
         _refuse(str(exc))
     if ledger_path is None:
@@ -341,7 +343,7 @@ def run_realworld_live(
             try:
                 assert_ledger_clear(ledger_path)
             except BudgetRefused as exc:
-                release_ledger_lock(lock_path, run_id)
+                dataset_lock.release()
                 _refuse(str(exc))
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     ledger_file = LedgerFile(ledger_path)
@@ -530,9 +532,9 @@ def run_realworld_live(
         # Every event was already fsync'd at reservation/settlement time;
         # closing only flushes the file handle itself. The dataset lock is
         # always released so a finished run never blocks the next one; a
-        # crashed holder's stale lock is taken over via TTL on next start.
+        # crashed holder's lock is released by the OS on process death.
         ledger_file.close()
-        release_ledger_lock(lock_path, run_id)
+        dataset_lock.release()
     summary = summarize(manifest_id, rows)
     return {
         "eval": "realworld-live",

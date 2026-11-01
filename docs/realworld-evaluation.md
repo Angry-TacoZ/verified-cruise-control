@@ -157,3 +157,14 @@ estimate.
    eligibility gates (F2), split selection/localization metrics (F3),
    and strict control matching (F4). All covered by deterministic
    offline regression tests; still zero paid inference.
+
+## 9. Cross-run billing safety (pass 3 + final coordination)
+
+Default restarts scan the results directory for same-dataset ledgers
+with outstanding reservations (content-identified, including legacy
+records and custom filenames) and refuse before any provider call;
+per-dataset concurrency uses an OS-backed lock with no expiry while
+the holder lives (OS release on process death). Recovery is manual:
+reconcile billing externally, then archive or remove the ledger —
+never auto-replay or rewrite. Deterministic offline regression tests;
+still zero paid inference.

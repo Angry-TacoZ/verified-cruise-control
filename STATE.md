@@ -47,7 +47,14 @@ Draft PR open early; prompt/reference versioned; baseline reproducible; ground t
 
 No paid inference; no RSA/catalog/prompt/ground-truth changes; leave PR #3 open unmerged.
 
-- [ ] Cross-run billing safety (MEDIUM) — default command mints a fresh ledger per run and only checks `--ledger` files, so restarting an interrupted evaluation without `--ledger` bypasses unresolved reservations. Fix without redesigning the budget system: content-based dataset fingerprint in every record; default runs auto-scan the ledger dir for same-dataset (plus legacy/ambiguous) outstanding reservations and refuse before any provider request; cross-process lock file with TTL takeover (no new infra); explicit `--ledger` behavior preserved; documented manual recovery (reconcile, archive, never auto-replay/rewrite). Tests A–G with fakes + tmp dirs, zero network.
+- [x] Cross-run billing safety (MEDIUM) — default command mints a fresh ledger per run and only checks `--ledger` files, so restarting an interrupted evaluation without `--ledger` bypasses unresolved reservations. Fix without redesigning the budget system: content-based dataset fingerprint in every record; default runs auto-scan the ledger dir for same-dataset (plus legacy/ambiguous) outstanding reservations and refuse before any provider request; atomic per-dataset lock file; explicit `--ledger` behavior preserved; documented manual recovery (reconcile, archive, never auto-replay/rewrite). Tests A–G with fakes + tmp dirs, zero network.
+
+## Final billing coordination (2 corrections on `ac6a117`)
+
+No paid inference; no RSA/catalog/recognition/eval-feature changes; leave PR #3 open unmerged.
+
+- [x] F1 (P1) — replaced the 600s-TTL lock with OS-backed `DatasetLock`: exclusive lock on an fd held open for the whole run (msvcrt on Windows, flock on POSIX), so a live run can never lose ownership by duration; OS releases on process death for crash recovery; in-process double-acquire refuses; lock file left on disk (diagnostics only). Windows learning: handle teardown can lag process exit slightly, so the crash-recovery test polls briefly after kill. Tests: stale/garbage content never blocks, cross-process hold-then-kill-then-recover.
+- [x] F2 (P2) — ledger discovery is now content-based: convention-named files plus any other `*.jsonl` whose first record carries eval-ledger identity (event/token/run_id), so custom filenames cannot evade the scan; well-formed non-ledger JSON and empty files ignored; unreadable/unparseable candidates fail closed; `archive/` excluded by non-recursive scan; ledgers moved outside the results dir are no longer discovered (documented). Tests: custom-filename same-dataset block before any provider call, torn custom ledger fails closed.
 
 ## Remediation pass 2 (review of `24610e0`, 2 findings)
 

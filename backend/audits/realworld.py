@@ -631,9 +631,17 @@ def assert_ledger_clear(path, dataset_id=None) -> None:
     """Fail closed when an earlier run left outstanding reservations.
 
     Never auto-replays: the operator reconciles billing externally, then
-    archives or removes the file before rerunning.
+    archives or removes the file before rerunning. An unreadable or
+    malformed file also fails closed instead of leaking a traceback.
     """
-    outstanding = find_outstanding(read_ledger(path), dataset_id)
+    try:
+        records = read_ledger(path)
+    except (OSError, ValueError) as exc:
+        raise BudgetRefused(
+            f"ledger {path} is unreadable or malformed ({exc}): refusing "
+            "evaluation until it is inspected, reconciled, or archived."
+        )
+    outstanding = find_outstanding(records, dataset_id)
     if outstanding:
         raise BudgetRefused(
             f"ledger {path} has {_describe_blockers(outstanding)}: reconcile "
@@ -686,7 +694,35 @@ def dataset_fingerprint(manifest) -> str:
 
 
 LEDGER_GLOB = "*-realworld-live-*.jsonl"
-LOCK_TTL_SECONDS = 600
+
+
+def _lock_fd(fd: int) -> None:
+    """Take a non-blocking exclusive OS lock on an open file descriptor.
+
+    The OS releases the lock when the descriptor is closed or the process
+    dies, on both Windows (LockFileEx region semantics via ``msvcrt``)
+    and POSIX (``flock``). No timer is involved, so a live long-running
+    evaluation can never lose its lock merely by exceeding a duration.
+    """
+    if os.name == "nt":
+        import msvcrt as _msvcrt
+
+        _msvcrt.locking(fd, _msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl as _fcntl
+
+        _fcntl.flock(fd, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+
+
+def _unlock_fd(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt as _msvcrt
+
+        _msvcrt.locking(fd, _msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl as _fcntl
+
+        _fcntl.flock(fd, _fcntl.LOCK_UN)
 
 
 def ledger_lock_path(directory, dataset_id: str):
@@ -694,66 +730,235 @@ def ledger_lock_path(directory, dataset_id: str):
     return Path(directory) / f".realworld-live.{dataset_id[:16]}.lock"
 
 
-def acquire_ledger_lock(
-    path, run_id: str, *, ttl_seconds: int = LOCK_TTL_SECONDS
-) -> dict:
+# Paths this process currently holds a dataset lock for. A second
+# in-process acquisition of the same dataset refuses instead of silently
+# succeeding, so one process can never hold the same dataset lock twice
+# (which would mask a real concurrency bug in the caller).
+_HELD_DATASET_LOCKS: dict = {}
+
+
+class DatasetLock:
+    """Exclusive per-dataset coordination lock with OS-backed ownership.
+
+    The lock is an open file descriptor held for the whole run: liveness
+    is proved by the OS lock itself, not by a timestamp, so there is no
+    TTL that can expire while an evaluation is still running. When the
+    holder process terminates — cleanly or by crash — the OS releases the
+    lock and the next run can proceed (it still fails closed on any
+    unresolved ledger reservations). A lock that cannot be taken refuses
+    with :class:`BudgetRefused`; a lock file whose payload cannot be read
+    while another process holds it also refuses, never guessing.
+
+    Use as a context manager or via :func:`acquire_ledger_lock`; the lock
+    file itself is intentionally left on disk after release (it carries
+    only diagnostics) so release never races a concurrent acquirer.
+    """
+
+    def __init__(self, path, run_id: str) -> None:
+        import json as _json
+        import time as _time
+
+        key = str(path)
+        if key in _HELD_DATASET_LOCKS:
+            raise BudgetRefused(
+                f"this process already holds the dataset lock {path}: "
+                "refusing a second acquisition for the same dataset."
+            )
+        payload = {"run_id": run_id, "pid": os.getpid(), "created": _time.time()}
+        line = _json.dumps(payload, sort_keys=True).encode("utf-8")
+        fd = os.open(path, os.O_RDWR | os.O_CREAT)
+        try:
+            with os.fdopen(os.dup(fd), "r+b") as handle:
+                size = handle.seek(0, os.SEEK_END)
+                if size == 0:
+                    # Guarantee a lockable byte on platforms that cannot
+                    # lock an empty region; placeholder content is never
+                    # trusted (ownership is proved by the OS lock alone).
+                    handle.write(b" ")
+                    handle.flush()
+            # msvcrt locks a region at the current offset (shared with the
+            # dup above), so rewind first; flock ignores the offset.
+            os.lseek(fd, 0, os.SEEK_SET)
+            _lock_fd(fd)
+        except OSError:
+            # "Already locked" and any other OS error fail closed here:
+            # ownership is uncertain, so the run is refused.
+            os.close(fd)
+            raise BudgetRefused(
+                f"another evaluation holds the dataset lock {path}: refusing "
+                "concurrent paid runs for this dataset."
+            )
+        try:
+            handle = os.fdopen(fd, "r+b")
+        except OSError:  # pragma: no cover - descriptor vanished mid-acquire
+            raise BudgetRefused(
+                f"dataset lock {path} cannot be tracked safely: refusing "
+                "evaluation while ownership is uncertain."
+            )
+        try:
+            handle.seek(0)
+            handle.truncate()
+            handle.write(line + b"\n")
+            handle.flush()
+        except OSError:
+            try:
+                _unlock_fd(fd)
+            except OSError:
+                pass
+            handle.close()
+            raise BudgetRefused(
+                f"dataset lock {path} cannot record its holder: refusing "
+                "evaluation while ownership is uncertain."
+            )
+        self._path = Path(path)
+        self._run_id = run_id
+        self._handle = handle
+        self._released = False
+        _HELD_DATASET_LOCKS[key] = self
+
+    @property
+    def path(self):
+        return self._path
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    def release(self) -> None:
+        """Release our lock; a foreign holder's lock is never touched."""
+        if self._released:
+            return
+        self._released = True
+        try:
+            _unlock_fd(self._handle.fileno())
+        except OSError:
+            pass
+        try:
+            self._handle.close()
+        except OSError:
+            pass
+        _HELD_DATASET_LOCKS.pop(str(self._path), None)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.release()
+
+
+def acquire_ledger_lock(path, run_id: str) -> DatasetLock:
     """Claim the dataset coordination lock, or refuse.
 
-    Creation is atomic, so two simultaneous contenders cannot both win.
-    A lock older than ``ttl_seconds`` is treated as a crashed holder and
-    taken over; anything else held refuses. A malformed lock file fails
-    closed. Returns the lock payload.
+    Ownership is an OS-backed exclusive file lock held open for the
+    whole run — it cannot expire while the holder is alive, and the OS
+    releases it when the holder process ends. Returns the live
+    :class:`DatasetLock`; callers must keep it (and call ``release`` or
+    use it as a context manager) for the duration of paid inference.
     """
-    import json as _json
-    import time as _time
-
-    payload = {"run_id": run_id, "pid": os.getpid(), "created": _time.time()}
-    line = _json.dumps(payload, sort_keys=True).encode("utf-8")
-    try:
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        try:
-            existing = _json.loads(Path(path).read_text(encoding="utf-8"))
-            created = float(existing.get("created", 0))
-            holder = str(existing.get("run_id", "?"))
-        except (OSError, ValueError, TypeError):
-            raise BudgetRefused(
-                f"ledger lock {path} is malformed: refusing evaluation until "
-                "it is inspected and removed by the operator."
-            )
-        if _time.time() - created <= ttl_seconds:
-            raise BudgetRefused(
-                f"another evaluation (run {holder}) holds the ledger lock "
-                f"{path}: refusing concurrent paid runs for this dataset."
-            )
-        Path(path).unlink()
-        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(line + b"\n")
-    return payload
+    return DatasetLock(path, run_id)
 
 
 def release_ledger_lock(path, run_id: str) -> None:
-    """Release our own lock; a foreign holder's lock is left alone."""
-    import json as _json
+    """Release the dataset lock held by this process for ``run_id``.
 
-    try:
-        existing = _json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+    Only releases a lock this process actually holds; anything else is
+    left alone. Prefer keeping the :class:`DatasetLock` and calling its
+    ``release`` method (or using it as a context manager).
+    """
+    key = str(path)
+    held = _HELD_DATASET_LOCKS.get(key)
+    if held is None or held.run_id != run_id:
         return
-    if existing.get("run_id") == run_id:
-        Path(path).unlink(missing_ok=True)
+    held.release()
+
+
+#: First-line markers identifying an evaluation spend ledger. Discovery
+#: is content-based (not filename-based) so a ledger renamed to a custom
+#: filename is still found; anything without these markers is not a ledger
+#: and is ignored.
+LEDGER_EVENT_TYPES = frozenset({"reserved", "settled", "settled-unknown"})
+
+
+def _looks_like_eval_ledger(first: object) -> bool:
+    return (
+        isinstance(first, dict)
+        and first.get("event") in LEDGER_EVENT_TYPES
+        and "token" in first
+        and "run_id" in first
+    )
+
+
+def _iter_candidate_ledgers(directory):
+    """Yield ledger candidate paths in a managed directory.
+
+    Convention-named files are always parsed as ledgers. Any other
+    ``*.jsonl`` file is peeked at: ledger content is included even under
+    a custom filename, well-formed non-ledger JSON is ignored, and an
+    unreadable or unparseable first line fails closed because the file
+    cannot be proven irrelevant.
+    """
+    root = Path(directory)
+    try:
+        names = sorted(path.name for path in root.glob("*.jsonl"))
+    except OSError as exc:
+        raise BudgetRefused(
+            f"cannot list ledger directory {root} ({exc}): refusing "
+            "evaluation while accounting state is uncertain."
+        )
+    conventional = set()
+    for name in names:
+        path = root / name
+        if Path(name).match(LEDGER_GLOB):
+            conventional.add(name)
+            yield path
+    for name in names:
+        if name in conventional or name.startswith("."):
+            continue
+        path = root / name
+        try:
+            with open(path, encoding="utf-8") as handle:
+                first = None
+                for line in handle:
+                    if line.strip():
+                        first = line
+                        break
+        except OSError as exc:
+            raise BudgetRefused(
+                f"ledger candidate {path} is unreadable ({exc}): refusing "
+                "evaluation until it is inspected, reconciled, or archived."
+            )
+        if first is None:
+            continue
+        try:
+            import json as _json
+
+            parsed = _json.loads(first)
+        except ValueError as exc:
+            raise BudgetRefused(
+                f"ledger candidate {path} is unparseable ({exc}): refusing "
+                "evaluation until it is inspected, reconciled, or archived."
+            )
+        if _looks_like_eval_ledger(parsed):
+            yield path
 
 
 def scan_ledger_dir(directory, dataset_id: str) -> list:
     """Find same-dataset ledgers with outstanding reservations.
 
-    Returns ``[(path, outstanding)]`` hits. Unreadable or malformed
-    relevant files fail closed instead of being silently skipped; legacy
-    records without dataset identity are treated conservatively.
+    Discovery is content-based: convention-named files plus any other
+    ``*.jsonl`` file whose first record carries evaluation-ledger
+    identity, so custom filenames cannot evade the scan. Returns
+    ``[(path, outstanding)]`` hits. Unreadable or malformed relevant
+    files fail closed instead of being silently skipped; legacy records
+    without dataset identity are treated conservatively.
+
+    Limitation: only files inside the managed results directory are
+    scanned (non-recursively). A ledger moved outside that directory is
+    no longer discovered — archive reviewed ledgers into the
+    ``archive/`` subdirectory, which the scan skips by design.
     """
     hits = []
-    for path in sorted(Path(directory).glob(LEDGER_GLOB)):
+    for path in _iter_candidate_ledgers(directory):
         try:
             records = read_ledger(path)
         except (OSError, ValueError) as exc:
