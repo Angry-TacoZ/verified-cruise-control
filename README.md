@@ -251,8 +251,9 @@ in CI.
   `contradicted`/`verified` only with authoritative backing, so most
   real listings land in `insufficient_evidence` until more sources exist.
   The v1 ADAS catalog covers only Kia Forte and VW Jetta/GLI mappings
-  (provisional sourcing); every other vehicle resolves to documented
-  unknown rather than a guessed support.
+  (initial entries — every other vehicle resolves to documented
+  unknown rather than a guessed support; see docs/adas-catalog.md for
+  sourcing status).
 - Single local operator, single pairing token family, no multi-user auth.
 - SQLite + local disk only; no backups, no replication.
 
