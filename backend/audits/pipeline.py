@@ -1,8 +1,9 @@
-"""Audit pipeline stages: screening (local) then Muse observation (live).
+"""Audit pipeline stages: screening, Muse, SAM, crop, recheck, reconcile.
 
-Prompt v1 (``PROMPT_VERSION = "m1"``). SAM, crop, recheck, and reconcile
-stages plug into ``run_stages`` next; the job stays RUNNING until the full
-pipeline completes it.
+Prompt v2 (``PROMPT_VERSION = "m2"``): Muse identifies physical ADAS
+controls (symbol, type, location, dedicated vs menu) for manufacturer-aware
+interpretation; SAM localizes the observed object; deterministic
+reconciliation maps evidence to the five-state taxonomy.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ from providers.base import (
 from providers.baseten import BasetenMuseAdapter, MuseRequest
 from providers.meta import MetaSamAdapter, SamRequest
 
-from . import services
+from . import adas_evidence, services
 from .models import (
     AuditCrop,
     AuditFinding,
@@ -47,19 +48,38 @@ from .models import (
     Verdict,
 )
 
-PROMPT_VERSION = "m1"
+PROMPT_VERSION = "m2"
 
 SYSTEM_INSTRUCTIONS = (
     "You are an ADAS feature spotter for used-car listing audits. "
     "For each advertised claim and each photo, report exactly what the "
-    "photo shows: never guess from the listing text, never verify a "
-    "feature from one unclear view, and flag ambiguity explicitly. "
+    "photo shows: never guess from the listing text, never label a "
+    "feature present merely because the claim suggests it should exist, "
+    "never verify a feature from one unclear view, and flag ambiguity "
+    "explicitly. ADAS controls vary by manufacturer, model, year, and "
+    "trim: describe the physical control you see, not the capability "
+    "you assume. "
     "Respond with a JSON object containing an 'observations' array; each "
     "item has photo_id, claim_concept (the claim ID, e.g. c1), "
     "visible_object (a short string naming the visible object, or the "
     'literal string "none"), description, supports_localization '
     "(boolean), ambiguous (boolean), needs_crop (boolean), needs_other_view "
-    "(boolean)."
+    "(boolean). "
+    "When a control is visible, also report: control_symbol (the exact "
+    "icon or markings, e.g. 'vehicle between two lane lines'), "
+    "control_type (button, stalk button, menu entry, cluster indicator, "
+    "sensor housing, camera housing, or similar), location (one of: "
+    "steering_wheel, left_dashboard, stalk, instrument_cluster, "
+    "infotainment, center_console, exterior_sensor, windshield_camera, "
+    "unknown), dedicated (true only when the control clearly serves one "
+    "feature rather than opening a general menu), and "
+    "manufacturer_context (visible make/model cues, if any). "
+    "If a symbol is unreadable, partially obscured, or unrecognized, say "
+    "so in plain words instead of guessing. "
+    "If one photo shows several distinct ADAS controls relevant to the "
+    "same claim, list each under 'controls' (at most 4, each with "
+    "visible_object plus symbol/type/location as visible) instead of "
+    "merging them into one generic observation."
 )
 
 # Batching limits (documented, tested): one photo per Muse call, at most
@@ -360,6 +380,38 @@ def _verdict(item: dict) -> str:
     return Verdict.PRESENT
 
 
+_CONTROL_EXTRA_KEYS = (
+    "visible_object",
+    "control_symbol",
+    "control_type",
+    "location",
+    "dedicated",
+    "manufacturer_context",
+    "controls",
+)
+
+_MUSE_FAMILY = (ObservationSource.Muse, ObservationSource.RECHECK)
+
+_CATALOG: adas_evidence.Catalog | None = None
+
+
+def get_catalog() -> adas_evidence.Catalog:
+    """Process-wide validated ADAS reference catalog (loaded once)."""
+    global _CATALOG
+    if _CATALOG is None:
+        _CATALOG = adas_evidence.load_catalog()
+    return _CATALOG
+
+
+def _control_extra(item: dict) -> dict:
+    """Carry Layer B control identification into the observation row.
+
+    Only keys the validator accepted are copied (all already capped);
+    absent optionals stay absent so legacy-shaped items are unchanged.
+    """
+    return {key: item[key] for key in _CONTROL_EXTRA_KEYS if key in item}
+
+
 def validate_batch(
     items, expected: set[tuple[str, str]], done: set[tuple[str, str]]
 ) -> tuple[dict, list[str], tuple[str, str] | None]:
@@ -512,6 +564,7 @@ def run_muse(
                                 ),
                                 "needs_crop": bool(item.get("needs_crop")),
                                 "needs_other_view": bool(item.get("needs_other_view")),
+                                **_control_extra(item),
                             },
                             "execution": execution,
                         },
@@ -537,10 +590,35 @@ def audit_dirs(job_id) -> dict[str, Path]:
     return dirs
 
 
-def sanitize_concept(claim_key: str) -> str:
-    """Reduce a claim to a SAM-legal short noun phrase, or ""."""
-    cleaned = "".join(char for char in claim_key if char not in CONCEPT_FORBIDDEN)
+def sanitize_concept(text: str) -> str:
+    """Reduce free text to a SAM-legal short noun phrase, or ""."""
+    cleaned = "".join(char for char in text if char not in CONCEPT_FORBIDDEN)
     return " ".join(cleaned.split()[:10])
+
+
+def _sam_target_for(target: Observation, claim_text: str) -> tuple[str, str]:
+    """Build the SAM prompt from the observed physical object (Layer C).
+
+    Prefers the Muse observation's ``visible_object`` (falling back to
+    ``control_symbol``), so SAM localizes the actual control rather than
+    an abstract capability name. Legacy rows without control
+    identification fall back to the claim text; when neither yields a
+    concept phrase the caller records UNCLEAR without spending.
+    Returns (concept, target_source).
+    """
+    extra = target.extra or {}
+    candidates = [
+        str(extra.get("visible_object", "") or ""),
+        str(extra.get("control_symbol", "") or ""),
+    ]
+    for candidate in candidates:
+        if candidate.strip() and candidate.strip().lower() != "none":
+            concept = sanitize_concept(candidate)
+            if concept:
+                return concept, "observed_object"
+    if "visible_object" not in extra:
+        return sanitize_concept(claim_text), "claim_fallback"
+    return "", "unavailable"
 
 
 def write_mask_png(job_id, raster: bytes, width: int, height: int) -> str:
@@ -594,7 +672,7 @@ def run_sam(
             detail = f"Muse observation references unknown claim {target.claim_key!r}"
             services.fail_job(job_id, worker_id, "unknown_claim", detail)
             raise services.JobNotRunningError(f"job {job_id} has unknown claim")
-        concept = sanitize_concept(text)
+        concept, target_source = _sam_target_for(target, text)
         photo = target.photo
         if not concept:
             with transaction.atomic():
@@ -605,7 +683,8 @@ def run_sam(
                     photo=photo,
                     source=ObservationSource.SAM,
                     verdict=Verdict.UNCLEAR,
-                    rationale="claim yields no SAM concept phrase",
+                    rationale="no reliable SAM target: observed object and "
+                    "claim both yield no concept phrase",
                 )
             continue
         data = verified_original_bytes(job_id, worker_id, photo)
@@ -672,6 +751,10 @@ def run_sam(
                     if boxes
                     else f"no segments for concept {concept!r}"
                 ),
+                extra={
+                    "sam_target": concept,
+                    "target_source": target_source,
+                },
                 execution=execution,
             )
         localized += 1
@@ -754,21 +837,28 @@ def run_crop(job_id, worker_id: str) -> int:
     return made
 
 
-RECHECK_PROMPT_VERSION = "m1-recheck"
+RECHECK_PROMPT_VERSION = "m2-recheck"
 
 RECHECK_SYSTEM_INSTRUCTIONS = (
     "You are an ADAS feature spotter for used-car listing audits. "
     "Two images are attached: the full source photo for context, then a "
     "zoomed crop cut from it to inspect one region closely. Judge the "
     "crop with the full photo as context, and report exactly what they "
-    "show for each advertised claim: never guess from the listing text, "
-    "and flag ambiguity explicitly. Respond with a JSON object "
-    "containing an 'observations' array; each item has photo_id (the "
-    "source photo), claim_concept (the claim ID, e.g. c1), visible_object "
-    "(a short string "
-    'naming the visible object, or the literal string "none"), '
-    "description, supports_localization (boolean), ambiguous (boolean), "
-    "needs_crop (boolean), needs_other_view (boolean)."
+    "show for the single advertised claim under review: never guess from "
+    "the listing text, never label the feature present merely because "
+    "the claim suggests it, and flag ambiguity explicitly. Respond with "
+    "a JSON object containing an 'observations' array; each item has "
+    "photo_id (the source photo), claim_concept (the claim ID, e.g. c1), "
+    "visible_object (a short string naming the visible object in the "
+    'crop, or the literal string "none"), description, '
+    "supports_localization (boolean), ambiguous (boolean), needs_crop "
+    "(boolean), needs_other_view (boolean). "
+    "Also report control_symbol (exact icon or markings in the crop), "
+    "control_type, location (steering_wheel, left_dashboard, stalk, "
+    "instrument_cluster, infotainment, center_console, exterior_sensor, "
+    "windshield_camera, unknown), and dedicated (true only for a "
+    "clearly single-feature control). If the crop is unreadable, say so "
+    "instead of guessing."
 )
 
 
@@ -949,6 +1039,7 @@ def run_recheck(
                         "extra": {
                             "crop_ref": crop.storage_ref,
                             "changed": prior is not None and prior != verdict,
+                            **_control_extra(item),
                         },
                         "execution": execution,
                     },
@@ -987,6 +1078,19 @@ INTRINSICALLY_NONVISUAL = re.compile(
 )
 
 
+def _keyed_present(
+    observations: list[Observation],
+) -> list[Observation]:
+    """Muse-family PRESENT rows carrying Layer B control identification."""
+    return [
+        obs
+        for obs in observations
+        if obs.source in _MUSE_FAMILY
+        and obs.verdict == Verdict.PRESENT
+        and "visible_object" in (obs.extra or {})
+    ]
+
+
 def reconcile_claim(
     observations: list[Observation], claim_text: str = ""
 ) -> tuple[str, str]:
@@ -995,9 +1099,14 @@ def reconcile_claim(
     Conservative by design (Rule E): missing visible evidence is never
     negative, so photo-only audits can only reach VISUALLY_SUPPORTED,
     INSUFFICIENT, or NOT_VISUALLY_VERIFIABLE. CONTRADICTED and VERIFIED
-    require authoritative vehicle-specific evidence, which v1 does not
-    ingest (the channel exists for hand-supplied docs evidence).
-    Returns (state, summary).
+    require authoritative vehicle-specific evidence (the channel exists
+    for hand-supplied docs evidence).
+    Layer D (rule v3): PRESENT observations carrying control
+    identification are evaluated through the manufacturer-aware catalog;
+    a diagnostic/supportive mapping supports the claim even without SAM
+    confirmation, while unmapped or non-supportive controls explain
+    exactly why they fall short. Rows without control identification
+    keep the legacy v2 confirm rules. Returns (state, summary).
     """
     authoritative = [
         obs for obs in observations if obs.source == ObservationSource.AUTHORITATIVE
@@ -1018,9 +1127,64 @@ def reconcile_claim(
             EvidenceState.INSUFFICIENT,
             "authoritative evidence disagrees with itself; human review needed",
         )
-    present_sources = {
-        obs.source for obs in observations if obs.verdict == Verdict.PRESENT
-    }
+    catalog = get_catalog()
+    feature = adas_evidence.normalize_feature(claim_text)
+    keyed = _keyed_present(observations)
+    v3_unknown_note = ""
+    if keyed:
+        interpretations = [
+            adas_evidence.interpret_control(
+                catalog,
+                feature,
+                visible_object=str(obs.extra.get("visible_object", "")),
+                control_symbol=str(obs.extra.get("control_symbol", "") or ""),
+                control_type=str(obs.extra.get("control_type", "") or ""),
+                location=str(obs.extra.get("location", "unknown") or "unknown"),
+                dedicated=obs.extra.get("dedicated"),
+                manufacturer_context=str(
+                    obs.extra.get("manufacturer_context", "") or ""
+                ),
+            )
+            for obs in keyed
+        ]
+        supporters = [i for i in interpretations if i.supports_claim]
+        if supporters:
+            best = max(
+                supporters,
+                key=lambda i: adas_evidence.STRENGTH_RANK[i.strength],
+            )
+            sam_present = any(
+                obs.source == ObservationSource.SAM and obs.verdict == Verdict.PRESENT
+                for obs in observations
+            )
+            sam_note = (
+                "confirmed by SAM localization"
+                if sam_present
+                else "SAM localization unavailable; mapping stands on the "
+                "identified control alone"
+            )
+            return (
+                EvidenceState.VISUALLY_SUPPORTED,
+                (
+                    f"{best.explanation} [{best.strength}; {sam_note}; "
+                    f"catalog {catalog.version}/{best.entry_id}; photo evidence "
+                    "only, not capability or condition proof]"
+                ),
+            )
+        strongest = max(
+            interpretations,
+            key=lambda i: adas_evidence.STRENGTH_RANK.get(i.strength, -1),
+        )
+        v3_unknown_note = (
+            f"{strongest.explanation}; "
+            f"catalog {catalog.version} offers no support for {feature or 'this claim'}"
+        )
+    legacy = [
+        obs
+        for obs in observations
+        if not (obs.source in _MUSE_FAMILY and "visible_object" in (obs.extra or {}))
+    ]
+    present_sources = {obs.source for obs in legacy if obs.verdict == Verdict.PRESENT}
     if ObservationSource.Muse in present_sources and (
         ObservationSource.SAM in present_sources
     ):
@@ -1044,6 +1208,8 @@ def reconcile_claim(
             EvidenceState.NOT_VISUALLY_VERIFIABLE,
             "claim needs nonvisual confirmation; photos cannot resolve it",
         )
+    if v3_unknown_note:
+        return (EvidenceState.INSUFFICIENT, v3_unknown_note)
     n_muse = sum(1 for obs in observations if obs.source == ObservationSource.Muse)
     if n_muse:
         return (
@@ -1078,6 +1244,7 @@ def run_reconcile(job_id, worker_id: str) -> int:
             [o for o in observations if o.source != ObservationSource.RECHECK],
             text,
         )
+        interpretation = adas_evidence.explain_claim(get_catalog(), observations, text)
         with transaction.atomic():
             services.fence_evidence_write(job_id, worker_id)
             AuditFinding.objects.update_or_create(
@@ -1088,10 +1255,11 @@ def run_reconcile(job_id, worker_id: str) -> int:
                     "state": state,
                     "summary": summary,
                     "evidence": {
-                        "rule": "v2",
+                        "rule": "v3",
                         "recheck_ran": recheck_ran,
                         "recheck_changed_finding": recheck_ran
                         and state_without != state,
+                        "interpretation": interpretation,
                         "observations": [
                             {
                                 "id": str(o.id),

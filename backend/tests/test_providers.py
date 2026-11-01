@@ -270,6 +270,112 @@ def test_muse_analyze_rejects_malformed_content():
         )
 
 
+def test_muse_validator_accepts_control_identification():
+    good = {
+        "photo_id": "p1",
+        "claim_concept": "c1",
+        "visible_object": "following-distance button",
+        "description": "steering-wheel button with distance bars",
+        "supports_localization": True,
+        "ambiguous": False,
+        "needs_crop": False,
+        "needs_other_view": False,
+        "control_symbol": "car with distance bars",
+        "control_type": "button",
+        "location": "steering_wheel",
+        "dedicated": True,
+        "manufacturer_context": "Kia steering wheel layout",
+    }
+    (clean,), warnings = validate_observation_payload(
+        {"observations": [good]}, frozenset({"p1"}), frozenset({"c1"})
+    )
+    assert warnings == []
+    assert clean["control_symbol"] == "car with distance bars"
+    assert clean["location"] == "steering_wheel"
+    assert clean["dedicated"] is True
+    # Prompt-m1-shaped items without the new keys still validate.
+    legacy = {k: v for k, v in good.items() if k not in ("control_symbol",)}
+    legacy.pop("control_type")
+    legacy.pop("location")
+    legacy.pop("dedicated")
+    legacy.pop("manufacturer_context")
+    (clean_legacy,), _ = validate_observation_payload(
+        {"observations": [legacy]}, frozenset({"p1"}), frozenset({"c1"})
+    )
+    assert "control_symbol" not in clean_legacy
+
+
+def test_muse_validator_rejects_bad_control_fields():
+    base = {
+        "photo_id": "p1",
+        "claim_concept": "c1",
+        "visible_object": "button",
+        "description": "d",
+        "supports_localization": False,
+        "ambiguous": False,
+        "needs_crop": False,
+        "needs_other_view": False,
+    }
+    with pytest.raises(ProviderResponseError, match="not a string"):
+        validate_observation_payload(
+            {"observations": [dict(base, location=7)]}, frozenset({"p1"})
+        )
+    with pytest.raises(ProviderResponseError, match="not a boolean"):
+        validate_observation_payload(
+            {"observations": [dict(base, dedicated="yes")]}, frozenset({"p1"})
+        )
+    with pytest.raises(ProviderResponseError, match="not a list"):
+        validate_observation_payload(
+            {"observations": [dict(base, controls="x")]}, frozenset({"p1"})
+        )
+    with pytest.raises(ProviderResponseError, match="more than 4 controls"):
+        validate_observation_payload(
+            {
+                "observations": [
+                    dict(
+                        base,
+                        controls=[{"visible_object": f"b{i}"} for i in range(5)],
+                    )
+                ]
+            },
+            frozenset({"p1"}),
+        )
+    with pytest.raises(ProviderResponseError, match="lacks a non-empty"):
+        validate_observation_payload(
+            {"observations": [dict(base, controls=[{"location": "stalk"}])]},
+            frozenset({"p1"}),
+        )
+
+
+def test_muse_validator_accepts_nested_controls():
+    item = {
+        "photo_id": "p1",
+        "claim_concept": "c1",
+        "visible_object": "button cluster",
+        "description": "two distinct buttons",
+        "supports_localization": True,
+        "ambiguous": False,
+        "needs_crop": True,
+        "needs_other_view": False,
+        "controls": [
+            {
+                "visible_object": "following-distance button",
+                "control_symbol": "distance bars",
+                "location": "steering_wheel",
+                "bogus": 1,
+            },
+            {"visible_object": "cruise set button"},
+        ],
+    }
+    (clean,), warnings = validate_observation_payload(
+        {"observations": [item]}, frozenset({"p1"})
+    )
+    assert len(clean["controls"]) == 2
+    assert clean["controls"][0]["control_symbol"] == "distance bars"
+    assert "location" not in clean["controls"][1]
+    assert any("dropped unknown key 'bogus'" in w for w in warnings)
+
+
 def test_muse_validator_rejects_unknown_claim_concept():
     payload = {
         "observations": [

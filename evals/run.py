@@ -41,11 +41,11 @@ FIXTURES = REPO / "fixtures" / "synthetic-listings" / "photos"
 MIME = {".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
 
 
-GOLDENS_VERSION = "v2"
+GOLDENS_VERSION = "v3"
 
 
-def run_reconcile() -> dict:
-    path = REPO / "evals" / "cases" / GOLDENS_VERSION / "reconcile_goldens.json"
+def run_reconcile(version: str = GOLDENS_VERSION) -> dict:
+    path = REPO / "evals" / "cases" / version / "reconcile_goldens.json"
     goldens = json.loads(path.read_text())
     photo_ids = [uuid.uuid4() for _ in range(4)]
     scored = []

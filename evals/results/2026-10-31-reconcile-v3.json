@@ -1,0 +1,100 @@
+{
+  "eval": "reconcile",
+  "rule": "v3-manufacturer-aware",
+  "cases_version": 3,
+  "passed": 13,
+  "total": 13,
+  "cases": [
+    {
+      "id": "acc-dedicated-button-sam-confirmed",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "observed 'vehicle with distance bars' (Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance) is diagnostic evidence for adaptive_cruise_control per Smart Cruise Control (SCC) [diagnostic; confirmed by SAM localization; catalog 2026-11-01/v1/kia-forte-2021-scc-distance; photo evidence only, not capability or condition proof]",
+      "pass": true
+    },
+    {
+      "id": "acc-dedicated-button-sam-absent",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "observed 'vehicle with distance bars' (Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance) is diagnostic evidence for adaptive_cruise_control per Smart Cruise Control (SCC) [diagnostic; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-forte-2021-scc-distance; photo evidence only, not capability or condition proof]",
+      "pass": true
+    },
+    {
+      "id": "acc-generic-cruise-sam-confirmed",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'cruise set and resume buttons' maps to cruise_control (Cruise control (conventional)), not to the claimed adaptive_cruise_control; Evidence of conventional cruise only. Without a distance/follow function these controls say nothing about adaptive capability.; catalog 2026-11-01/v1 offers no support for adaptive_cruise_control",
+      "pass": true
+    },
+    {
+      "id": "lka-forte-dash-supported",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "observed 'vehicle between lane lines' (Dedicated LKA button on the instrument panel on the lower left-hand side of the driver; cluster lane indicator white (standby) / green (steering)) is diagnostic evidence for lane_keeping_assist per Lane Keeping Assist (LKA) [diagnostic; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-forte-2019-2024-lka-button; photo evidence only, not capability or condition proof]",
+      "pass": true
+    },
+    {
+      "id": "lka-evidence-centering-claim",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'vehicle between lane lines' maps to lane_keeping_assist (Lane Keeping Assist (LKA)), not to the claimed lane_centering_assist; NOT Lane Following Assist (LFA): LFA is Kia's separate lane-centering system with steering-wheel buttons. LKA button existence does not establish LFA, ACC, or hands-free capability.; catalog 2026-11-01/v1 offers no support for lane_centering_assist",
+      "pass": true
+    },
+    {
+      "id": "gli-stalk-menu-centering",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'driver assistance button' is a general assistance control (Driver-assistance button on the end face of the turn-signal lever (E617); opens/configures assistance systems alongside the infotainment Assistance systems menu); it does not establish any specific capability; catalog 2026-11-01/v1 offers no support for lane_centering_assist",
+      "pass": true
+    },
+    {
+      "id": "ldw-claim-lka-evidence",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'vehicle between lane lines' maps to lane_keeping_assist (Lane Keeping Assist (LKA)), not to the claimed lane_departure_warning; NOT Lane Following Assist (LFA): LFA is Kia's separate lane-centering system with steering-wheel buttons. LKA button existence does not establish LFA, ACC, or hands-free capability.; catalog 2026-11-01/v1 offers no support for lane_departure_warning",
+      "pass": true
+    },
+    {
+      "id": "highway-claim-acc-evidence",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'following-distance button' maps to adaptive_cruise_control (Smart Cruise Control (SCC)), not to the claimed highway_assist; Conventional cruise SET/RES/+/- buttons without a distance function are not ACC evidence. Distance adjustment is the ACC-specific function.; catalog 2026-11-01/v1 offers no support for highway_assist",
+      "pass": true
+    },
+    {
+      "id": "lfa-centering-supported",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "observed 'lane following assist button' (Lane Following Assist controls on the steering wheel (right side on K5); maintains the vehicle between lane markings) is supportive evidence for lane_centering_assist per Lane Following Assist (LFA) [supportive; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-lfa-steering-buttons; photo evidence only, not capability or condition proof]",
+      "pass": true
+    },
+    {
+      "id": "handsfree-claim-centering-evidence",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'lane following assist button' maps to lane_centering_assist (Lane Following Assist (LFA)), not to the claimed hands_free_driving; Kia LFA is the centering-tier system, distinct from LKA (dash button). Supportive rather than diagnostic here because wheel-button identification alone is weaker than the LKA dash-button case.; catalog 2026-11-01/v1 offers no support for hands_free_driving",
+      "pass": true
+    },
+    {
+      "id": "unmapped-control-sam-confirmed",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "observed 'chrome door handle' matches no cataloged control; capability cannot be established from it; catalog 2026-11-01/v1 offers no support for adaptive_cruise_control",
+      "pass": true
+    },
+    {
+      "id": "legacy-confirm-unchanged",
+      "expected": "visually_supported",
+      "got": "visually_supported",
+      "summary": "Muse sighting confirmed by SAM localization (photo evidence only; not capability proof)",
+      "pass": true
+    },
+    {
+      "id": "ambiguous-symbol-unreadable",
+      "expected": "insufficient_evidence",
+      "got": "insufficient_evidence",
+      "summary": "no confirmed sighting in 1 photo observation(s); absence from photos is not evidence of absence",
+      "pass": true
+    }
+  ]
+}

@@ -73,7 +73,7 @@ class AuditJob(models.Model):
     )
     requested_by = models.CharField(max_length=255, blank=True, default="")
     snapshot = models.JSONField(default=dict)
-    prompt_version = models.CharField(max_length=32, default="m1")
+    prompt_version = models.CharField(max_length=32, default="m2")
     pricing_version = models.CharField(max_length=32, default="2026-10-31/09-20")
     max_calls = models.PositiveIntegerField(default=60)
     spend_cap_usd = models.DecimalField(

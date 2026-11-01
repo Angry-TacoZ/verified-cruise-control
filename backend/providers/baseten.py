@@ -54,6 +54,23 @@ OBSERVATION_BOOL_KEYS = frozenset(
 )
 OBSERVATION_SHORT_CAPS = {"claim_concept": 200, "visible_object": 200}
 OBSERVATION_LONG_CAPS = {"description": 2000, "notes": 500}
+# Layer B (prompt m2): physical-control identification. All optional so
+# prompt-m1-shaped responses and older fakes still validate; present
+# values are strictly typed and capped like the required keys.
+OBSERVATION_OPTIONAL_STR_CAPS = {
+    "control_symbol": 200,
+    "control_type": 80,
+    "location": 40,
+    "manufacturer_context": 200,
+}
+OBSERVATION_OPTIONAL_BOOL_KEYS = frozenset({"dedicated"})
+OBSERVATION_CONTROLS_MAX_ITEMS = 4
+OBSERVATION_CONTROL_ITEM_CAPS = {
+    "visible_object": 200,
+    "control_symbol": 200,
+    "control_type": 80,
+    "location": 40,
+}
 
 
 @dataclass(frozen=True)
@@ -166,12 +183,72 @@ def validate_observation_payload(
             f"observation {index} 'notes'",
             warnings,
         )
-        known = set(OBSERVATION_REQUIRED_KEYS) | {"notes"}
+        for key, cap in OBSERVATION_OPTIONAL_STR_CAPS.items():
+            if key not in item:
+                continue
+            value = item[key]
+            if not isinstance(value, str):
+                raise ProviderResponseError(
+                    f"Muse observation {index} key '{key}' is not a string"
+                )
+            clean[key] = _truncate(value, cap, f"observation {index} '{key}'", warnings)
+        for key in OBSERVATION_OPTIONAL_BOOL_KEYS:
+            if key not in item:
+                continue
+            if not isinstance(item[key], bool):
+                raise ProviderResponseError(
+                    f"Muse observation {index} key '{key}' is not a boolean"
+                )
+            clean[key] = item[key]
+        if "controls" in item:
+            clean["controls"] = _validate_controls(item["controls"], index, warnings)
+        known = (
+            set(OBSERVATION_REQUIRED_KEYS)
+            | {"notes", "controls"}
+            | set(OBSERVATION_OPTIONAL_STR_CAPS)
+            | set(OBSERVATION_OPTIONAL_BOOL_KEYS)
+        )
         for key in sorted(item.keys()):
             if key not in known:
                 warnings.append(f"observation {index} dropped unknown key '{key}'")
         observations.append(clean)
     return observations, warnings
+
+
+def _validate_controls(controls: object, index: int, warnings: list[str]) -> list[dict]:
+    """Validate the optional nested distinct-controls array."""
+    if not isinstance(controls, list):
+        raise ProviderResponseError(
+            f"Muse observation {index} key 'controls' is not a list"
+        )
+    if len(controls) > OBSERVATION_CONTROLS_MAX_ITEMS:
+        raise ProviderResponseError(
+            f"Muse observation {index} lists more than "
+            f"{OBSERVATION_CONTROLS_MAX_ITEMS} controls"
+        )
+    clean_items = []
+    for position, entry in enumerate(controls):
+        where = f"observation {index} controls[{position}]"
+        if not isinstance(entry, dict):
+            raise ProviderResponseError(f"Muse {where} is not an object")
+        visible = entry.get("visible_object")
+        if not isinstance(visible, str) or not visible.strip():
+            raise ProviderResponseError(
+                f"Muse {where} lacks a non-empty 'visible_object'"
+            )
+        clean_entry: dict = {}
+        for key, cap in OBSERVATION_CONTROL_ITEM_CAPS.items():
+            if key not in entry:
+                continue
+            value = entry[key]
+            if not isinstance(value, str):
+                raise ProviderResponseError(f"Muse {where} key '{key}' is not a string")
+            clean_entry[key] = _truncate(value, cap, f"{where} '{key}'", warnings)
+        for key in sorted(entry.keys()):
+            if key not in OBSERVATION_CONTROL_ITEM_CAPS:
+                warnings.append(f"Muse {where} dropped unknown key '{key}'")
+        clean_items.append(clean_entry)
+    return clean_items
 
 
 @dataclass(frozen=True)
