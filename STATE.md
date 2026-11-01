@@ -44,7 +44,7 @@ No live inference authorized ($0 budget).
 - [x] Multi-photo / multi-control SAM attribution tests pass.
 - [x] Backend suite, Ruff, Django checks, goldens green.
 - [x] Mother + extension checks green.
-- [ ] Committed + pushed to PR #2; CI reported; PR still draft.
+- [x] Committed + pushed to PR #2; CI reported; PR still draft.
 
 Head `f454a71` verified green locally before this milestone; this
 milestone adds specificity-first ranking with applicability tiebreak
