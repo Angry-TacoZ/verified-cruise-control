@@ -42,10 +42,10 @@ def run_claimed_job(
 ) -> AuditJob | None:
     """Claim one job and run the full pipeline. Returns the settled job,
     or None when no job was claimable. Expected halts (budget pause,
-    cancel, provider failure) are already recorded with exact state; only
-    unexpected crashes fail the job here. Refuses to claim while
-    inference is disabled, so flipping the flag off stops spend even
-    for already-queued jobs (they wait for re-enablement)."""
+    cancel, lost lease, provider failure) are already recorded with
+    exact state; only unexpected crashes fail the job here. Refuses to
+    claim while inference is disabled, so flipping the flag off stops
+    spend even for already-queued jobs (they wait for re-enablement)."""
     if not settings.AUDIT_INFERENCE_ENABLED:
         logger.debug("audit worker %s idle: inference disabled", worker_id)
         return None
@@ -63,6 +63,7 @@ def run_claimed_job(
     except (
         services.BudgetExceededError,
         services.JobNotRunningError,
+        services.StaleWorkerError,
         ProviderError,
     ) as exc:
         logger.info("audit job %s halted: %s", job.pk, exc)

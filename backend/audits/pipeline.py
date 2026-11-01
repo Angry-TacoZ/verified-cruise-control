@@ -14,6 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from django.conf import settings
+from django.db import transaction
 from PIL import Image
 
 from evidence.images import original_path
@@ -254,16 +255,21 @@ def _guarded_analyze(
 _BUDGET_HALT_CODES = frozenset({"call_cap", "spend_cap", "unknown_cost"})
 
 
-def _raise_if_halted(settled, job_id, stage: str) -> None:
-    """Halt the stage when settle left the job non-running.
+def _raise_if_halted(settled, job_id, stage: str, worker_id: str) -> None:
+    """Halt the stage when settle left the job non-running or re-owned.
 
     Budget pauses surface as ``BudgetExceededError``; external stops
-    (cancel, reclaim) surface as ``JobNotRunningError``. The worker
-    treats both as graceful halts; the distinction keeps dashboards
+    (cancel) surface as ``JobNotRunningError``; a job reclaimed by
+    another worker surfaces as ``StaleWorkerError``. The worker treats
+    all three as graceful halts; the distinction keeps dashboards
     and retry policy honest about *why* the audit stopped.
     """
-    if settled.status == JobStatus.RUNNING:
+    if settled.status == JobStatus.RUNNING and settled.worker_id == worker_id:
         return
+    if settled.worker_id != worker_id:
+        raise services.StaleWorkerError(
+            f"worker {worker_id} lost job {job_id} during {stage}"
+        )
     if settled.error_code in _BUDGET_HALT_CODES:
         raise services.BudgetExceededError(f"job {job_id} halted during {stage} settle")
     raise services.JobNotRunningError(f"job {job_id} stopped during {stage}")
@@ -415,31 +421,36 @@ def run_muse(
                 code, detail = fatal
                 services.fail_job(job_id, worker_id, code, detail)
                 raise ProviderResponseError(detail)
-            for (cid, _), item in seen.items():
-                _, created = Observation.objects.get_or_create(
-                    job=job,
-                    claim_key=cid,
-                    photo=images[str(photo.pk)],
-                    source=ObservationSource.Muse,
-                    defaults={
-                        "verdict": _verdict(item),
-                        "rationale": item.get("description", ""),
-                        "extra": {
-                            "supports_localization": bool(
-                                item.get("supports_localization")
-                            ),
-                            "needs_crop": bool(item.get("needs_crop")),
-                            "needs_other_view": bool(item.get("needs_other_view")),
+            with transaction.atomic():
+                # Ownership fence: a worker that lost the lease while the
+                # call was in flight keeps its ledger row (spend is real)
+                # but contributes no accepted evidence.
+                services.fence_evidence_write(job_id, worker_id)
+                for (cid, _), item in seen.items():
+                    _, created = Observation.objects.get_or_create(
+                        job=job,
+                        claim_key=cid,
+                        photo=images[str(photo.pk)],
+                        source=ObservationSource.Muse,
+                        defaults={
+                            "verdict": _verdict(item),
+                            "rationale": item.get("description", ""),
+                            "extra": {
+                                "supports_localization": bool(
+                                    item.get("supports_localization")
+                                ),
+                                "needs_crop": bool(item.get("needs_crop")),
+                                "needs_other_view": bool(item.get("needs_other_view")),
+                            },
+                            "execution": execution,
                         },
-                        "execution": execution,
-                    },
-                )
-                if created:
-                    stored += 1
-                done.add((cid, str(photo.pk)))
+                    )
+                    if created:
+                        stored += 1
+                    done.add((cid, str(photo.pk)))
             # Spend for this batch is already booked; the observations
             # above are kept so a resumed job never re-pays for them.
-            _raise_if_halted(settled, job_id, Stage.Muse)
+            _raise_if_halted(settled, job_id, Stage.Muse, worker_id)
     return stored
 
 
@@ -515,14 +526,16 @@ def run_sam(
         concept = sanitize_concept(text)
         photo = target.photo
         if not concept:
-            Observation.objects.create(
-                job=job,
-                claim_key=target.claim_key,
-                photo=photo,
-                source=ObservationSource.SAM,
-                verdict=Verdict.UNCLEAR,
-                rationale="claim yields no SAM concept phrase",
-            )
+            with transaction.atomic():
+                services.fence_evidence_write(job_id, worker_id)
+                Observation.objects.create(
+                    job=job,
+                    claim_key=target.claim_key,
+                    photo=photo,
+                    source=ObservationSource.SAM,
+                    verdict=Verdict.UNCLEAR,
+                    rationale="claim yields no SAM concept phrase",
+                )
             continue
         data = original_path(photo.storage_ref, photo.image_format).read_bytes()
         request = SamRequest(
@@ -559,37 +572,41 @@ def run_sam(
             },
             cost_usd=cost,
         )
-        boxes = []
-        for record in result.records:
-            x1, y1, x2, y2 = record.box
-            boxes.append(
-                {
-                    "box": [x1, y1, x2, y2],
-                    "mask_ref": write_mask_png(
-                        job_id, record.raster, record.width, record.height
-                    ),
-                    "mask_size": [record.width, record.height],
-                    "confidence": record.provider_confidence,
-                }
+        with transaction.atomic():
+            # Fenced before the first mask file lands: a stale worker
+            # leaves neither accepted rows nor orphan masks behind.
+            services.fence_evidence_write(job_id, worker_id)
+            boxes = []
+            for record in result.records:
+                x1, y1, x2, y2 = record.box
+                boxes.append(
+                    {
+                        "box": [x1, y1, x2, y2],
+                        "mask_ref": write_mask_png(
+                            job_id, record.raster, record.width, record.height
+                        ),
+                        "mask_size": [record.width, record.height],
+                        "confidence": record.provider_confidence,
+                    }
+                )
+            Observation.objects.create(
+                job=job,
+                claim_key=target.claim_key,
+                photo=photo,
+                source=ObservationSource.SAM,
+                verdict=Verdict.PRESENT if boxes else Verdict.ABSENT,
+                boxes=boxes,
+                rationale=(
+                    f"{len(boxes)} segment(s) for concept {concept!r}"
+                    if boxes
+                    else f"no segments for concept {concept!r}"
+                ),
+                execution=execution,
             )
-        Observation.objects.create(
-            job=job,
-            claim_key=target.claim_key,
-            photo=photo,
-            source=ObservationSource.SAM,
-            verdict=Verdict.PRESENT if boxes else Verdict.ABSENT,
-            boxes=boxes,
-            rationale=(
-                f"{len(boxes)} segment(s) for concept {concept!r}"
-                if boxes
-                else f"no segments for concept {concept!r}"
-            ),
-            execution=execution,
-        )
         localized += 1
         # Spend is booked; the SAM observation above is kept so a
         # resumed job never re-pays for this localization.
-        _raise_if_halted(settled, job_id, Stage.SAM)
+        _raise_if_halted(settled, job_id, Stage.SAM, worker_id)
     return localized
 
 
@@ -634,21 +651,23 @@ def run_crop(job_id, worker_id: str) -> int:
                 if AuditCrop.objects.filter(job=job).count() >= cap:
                     skipped += 1
                     continue
-                ref = uuid.uuid4().hex
-                dest = audit_dirs(job_id)["crops"] / f"{ref}.png"
-                tmp = dest.with_suffix(".tmp")
-                img.crop((x1, y1, x2, y2)).save(tmp, format="PNG")
-                tmp.replace(dest)
-                AuditCrop.objects.create(
-                    job=job,
-                    source_photo=photo,
-                    source_observation=obs,
-                    box=entry["box"],
-                    storage_ref=ref,
-                    mask_storage_ref=entry.get("mask_ref"),
-                    width=x2 - x1,
-                    height=y2 - y1,
-                )
+                with transaction.atomic():
+                    services.fence_evidence_write(job_id, worker_id)
+                    ref = uuid.uuid4().hex
+                    dest = audit_dirs(job_id)["crops"] / f"{ref}.png"
+                    tmp = dest.with_suffix(".tmp")
+                    img.crop((x1, y1, x2, y2)).save(tmp, format="PNG")
+                    tmp.replace(dest)
+                    AuditCrop.objects.create(
+                        job=job,
+                        source_photo=photo,
+                        source_observation=obs,
+                        box=entry["box"],
+                        storage_ref=ref,
+                        mask_storage_ref=entry.get("mask_ref"),
+                        width=x2 - x1,
+                        height=y2 - y1,
+                    )
                 existing.add(key)
                 made += 1
         if not services.heartbeat(job_id, worker_id):
@@ -821,29 +840,31 @@ def run_recheck(
                     job=job, photo=photo, source=ObservationSource.Muse
                 )
             }
-            for (cid, _), item in seen.items():
-                verdict = _verdict(item)
-                prior = muse_verdicts.get((cid, photo.pk))
-                _, created = Observation.objects.get_or_create(
-                    job=job,
-                    claim_key=cid,
-                    photo=photo,
-                    source=ObservationSource.RECHECK,
-                    defaults={
-                        "verdict": verdict,
-                        "rationale": item.get("description", ""),
-                        "extra": {
-                            "crop_ref": crop.storage_ref,
-                            "changed": prior is not None and prior != verdict,
+            with transaction.atomic():
+                services.fence_evidence_write(job_id, worker_id)
+                for (cid, _), item in seen.items():
+                    verdict = _verdict(item)
+                    prior = muse_verdicts.get((cid, photo.pk))
+                    _, created = Observation.objects.get_or_create(
+                        job=job,
+                        claim_key=cid,
+                        photo=photo,
+                        source=ObservationSource.RECHECK,
+                        defaults={
+                            "verdict": verdict,
+                            "rationale": item.get("description", ""),
+                            "extra": {
+                                "crop_ref": crop.storage_ref,
+                                "changed": prior is not None and prior != verdict,
+                            },
+                            "execution": execution,
                         },
-                        "execution": execution,
-                    },
-                )
-                if created:
-                    covered.add((cid, str(photo.pk)))
+                    )
+                    if created:
+                        covered.add((cid, str(photo.pk)))
             # Spend is booked; the recheck observations above are kept
             # so a resumed job never re-pays for this crop.
-            _raise_if_halted(settled, job_id, Stage.RECHECK)
+            _raise_if_halted(settled, job_id, Stage.RECHECK, worker_id)
     services.record_execution(
         job_id,
         worker_id,
@@ -959,29 +980,32 @@ def run_reconcile(job_id, worker_id: str) -> int:
             [o for o in observations if o.source != ObservationSource.RECHECK],
             text,
         )
-        AuditFinding.objects.update_or_create(
-            job=job,
-            claim_key=claim,
-            defaults={
-                "claim_text": text,
-                "state": state,
-                "summary": summary,
-                "evidence": {
-                    "rule": "v2",
-                    "recheck_ran": recheck_ran,
-                    "recheck_changed_finding": recheck_ran and state_without != state,
-                    "observations": [
-                        {
-                            "id": str(o.id),
-                            "source": o.source,
-                            "photo_id": str(o.photo_id),
-                            "verdict": o.verdict,
-                        }
-                        for o in observations
-                    ],
+        with transaction.atomic():
+            services.fence_evidence_write(job_id, worker_id)
+            AuditFinding.objects.update_or_create(
+                job=job,
+                claim_key=claim,
+                defaults={
+                    "claim_text": text,
+                    "state": state,
+                    "summary": summary,
+                    "evidence": {
+                        "rule": "v2",
+                        "recheck_ran": recheck_ran,
+                        "recheck_changed_finding": recheck_ran
+                        and state_without != state,
+                        "observations": [
+                            {
+                                "id": str(o.id),
+                                "source": o.source,
+                                "photo_id": str(o.photo_id),
+                                "verdict": o.verdict,
+                            }
+                            for o in observations
+                        ],
+                    },
                 },
-            },
-        )
+            )
         count += 1
     services.record_execution(
         job_id,

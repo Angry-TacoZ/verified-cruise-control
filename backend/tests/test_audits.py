@@ -1960,3 +1960,202 @@ def test_run_audit_worker_once_empty_queue(enabled):
     out = io.StringIO()
     call_command("run_audit_worker", once=True, stdout=out)
     assert "started" in out.getvalue()
+
+
+# --- stale-worker evidence fencing (remediation F1) ------------------------
+
+
+class _StealingMuseAdapter(ScriptedMuseAdapter):
+    """Deterministic mid-call lease loss: the first analyze() ages the
+    heartbeat and lets worker B reclaim, then returns a valid response."""
+
+    def __init__(self, scripts, job_pk, cost=0.0123):
+        super().__init__(scripts, cost=cost)
+        self._job_pk = job_pk
+        self.stolen = False
+
+    def analyze(self, request):
+        if not self.stolen:
+            self.stolen = True
+            AuditJob.objects.filter(pk=self._job_pk).update(
+                heartbeat_at=timezone.now() - timedelta(hours=2)
+            )
+            assert services.claim_job("w-B") is not None
+        return super().analyze(request)
+
+
+class _StealingSamAdapter(FakeSamAdapter):
+    def __init__(self, job_pk, **kwargs):
+        super().__init__(**kwargs)
+        self._job_pk = job_pk
+        self.stolen = False
+
+    def analyze(self, request):
+        if not self.stolen:
+            self.stolen = True
+            AuditJob.objects.filter(pk=self._job_pk).update(
+                heartbeat_at=timezone.now() - timedelta(hours=2)
+            )
+            assert services.claim_job("w-B") is not None
+        return super().analyze(request)
+
+
+class _StealingRecheckAdapter(FakeMuseAdapter):
+    def __init__(self, job_pk, **kwargs):
+        super().__init__(**kwargs)
+        self._job_pk = job_pk
+        self.stolen = False
+
+    def analyze(self, request):
+        if not self.stolen:
+            self.stolen = True
+            AuditJob.objects.filter(pk=self._job_pk).update(
+                heartbeat_at=timezone.now() - timedelta(hours=2)
+            )
+            assert services.claim_job("w-B") is not None
+        return super().analyze(request)
+
+
+def test_fence_allows_owner_rejects_strangers(listing):
+    job = _running_job(listing, worker="w-A")
+    services.fence_evidence_write(job.pk, "w-A")
+    with pytest.raises(services.StaleWorkerError):
+        services.fence_evidence_write(job.pk, "w-intruder")
+    # The owner may persist an already-paid call through its own pause or
+    # cancel (unclaimable; the run halts right after). A non-owner never
+    # writes, whatever the status.
+    services.cancel_job(job.pk)
+    services.fence_evidence_write(job.pk, "w-A")
+    with pytest.raises(services.StaleWorkerError):
+        services.fence_evidence_write(job.pk, "w-intruder")
+    AuditJob.objects.filter(pk=job.pk).update(status=JobStatus.FAILED)
+    with pytest.raises(services.JobNotRunningError):
+        services.fence_evidence_write(job.pk, "w-A")
+
+
+def test_stale_muse_keeps_ledger_loses_evidence(listing, photos, enabled):
+    job = _running_job(listing, worker="w-A")
+    screened = pipeline.run_screening(job.pk, "w-A")
+    thief = _StealingMuseAdapter(
+        [
+            [
+                _obs(str(photos[0].id), "c1"),
+                _obs(str(photos[0].id), "c2"),
+            ],
+        ],
+        job.pk,
+    )
+    with pytest.raises(services.StaleWorkerError):
+        pipeline.run_muse(job.pk, "w-A", screened, thief)
+    job.refresh_from_db()
+    assert job.status == JobStatus.RUNNING
+    assert job.worker_id == "w-B"
+    # Money is real even for the stale worker: spend stays booked.
+    assert job.spend_usd == Decimal("0.0123")
+    assert job.model_calls_made == 1
+    assert job.reserved_calls == 0
+    assert (
+        AuditExecution.objects.filter(
+            job=job, stage=Stage.Muse, provider=Provider.BASETEN
+        ).count()
+        == 1
+    )
+    # But no accepted evidence from the stale worker.
+    assert Observation.objects.filter(job=job).count() == 0
+    # Worker B completes cleanly with its own observations.
+    clean = ScriptedMuseAdapter(
+        [
+            [
+                _obs(str(photos[0].id), "c1", visible_object="none"),
+                _obs(str(photos[0].id), "c2", visible_object="none"),
+            ],
+            [
+                _obs(str(photos[1].id), "c1", visible_object="none"),
+                _obs(str(photos[1].id), "c2", visible_object="none"),
+            ],
+        ]
+    )
+    done = pipeline.run_stages(job.pk, "w-B", clean, FakeSamAdapter(records=[]))
+    assert done.status == JobStatus.COMPLETE
+    verdicts = {
+        o.verdict
+        for o in Observation.objects.filter(job=job, source=ObservationSource.Muse)
+    }
+    assert verdicts == {Verdict.ABSENT}
+
+
+def test_stale_sam_leaves_no_masks_or_rows(listing, photos, enabled):
+    job = _running_job(listing, worker="w-A")
+    _obs_row(
+        job,
+        photos[0],
+        ObservationSource.Muse,
+        Verdict.PRESENT,
+        claim="c1",
+        supports_localization=True,
+    )
+    thief = _StealingSamAdapter(job.pk, records=[_segment()])
+    with pytest.raises(services.StaleWorkerError):
+        pipeline.run_sam(job.pk, "w-A", thief)
+    job.refresh_from_db()
+    assert job.worker_id == "w-B"
+    assert job.spend_usd == Decimal("0.0025")
+    assert job.model_calls_made == 1
+    assert (
+        Observation.objects.filter(job=job, source=ObservationSource.SAM).count() == 0
+    )
+    masks = list(pipeline.audit_dirs(job.pk)["masks"].glob("*.png"))
+    assert masks == []
+    # Worker B localizes honestly: no segments, no contamination.
+    done = pipeline.run_stages(
+        job.pk,
+        "w-B",
+        ScriptedMuseAdapter(
+            [
+                [_obs(str(photos[0].id), "c2", visible_object="none")],
+                [
+                    _obs(str(photos[1].id), "c1", visible_object="none"),
+                    _obs(str(photos[1].id), "c2", visible_object="none"),
+                ],
+            ]
+        ),
+        FakeSamAdapter(records=[]),
+    )
+    assert done.status == JobStatus.COMPLETE
+    sam_obs = Observation.objects.get(job=job, source=ObservationSource.SAM)
+    assert sam_obs.verdict == Verdict.ABSENT
+    assert sam_obs.boxes == []
+
+
+def test_stale_recheck_persists_nothing(listing, photos, enabled):
+    job = _running_job(listing, worker="w-A")
+    _crop_row(job, photos[0])
+    thief = _StealingRecheckAdapter(
+        job.pk,
+        observations=[
+            _obs(str(photos[0].id), "c1"),
+            _obs(str(photos[0].id), "c2", visible_object="none"),
+        ],
+    )
+    with pytest.raises(services.StaleWorkerError):
+        pipeline.run_recheck(job.pk, "w-A", thief)
+    job.refresh_from_db()
+    assert job.worker_id == "w-B"
+    assert job.spend_usd == Decimal("0.0123")
+    assert (
+        Observation.objects.filter(job=job, source=ObservationSource.RECHECK).count()
+        == 0
+    )
+    # Worker B's recheck lands normally.
+    clean = FakeMuseAdapter(
+        observations=[
+            _obs(str(photos[0].id), "c1", visible_object="none"),
+            _obs(str(photos[0].id), "c2", visible_object="none"),
+        ]
+    )
+    assert pipeline.run_recheck(job.pk, "w-B", clean) == 1
+    rows = {
+        o.claim_key: o.verdict
+        for o in Observation.objects.filter(job=job, source=ObservationSource.RECHECK)
+    }
+    assert rows == {"c1": Verdict.ABSENT, "c2": Verdict.ABSENT}

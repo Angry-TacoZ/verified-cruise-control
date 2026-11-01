@@ -225,6 +225,41 @@ def cancel_job(job_id) -> bool:
     return rows > 0
 
 
+def fence_evidence_write(job_id, worker_id: str) -> None:
+    """Ownership fence for accepted-evidence writes (observations, masks,
+    crops, findings). Call inside ``transaction.atomic()`` immediately
+    before the writes, with nothing else in between.
+
+    The rule is ownership, not liveness: the recorded owner may persist
+    the results of a call it already paid for even when the job just
+    paused or cancelled under it (both unclaimable, so no other worker
+    can be mid-write; the run still halts right after via
+    ``_raise_if_halted``). A worker that is NOT the recorded owner never
+    writes accepted evidence, whatever the status.
+
+    The conditional heartbeat touch holds the writer lock for the rest of
+    the transaction, so no reclaim, cancel, or pause can slip between the
+    ownership check and the INSERTs that follow: every ownership change
+    flows through a conditional UPDATE on this same row, which either
+    committed before the touch (fence sees it and raises) or blocks until
+    this transaction commits. Ledger rows (``record_execution``) and
+    ``settle_call`` are deliberately NOT fenced: spend is real even for a
+    stale worker, so money stays separated from permission to contribute
+    accepted evidence.
+    """
+    rows = AuditJob.objects.filter(
+        pk=job_id,
+        worker_id=worker_id,
+        status__in=(JobStatus.RUNNING, JobStatus.PAUSED, JobStatus.CANCELLED),
+    ).update(heartbeat_at=timezone.now())
+    if rows:
+        return
+    job = AuditJob.objects.get(pk=job_id)
+    if job.worker_id != worker_id:
+        raise StaleWorkerError(f"job {job.pk} owned by {job.worker_id!r}")
+    raise JobNotRunningError(f"job {job.pk} is {job.status}")
+
+
 def _assert_writable(job: AuditJob, worker_id: str) -> None:
     if job.worker_id != worker_id:
         raise StaleWorkerError(f"job {job.pk} owned by {job.worker_id!r}")
