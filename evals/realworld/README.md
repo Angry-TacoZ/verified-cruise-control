@@ -64,7 +64,13 @@ python evals/run.py realworld-live --manifest evals/realworld/manifest.pilot.jso
 Live runs refuse without `VCC_LIVE_SMOKE=1`, configured provider keys,
 and a worst-case spend bound (cases x modes x per-job cap) under
 `--max-spend`. Every call additionally passes `EvalBudget` pre-call
-reservations (attempt + spend headroom, unknown-cost freeze) with a
-JSONL spend ledger. SAM localization additionally requires `VCC_LIVE_SAM=1`;
-without it the SAM stage is recorded as not measured, not as zero.
+reservations (attempt + spend headroom, unknown-cost freeze) recorded
+to a write-ahead JSONL spend ledger (flushed + fsync'd per event, one
+file per run); restarting against a ledger with outstanding
+reservations refuses — pass `--ledger <path>` only for a clean trail.
+SAM localization additionally requires `VCC_LIVE_SAM=1`; its target
+comes from the production selector over the full observation (nested
+controls included) with production provenance, and without a valid
+target no SAM call is made (`unavailable-target`). Without SAM, the
+stage is recorded as not measured, not as zero.
 Never run live evals in CI.

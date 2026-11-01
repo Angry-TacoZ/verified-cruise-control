@@ -13,12 +13,13 @@ pre-flight bound is cases x modes x per-job ``spend_cap_usd`` (see
 from __future__ import annotations
 
 import hashlib
+import os
 import uuid
 from decimal import Decimal
 from pathlib import Path
 
 from audits.models import Observation
-from audits.pipeline import control_extra
+from audits.pipeline import control_extra, sam_target_for
 
 MANIFEST_VERSION = "realworld-v1"
 
@@ -288,8 +289,11 @@ def build_eval_observation(item: dict, *, claim_id: str, photo_id: str) -> Obser
     manufacturer context, and validated nested ``controls``), so the
     existing interpretation and reconciliation machinery sees exactly
     what production would persist — nothing dropped, nothing invented.
+    The row carries its own id so SAM provenance can link back to it,
+    exactly like production's ``source_observation_id``.
     """
     return Observation(
+        id=uuid.uuid4(),
         source="muse",
         verdict=muse_verdict(item),
         photo_id=uuid.uuid4(),
@@ -301,6 +305,57 @@ def build_eval_observation(item: dict, *, claim_id: str, photo_id: str) -> Obser
             "needs_crop": bool(item.get("needs_crop")),
             "needs_other_view": bool(item.get("needs_other_view")),
             **control_extra(item),
+        },
+    )
+
+
+def select_sam_target(eval_obs, claim_text: str, vehicle=None):
+    """Production SAM target selection for one evaluation observation.
+
+    Reuses ``pipeline.sam_target_for`` (top-level plus validated nested
+    controls, claim-relevant first) and honors production's eligibility
+    rules: only PRESENT observations flagged for localization are
+    localizable. Returns ``(concept, target_source, control_index)``, or
+    ``None`` when production would make no call — in which case the
+    evaluator must not call SAM either.
+    """
+    if eval_obs.verdict != "present":
+        return None
+    if not (eval_obs.extra or {}).get("supports_localization"):
+        return None
+    concept, target_source, control_index = sam_target_for(
+        eval_obs, claim_text, vehicle
+    )
+    if not concept:
+        return None
+    return (concept, target_source, control_index)
+
+
+def build_sam_eval_observation(
+    muse_eval_obs, *, concept: str, target_source: str, control_index, masks: int
+) -> Observation:
+    """Build an unsaved SAM observation with production-identical shape.
+
+    Verdict is PRESENT only when masks were returned (else ABSENT, exactly
+    like production); provenance links the same photo plus the source
+    observation id and control index, so cross-photo or cross-control
+    localizations can never corroborate the wrong evidence.
+    """
+    return Observation(
+        id=uuid.uuid4(),
+        source="sam",
+        verdict="present" if masks > 0 else "absent",
+        photo_id=muse_eval_obs.photo_id,
+        rationale=(
+            f"{masks} segment(s) for concept {concept!r}"
+            if masks
+            else f"no segments for concept {concept!r}"
+        ),
+        extra={
+            "sam_target": concept,
+            "target_source": target_source,
+            "control_index": control_index,
+            "source_observation_id": str(muse_eval_obs.id),
         },
     )
 
@@ -480,19 +535,115 @@ def estimate_spend(
 
 class BudgetRefused(Exception):
     """A provider call was refused before sending: unauthorized, over the
-    call-count allowance, over the spend bound, or frozen by unknown cost."""
+    call-count allowance, over the spend bound, frozen by unknown cost,
+    or blocked by an outstanding reservation from an earlier run."""
+
+
+class LedgerFile:
+    """Append-only durable ledger file.
+
+    Every event is serialized, flushed, and fsync'd before the call
+    returns, so a hard crash loses nothing already reported. The file is
+    opened for appending only: events are never rewritten or deleted,
+    and one run never overwrites another run's file.
+    """
+
+    def __init__(self, path) -> None:
+        self.path = Path(path)
+        # The handle lifetime is the object lifetime; closed explicitly
+        # via close() (LedgerFile is also usable as a context manager).
+        self._handle = open(self.path, "ab")  # noqa: SIM115
+
+    def append(self, record: dict) -> None:
+        import json
+
+        line = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+        self._handle.write(line)
+        self._handle.flush()
+        os.fsync(self._handle.fileno())
+
+    def close(self) -> None:
+        try:
+            self._handle.flush()
+            os.fsync(self._handle.fileno())
+        finally:
+            self._handle.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+def read_ledger(path) -> list:
+    """Read persisted ledger events; a missing file reads as empty."""
+    import json
+
+    target = Path(path)
+    if not target.exists():
+        return []
+    records = []
+    for line in target.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line:
+            records.append(json.loads(line))
+    return records
+
+
+def find_outstanding(records: list) -> list:
+    """Reserved events with no matching settlement, in ledger order."""
+    settled = {
+        record.get("token")
+        for record in records
+        if record.get("event") in ("settled", "settled-unknown")
+    }
+    return [
+        record
+        for record in records
+        if record.get("event") == "reserved" and record.get("token") not in settled
+    ]
+
+
+def assert_ledger_clear(path) -> None:
+    """Fail closed when an earlier run left outstanding reservations.
+
+    Never auto-replays: the operator reconciles billing externally, then
+    archives or removes the file before rerunning.
+    """
+    outstanding = find_outstanding(read_ledger(path))
+    if outstanding:
+        labels = ", ".join(
+            sorted({str(item.get("label", "?")) for item in outstanding})
+        )
+        raise BudgetRefused(
+            f"ledger {path} has {len(outstanding)} outstanding reservation(s) "
+            f"({labels}): reconcile provider billing, then archive or remove "
+            "the file before rerunning. Calls are never auto-replayed."
+        )
+
+
+def fresh_ledger_path(directory, stem: str, run_id: str):
+    """Unique ledger path per run so runs never overwrite one another."""
+    from datetime import date
+
+    return Path(directory) / f"{date.today().isoformat()}-{stem}-{run_id}.jsonl"
 
 
 class EvalBudget:
     """Pre-call reservation ledger for offline evaluation (no Django job).
 
     Mirrors the production ``reserve_call``/``settle_call`` semantics in a
-    dependency-free form: every provider call is reserved BEFORE it is
-    sent — call-count headroom (first try plus bounded retries) and spend
-    headroom (full per-call reserve) — and settled AFTER with actual
-    attempts, provider, and cost. Unknown cost freezes further spending
-    instead of settling as zero. Every event is appended to ``records``
-    so a crash between reservation and settlement stays visible.
+    dependency-free form with write-ahead durability: every provider call
+    is reserved BEFORE it is sent — call-count headroom (first try plus
+    bounded retries) and spend headroom (full per-call reserve) — and the
+    reservation is appended to the ledger file (flush + fsync) BEFORE the
+    adapter fires, so a hard crash mid-call still leaves an identifiable
+    outstanding reservation. Settlement is appended the same way after
+    the call, booking actual attempts, provider, and cost. Unknown cost
+    freezes further spending instead of settling as zero. Every event
+    also stays in ``records`` for the in-process report.
     """
 
     def __init__(
@@ -502,11 +653,15 @@ class EvalBudget:
         max_spend_usd: str,
         max_attempts_total: int,
         reserve_usd_per_call: str,
+        ledger_file=None,
+        run_id=None,
     ) -> None:
         self.authorized = authorized
         self.max_spend = Decimal(max_spend_usd)
         self.max_attempts_total = max_attempts_total
         self.reserve_usd = Decimal(reserve_usd_per_call)
+        self.ledger_file = ledger_file
+        self.run_id = run_id or uuid.uuid4().hex[:12]
         self.spent = Decimal(0)
         self.reserved_spend = Decimal(0)
         self.attempts_used = 0
@@ -516,23 +671,38 @@ class EvalBudget:
         self._outstanding: dict = {}
         self._seq = 0
 
-    def _record(self, event: str, label: str, *, outstanding=False, **fields) -> None:
+    def _emit(self, event: str, label: str, **fields) -> None:
         self._seq += 1
-        self.records.append(
-            {
-                "seq": self._seq,
-                "event": event,
-                "label": label,
-                "outstanding": outstanding,
-                **fields,
-            }
-        )
+        record = {
+            "seq": self._seq,
+            "event": event,
+            "run_id": self.run_id,
+            "label": label,
+            **fields,
+        }
+        if self.ledger_file is not None:
+            # Durable first: a crash after this point leaves the event on
+            # disk even if the in-memory copy is lost.
+            self.ledger_file.append(record)
+        self.records.append(record)
 
-    def reserve(self, label: str, *, max_attempts: int) -> str:
+    def reserve(
+        self,
+        label: str,
+        *,
+        max_attempts: int,
+        provider: str = "?",
+        model: str = "?",
+        case_id=None,
+        mode=None,
+    ) -> str:
         """Reserve headroom for one provider call; returns a token.
 
-        Refuses (raising ``BudgetRefused``) without authorization, after
-        unknown cost, or when attempts or spend headroom is insufficient.
+        The reservation is fsync'd to the ledger BEFORE the token is
+        returned, so the adapter (called after) can never run ahead of
+        durable accounting. Refuses (raising ``BudgetRefused``) without
+        authorization, after unknown cost, or when attempts or spend
+        headroom is insufficient.
         """
         if not self.authorized:
             raise BudgetRefused(f"{label}: eval inference not authorized")
@@ -552,7 +722,18 @@ class EvalBudget:
                 f"{label}: ${self.reserve_usd} headroom exceeds remaining "
                 f"${self.max_spend - self.spent - self.reserved_spend}"
             )
-        token = f"{label}#{self._seq + 1}"
+        token = f"{self.run_id}:{self._seq + 1:06d}"
+        self._emit(
+            "reserved",
+            label,
+            token=token,
+            provider=provider,
+            model=model,
+            case_id=case_id,
+            mode=mode,
+            max_attempts=max_attempts,
+            reserve_usd=str(self.reserve_usd),
+        )
         self._outstanding[token] = {
             "label": label,
             "max_attempts": max_attempts,
@@ -560,13 +741,6 @@ class EvalBudget:
         }
         self.attempts_reserved += max_attempts
         self.reserved_spend += self.reserve_usd
-        self._record(
-            "reserved",
-            label,
-            outstanding=True,
-            max_attempts=max_attempts,
-            reserve_usd=str(self.reserve_usd),
-        )
         return token
 
     def settle(
@@ -577,8 +751,8 @@ class EvalBudget:
         cost_usd,
         provider: str,
     ) -> None:
-        """Release a reservation and book actuals. ``cost_usd=None`` (or an
-        error status) records unknown billing and freezes the ledger."""
+        """Release a reservation and book actuals, durably. ``cost_usd=None``
+        records unknown billing and freezes the ledger."""
         held = self._outstanding.pop(token, None)
         label = (held or {}).get("label", token)
         self.attempts_reserved = max(
@@ -590,30 +764,49 @@ class EvalBudget:
         self.attempts_used += attempts
         if cost_usd is None:
             self.unknown_cost = True
-            self._record(
+            self._emit(
                 "settled-unknown",
                 label,
+                token=token,
                 attempts=attempts,
                 provider=provider,
             )
             return
         self.spent += Decimal(str(cost_usd))
-        self._record(
+        self._emit(
             "settled",
             label,
+            token=token,
             attempts=attempts,
             cost_usd=str(Decimal(str(cost_usd))),
             provider=provider,
         )
 
-    def guarded(self, label: str, adapter, request, *, max_attempts: int):
+    def guarded(
+        self,
+        label: str,
+        adapter,
+        request,
+        *,
+        max_attempts: int,
+        case_id=None,
+        mode=None,
+    ):
         """Reserve, run one adapter call, and settle with observed usage.
 
-        The adapter never fires unless reservation succeeds. Provider
-        exceptions settle as unknown cost (freezing the ledger) and are
-        re-raised so the run aborts instead of silently continuing.
+        The adapter never fires unless the reservation is already durable
+        on disk. Provider exceptions settle as unknown cost (freezing the
+        ledger) and are re-raised so the run aborts instead of silently
+        continuing — never auto-replaying a possibly billed request.
         """
-        token = self.reserve(label, max_attempts=max_attempts)
+        token = self.reserve(
+            label,
+            max_attempts=max_attempts,
+            provider=getattr(adapter, "provider_name", "?"),
+            model=getattr(adapter, "model_id", "?"),
+            case_id=case_id,
+            mode=mode,
+        )
         try:
             result = adapter.analyze(request)
         except Exception:
@@ -636,19 +829,12 @@ class EvalBudget:
 
     def totals(self) -> dict:
         return {
+            "run_id": self.run_id,
             "spent_usd": str(self.spent),
             "attempts_used": self.attempts_used,
             "unknown_cost": self.unknown_cost,
             "outstanding": sorted(self._outstanding),
         }
-
-
-def write_ledger(path, budget: EvalBudget) -> None:
-    """Persist every ledger event as JSONL so interruption preserves history."""
-    import json
-
-    lines = [json.dumps(record) for record in budget.records]
-    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def render_markdown(manifest_id: str, summary: dict, rows: list) -> str:

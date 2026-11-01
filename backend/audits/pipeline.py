@@ -665,7 +665,7 @@ def sanitize_concept(text: str) -> str:
     return " ".join(cleaned.split()[:10])
 
 
-def _sam_target_for(
+def sam_target_for(
     target: Observation, claim_text: str, vehicle: dict | None = None
 ) -> tuple[str, str, int | None]:
     """Build the SAM prompt from the observed physical object (Layer C).
@@ -681,6 +681,7 @@ def _sam_target_for(
     identification fall back to the claim text; when no item yields a
     concept phrase the caller records UNCLEAR without spending.
     Returns (concept, target_source, control_index).
+    Public so offline evaluation reuses production target selection.
     """
     extra = target.extra or {}
     if "visible_object" not in extra:
@@ -777,7 +778,7 @@ def run_sam(
             detail = f"Muse observation references unknown claim {target.claim_key!r}"
             services.fail_job(job_id, worker_id, "unknown_claim", detail)
             raise services.JobNotRunningError(f"job {job_id} has unknown claim")
-        concept, target_source, control_index = _sam_target_for(
+        concept, target_source, control_index = sam_target_for(
             target, text, snapshot_vehicle
         )
         photo = target.photo

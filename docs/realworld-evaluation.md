@@ -147,6 +147,13 @@ estimate.
    production stage path instead of the adapter-direct path used
    here. Current live path reuses the same prompt builders and the
    production-identical observation extra (`build_eval_observation` /
-   `control_extra`, incl. nested controls), validators, and
-   reconciler — but the stage wiring differs, and that difference
+   `control_extra`, incl. nested controls), the production SAM target
+   selector (`sam_target_for`) with production provenance, validators,
+   and reconciler — but the stage wiring differs, and that difference
    must stay labeled until unified.
+5. Remediation (review of `24610e0`) hardened the live path without
+   changing recognition semantics: write-ahead fsync'd spend ledger
+   with restart fail-closed (F1), production SAM target selection with
+   eligibility gates (F2), split selection/localization metrics (F3),
+   and strict control matching (F4). All covered by deterministic
+   offline regression tests; still zero paid inference.

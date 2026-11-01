@@ -43,6 +43,13 @@ Cruise family: conventional (set speed; speedometer or CRUISE/SET telltale) vs A
 
 Draft PR open early; prompt/reference versioned; baseline reproducible; ground truth independent; local-only photos; no unauthorized media; paired comparison with denominators; mocks + regression green; backend/Ruff/Django/goldens green; mother/extension checks green; no paid inference in CI; live needs auth; no unmeasured claims; PR unmerged.
 
+## Remediation pass 2 (review of `24610e0`, 2 findings)
+
+No paid inference; no RSA/catalog/photo changes; leave PR #3 open unmerged.
+
+- [x] F1 (HIGH, durable ledger) — write-ahead append-only `LedgerFile` (flush + fsync per event; never rewrite); reservation fsync'd before dispatch, settlement after; run ids on every record; `fresh_ledger_path` per run; restart via `assert_ledger_clear` fails closed on outstanding (no auto-replay); unknown cost freezes; `--ledger` resume flag. Disk-reading tests: on-disk-before-analyze, persistence-failure blocks call, crash→refuse, settlement persisted, no-overwrite, identity hygiene.
+- [x] F2 (MEDIUM, SAM parity) — `sam_target_for` renamed public and reused via `select_sam_target` (PRESENT + `supports_localization` eligibility, else no call); `build_sam_eval_observation` carries production provenance (same photo, source id, control index); reconcile sees `[muse, sam]` rows; `unavailable-target` recorded when no target. Scenarios A-D green incl. end-to-end harness test with fake adapters (zero SAM calls, zero spend).
+
 ## Remediation pass (review of `ef36a02`, 4 findings)
 
 Work on `feat/003-real-world-adas-evaluation`; no paid inference; no catalog/RSA broadening.

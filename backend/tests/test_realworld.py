@@ -12,15 +12,21 @@ from audits.realworld import (
     MANIFEST_VERSION,
     BudgetRefused,
     EvalBudget,
+    LedgerFile,
+    assert_ledger_clear,
     build_eval_observation,
+    build_sam_eval_observation,
     estimate_spend,
+    find_outstanding,
+    fresh_ledger_path,
     muse_verdict,
+    read_ledger,
     render_markdown,
     score_case,
+    select_sam_target,
     summarize,
     validate_case,
     validate_manifest,
-    write_ledger,
 )
 
 
@@ -451,19 +457,31 @@ def test_budget_unknown_cost_freezes_further_spending():
         raise AssertionError("spend after unknown cost should be refused")
 
 
-def test_budget_ledger_survives_interruption(tmp_path):
-    # F1: a reservation written before a crash stays visible afterwards.
+def test_reservation_carries_call_identity(tmp_path):
+    # F1: ledger records carry run/call identity, provider, model, and the
+    # authorized attempt allowance — never keys, bytes, or personal data.
     import json
 
-    budget = _budget()
-    budget.reserve("interrupted-call", max_attempts=2)
-    path = tmp_path / "ledger-probe.jsonl"
-    write_ledger(path, budget)
-    lines = path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 1
-    entry = json.loads(lines[0])
-    assert entry["event"] == "reserved"
-    assert entry["outstanding"] is True
+    ledger_path = tmp_path / "identity.jsonl"
+    handle = LedgerFile(ledger_path)
+    budget = _budget_with_file(handle)
+    budget.guarded("Muse case mode", _FakeAdapter(), object(), max_attempts=3)
+    handle.close()
+    records = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+    ]
+    reserved = records[0]
+    assert reserved["event"] == "reserved"
+    assert reserved["run_id"] == budget.run_id
+    assert reserved["label"] == "Muse case mode"
+    assert reserved["max_attempts"] == 3
+    assert reserved["reserve_usd"] == "2.00"
+    assert reserved["provider"] == "fake"
+    # No keys, bytes, images, or personal data may enter the ledger.
+    blob = json.dumps(records).lower()
+    for forbidden in ("api_key", "base64", "data:image", "vin", "plate"):
+        assert forbidden not in blob
 
 
 def test_guarded_settles_actuals_and_releases_headroom():
@@ -653,3 +671,371 @@ def test_control_match_case_whitespace_and_subset():
         _scored_with("distance button", "following-distance button")["control_correct"]
         is False
     )
+
+
+def _budget_with_file(ledger_file, **overrides):
+    kwargs = {
+        "authorized": True,
+        "max_spend_usd": "5.00",
+        "max_attempts_total": 12,
+        "reserve_usd_per_call": "2.00",
+        "ledger_file": ledger_file,
+    }
+    kwargs.update(overrides)
+    return EvalBudget(**kwargs)
+
+
+def test_reservation_on_disk_before_analyze(tmp_path):
+    # F1: the reservation must be fsync'd to disk before the adapter fires.
+    import json
+
+    ledger_path = tmp_path / "run.jsonl"
+    seen = {}
+
+    class CheckingAdapter(_FakeAdapter):
+        def analyze(self, request):
+            lines = ledger_path.read_text(encoding="utf-8").splitlines()
+            seen["reserved"] = [
+                json.loads(line)
+                for line in lines
+                if json.loads(line)["event"] == "reserved"
+            ]
+            return super().analyze(request)
+
+    adapter = CheckingAdapter()
+    handle = LedgerFile(ledger_path)
+    try:
+        budget = _budget_with_file(handle)
+        budget.guarded("Muse case mode", adapter, object(), max_attempts=3)
+    finally:
+        handle.close()
+    assert adapter.calls != []
+    assert len(seen["reserved"]) == 1
+    assert seen["reserved"][0]["label"] == "Muse case mode"
+    assert seen["reserved"][0]["max_attempts"] == 3
+
+
+def test_reservation_persistence_failure_prevents_call():
+    # F1: if the reservation cannot be persisted, no provider call happens.
+    class BrokenFile:
+        def append(self, record):
+            raise OSError("disk gone")
+
+    adapter = _FakeAdapter()
+    budget = _budget_with_file(BrokenFile())
+    with pytest.raises(OSError):
+        budget.guarded("Muse case mode", adapter, object(), max_attempts=3)
+    assert adapter.calls == []
+
+
+def test_crash_leaves_outstanding_and_restart_refuses(tmp_path):
+    # F1: simulate hard termination between reservation and settlement,
+    # then prove a restart detects it and refuses to repeat the call.
+    ledger_path = tmp_path / "crashed.jsonl"
+    handle = LedgerFile(ledger_path)
+    budget = _budget_with_file(handle)
+    budget.reserve("Muse doomed mode", max_attempts=3)
+    handle.close()  # crash: settlement is never written
+    records = read_ledger(ledger_path)
+    assert find_outstanding(records) != []
+    with pytest.raises(BudgetRefused, match="doomed"):
+        assert_ledger_clear(ledger_path)
+    # A fully settled ledger restarts cleanly.
+    clean_path = tmp_path / "clean.jsonl"
+    clean_handle = LedgerFile(clean_path)
+    clean_budget = _budget_with_file(clean_handle)
+    token = clean_budget.reserve("Muse ok mode", max_attempts=1)
+    clean_budget.settle(token, attempts=1, cost_usd="0.01", provider="fake")
+    clean_handle.close()
+    assert_ledger_clear(clean_path)
+
+
+def test_known_cost_settlement_persisted(tmp_path):
+    # F1: settlements land on disk with actual cost, attempts, provider.
+    import json
+
+    ledger_path = tmp_path / "settled.jsonl"
+    handle = LedgerFile(ledger_path)
+    budget = _budget_with_file(handle)
+    token = budget.reserve("Muse priced mode", max_attempts=2)
+    budget.settle(token, attempts=2, cost_usd="0.03", provider="fake")
+    handle.close()
+    events = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert [entry["event"] for entry in events] == ["reserved", "settled"]
+    assert events[1]["cost_usd"] == "0.03"
+    assert events[1]["attempts"] == 2
+    assert events[1]["provider"] == "fake"
+
+
+def test_ledger_runs_do_not_overwrite(tmp_path):
+    # F1: unique run ledger files never overwrite one another.
+    first = fresh_ledger_path(tmp_path, "realworld-live", "runAAA")
+    second = fresh_ledger_path(tmp_path, "realworld-live", "runBBB")
+    assert first != second
+    LedgerFile(first).append({"event": "reserved", "label": "first"})
+    second_handle = LedgerFile(second)
+    second_handle.append({"event": "reserved", "label": "second"})
+    second_handle.close()
+    import json
+
+    assert json.loads(first.read_text(encoding="utf-8"))["label"] == "first"
+    # Same run id + stem resolves to the same path (explicit resume target).
+    assert fresh_ledger_path(tmp_path, "realworld-live", "runAAA") == first
+
+
+def _sam_scenario_obs(top_visible, nested, supports_localization=True):
+    obs = {
+        "photo_id": "photo-1",
+        "claim_concept": "c1",
+        "visible_object": top_visible,
+        "description": "eval scenario",
+        "control_symbol": "",
+        "control_type": "",
+        "location": "unknown",
+        "dedicated": None,
+        "manufacturer_context": "",
+        "supports_localization": supports_localization,
+        "ambiguous": False,
+        "needs_crop": False,
+        "needs_other_view": False,
+    }
+    if nested is not None:
+        obs["controls"] = [nested]
+    return obs
+
+
+def _acc_nested_item():
+    return {
+        "visible_object": "following-distance button",
+        "control_symbol": "vehicle with distance bars",
+        "control_type": "button",
+        "location": "steering_wheel",
+        "dedicated": True,
+    }
+
+
+def _lka_nested_item():
+    return {
+        "visible_object": "lane keeping assist button",
+        "control_symbol": "vehicle between lane lines",
+        "control_type": "button",
+        "location": "left_dashboard",
+        "dedicated": True,
+    }
+
+
+def test_sam_selects_nested_acc_control():
+    # F2 scenario A: the nested dedicated following-distance control wins
+    # over generic top-level cruise buttons, with its control index.
+    obs = build_eval_observation(
+        _sam_scenario_obs("cruise control buttons", _acc_nested_item()),
+        claim_id="acc",
+        photo_id="photo-1",
+    )
+    selected = select_sam_target(obs, "Adaptive Cruise Control", FORTE_2021)
+    assert selected == ("following-distance button", "observed_object", 1)
+
+
+def test_sam_selects_nested_control_over_cupholder():
+    # F2 scenario B: an unrelated top-level object never becomes the target
+    # when a claim-relevant nested control exists.
+    obs = build_eval_observation(
+        _sam_scenario_obs("cup holder", _lka_nested_item()),
+        claim_id="lka",
+        photo_id="photo-1",
+    )
+    selected = select_sam_target(obs, "Lane Keeping Assist", FORTE_2021)
+    assert selected == ("lane keeping assist button", "observed_object", 1)
+
+
+def test_sam_no_target_without_identifiable_control():
+    # F2 scenario C: no identifiable control means no SAM target.
+    obs = build_eval_observation(
+        _sam_scenario_obs("none", None, supports_localization=False),
+        claim_id="acc",
+        photo_id="photo-1",
+    )
+    assert select_sam_target(obs, "Adaptive Cruise Control", FORTE_2021) is None
+
+
+def _load_eval_runner():
+    import importlib.util
+
+    repo = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location("eval_run", repo / "evals" / "run.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _harness_manifest(tmp_path):
+    import hashlib
+
+    photos = tmp_path / "photos"
+    photos.mkdir()
+    src = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "realworld-sample"
+        / "photos"
+        / "synth-acc-001.png"
+    )
+    data = src.read_bytes()
+    (photos / "case-a.png").write_bytes(data)
+    (photos / "case-b.png").write_bytes(data)
+    sha = hashlib.sha256(data).hexdigest()
+
+    def case(cid):
+        return {
+            "id": cid,
+            "vehicle": {
+                "year": 2021,
+                "make": "Kia",
+                "model": "Forte",
+                "trim": "GT",
+                "market": "US",
+            },
+            "claim": {
+                "advertised": "Adaptive Cruise Control",
+                "normalized_feature": "adaptive_cruise_control",
+                "claim_id": "acc",
+            },
+            "photo": {
+                "path": "photos/placeholder.png",
+                "sha256": sha,
+                "provenance": "synthetic",
+            },
+            "ground_truth": {
+                "equipment": "unknown",
+                "visible_object": "synthetic control",
+                "interpretation": "insufficient",
+                "expected_state": "insufficient_evidence",
+                "verification_method": "fixture",
+                "ambiguity": "",
+            },
+        }
+
+    manifest = {
+        "manifest_version": MANIFEST_VERSION,
+        "dataset": "harness-probe",
+        "split": "dev",
+        "cases": [case("case-a"), case("case-b")],
+    }
+    manifest["cases"][0]["photo"]["path"] = "photos/case-a.png"
+    manifest["cases"][1]["photo"]["path"] = "photos/case-b.png"
+    return manifest
+
+
+class _HarnessMuseAdapter:
+    provider_name = "fake-muse"
+    model_id = "fake-muse-1"
+
+    def __init__(self):
+        from types import SimpleNamespace
+
+        self.calls = []
+        self.usage = SimpleNamespace(
+            provider="fake-muse", estimated_cost_usd="0.01", retries=0, status="ok"
+        )
+        self.last_attempts = 1
+
+    def require_configured(self):
+        pass
+
+    def analyze(self, request):
+        from types import SimpleNamespace
+
+        self.calls.append(request)
+        photo_id = request.photo_ids[0]
+        if photo_id == "case-a":
+            obs = {
+                "visible_object": "none",
+                "supports_localization": False,
+                "ambiguous": False,
+            }
+        else:
+            obs = {
+                "visible_object": "cruise control buttons",
+                "supports_localization": False,
+                "ambiguous": False,
+            }
+        return SimpleNamespace(observations=[obs], usage=self.usage)
+
+
+class _HarnessSamAdapter:
+    provider_name = "fake-sam"
+    model_id = "fake-sam-1"
+
+    def __init__(self):
+        self.calls = []
+
+    def require_configured(self):
+        pass
+
+    def analyze(self, request):
+        raise AssertionError("SAM must not be called without a valid target")
+
+
+def test_harness_makes_no_sam_call_without_target(tmp_path, monkeypatch):
+    # F2 scenario C end to end: no identifiable control and no localization
+    # support means zero SAM requests, explicitly recorded — with no paid
+    # inference anywhere in the run.
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    manifest = _harness_manifest(tmp_path)
+    report = runner.run_realworld_live(
+        manifest,
+        tmp_path,
+        10.0,
+        True,
+        muse_adapter=fake_muse,
+        sam_adapter=fake_sam,
+        results_dir=tmp_path / "results",
+        ledger_path=tmp_path / "ledgers" / "probe.jsonl",
+    )
+    assert fake_muse.calls != []
+    assert fake_sam.calls == []
+    assert {row["sam_status"] for row in report["raw"]} == {"unavailable-target"}
+    assert {row["status"] for row in report["rows"]} == {"scored"}
+    assert report["spend_ledger"]["attempts_used"] == 4
+    assert report["spend_ledger"]["unknown_cost"] is False
+    assert report["spend_ledger"]["outstanding"] == []
+
+
+def test_sam_wrong_photo_never_corroborates():
+    # F2 scenario D: a SAM localization from a different photo/control must
+    # not corroborate; provenance stays correctly associated.
+    from audits.pipeline import reconcile_claim
+
+    claim = "Adaptive Cruise Control"
+    muse_obs = build_eval_observation(
+        _sam_scenario_obs("cruise control buttons", _acc_nested_item()),
+        claim_id="acc",
+        photo_id="photo-1",
+    )
+    wrong_sam = build_sam_eval_observation(
+        muse_obs,
+        concept="following-distance button",
+        target_source="observed_object",
+        control_index=0,  # wrong item: the mapping stands on item 1
+        masks=2,
+    )
+    wrong_sam.photo_id = __import__("uuid").uuid4()  # wrong photo
+    state, summary = reconcile_claim([muse_obs, wrong_sam], claim, FORTE_2021)
+    assert state == "visually_supported"
+    assert "different photo or control" in summary
+    right_sam = build_sam_eval_observation(
+        muse_obs,
+        concept="following-distance button",
+        target_source="observed_object",
+        control_index=1,
+        masks=2,
+    )
+    state, summary = reconcile_claim([muse_obs, right_sam], claim, FORTE_2021)
+    assert state == "visually_supported"
+    assert "confirmed by SAM localization" in summary

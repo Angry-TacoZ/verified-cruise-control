@@ -18,7 +18,9 @@ the spend preflight. ``realworld-live`` runs baseline (m2) vs
 reference-assisted (m3) Muse observations per case plus deterministic
 reconciliation; SAM localization runs only with ``VCC_LIVE_SAM=1`` and a
 Meta key, otherwise the SAM stage is reported as not measured. Never run
-live evals in CI.
+live evals in CI. Every call is pre-reserved to a write-ahead fsync'd
+ledger (``--ledger`` reuses a clean trail; outstanding reservations
+refuse).
 """
 
 from __future__ import annotations
@@ -53,14 +55,18 @@ from audits.pipeline import (
 from audits.realworld import (
     BudgetRefused,
     EvalBudget,
+    LedgerFile,
+    assert_ledger_clear,
     build_eval_observation,
+    build_sam_eval_observation,
     estimate_spend,
+    fresh_ledger_path,
     muse_verdict,
     render_markdown,
     score_case,
+    select_sam_target,
     summarize,
     validate_manifest,
-    write_ledger,
 )
 from django.conf import settings
 
@@ -241,17 +247,36 @@ def _refuse(message: str) -> None:
 
 
 def run_realworld_live(
-    manifest_path: Path, photos_root: Path, max_spend: float, include_sam: bool
+    manifest_path: Path,
+    photos_root: Path,
+    max_spend: float,
+    include_sam: bool,
+    *,
+    muse_adapter=None,
+    sam_adapter=None,
+    results_dir=None,
+    ledger_path=None,
 ) -> dict:
-    """Paired baseline (m2) vs reference-assisted (m3) live evaluation."""
+    """Paired baseline (m2) vs reference-assisted (m3) live evaluation.
+
+    Injectable adapters/directories exist for deterministic offline tests
+    (fake adapters, tmp dirs); production calls construct the real Baseten
+    and Meta adapters. No paid inference happens without VCC_LIVE_SMOKE=1
+    (plus VCC_LIVE_SAM=1 for the SAM stage) and configured provider keys.
+    """
     from providers.base import ImageAttachment
     from providers.baseten import BasetenMuseAdapter, MuseRequest
 
     if os.environ.get("VCC_LIVE_SMOKE") != "1":
         raise SystemExit("refusing: set VCC_LIVE_SMOKE=1 to run live evals")
     cases = validate_manifest(manifest_path, photos_root=photos_root)
-    sam_adapter = None
-    if include_sam:
+    if isinstance(manifest_path, (str, Path)):
+        manifest_id = Path(manifest_path).stem
+        manifest_name = Path(manifest_path).name
+    else:
+        manifest_id = str(manifest_path.get("dataset", "manifest"))
+        manifest_name = manifest_id
+    if include_sam and sam_adapter is None:
         if os.environ.get("VCC_LIVE_SAM") != "1":
             raise SystemExit(
                 "refusing: SAM stage needs VCC_LIVE_SAM=1 (else rerun with --skip-sam)"
@@ -259,6 +284,7 @@ def run_realworld_live(
         from providers.meta import MetaSamAdapter, SamRequest
 
         sam_adapter = MetaSamAdapter()
+    if sam_adapter is not None:
         sam_adapter.require_configured()
     preflight = estimate_spend(
         len(cases),
@@ -271,13 +297,29 @@ def run_realworld_live(
         raise SystemExit(
             f"refusing: worst-case bound ${preflight['worst_case_usd']} exceeds --max-spend ${max_spend}"
         )
-    muse_adapter = BasetenMuseAdapter()
+    if muse_adapter is None:
+        muse_adapter = BasetenMuseAdapter()
     muse_adapter.require_configured()
 
-    # F1: every provider call below runs through pre-call reservations.
-    # Attempt headroom mirrors each adapter's own bounded retry policy
-    # (Muse: first try + up to 2 retries; SAM: first try + up to 3).
+    out_dir = Path(results_dir) if results_dir is not None else RESULTS
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # F1: every provider call below runs through durable pre-call
+    # reservations. Attempt headroom mirrors each adapter's own bounded
+    # retry policy (Muse: first try + up to 2 retries; SAM: first try +
+    # up to 3). The ledger file is unique per run; pointing --ledger at
+    # an existing file resumes only when it holds no outstanding
+    # reservations, otherwise the run refuses (no auto-replay, ever).
     per_call = str(settings.AUDIT_SPEND_CAP_USD)
+    run_id = uuid.uuid4().hex[:12]
+    if ledger_path is None:
+        ledger_path = fresh_ledger_path(out_dir, "realworld-live", run_id)
+    else:
+        ledger_path = Path(ledger_path)
+        if ledger_path.exists():
+            assert_ledger_clear(ledger_path)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_file = LedgerFile(ledger_path)
     budget = EvalBudget(
         # Authorization verified above (VCC_LIVE_SMOKE + configured keys).
         authorized=True,
@@ -285,11 +327,9 @@ def run_realworld_live(
         max_attempts_total=preflight["muse_calls_planned"] * 3
         + preflight["sam_calls_planned"] * 4,
         reserve_usd_per_call=per_call,
+        ledger_file=ledger_file,
+        run_id=run_id,
     )
-    ledger_path = RESULTS / f"{date.today().isoformat()}-realworld-live.ledger.jsonl"
-
-    def flush():
-        write_ledger(ledger_path, budget)
 
     rows = []
     raw = []
@@ -333,10 +373,11 @@ def run_realworld_live(
                         muse_adapter,
                         request,
                         max_attempts=3,
+                        case_id=case["id"],
+                        mode=mode,
                     )
                 except BudgetRefused as exc:
                     _refuse(str(exc))
-                flush()
                 obs_list = list(result.observations or [])
                 if not obs_list:
                     # Empty model output is not evidence: record the gap,
@@ -369,34 +410,59 @@ def run_realworld_live(
                 eval_obs = build_eval_observation(
                     obs, claim_id=claim["claim_id"], photo_id=photo_id
                 )
-                sam_target = visible if verdict == "present" else ""
+                # F2: SAM target comes from the production selector over
+                # the full observation (nested controls included), never
+                # from the top-level object alone. No valid target means
+                # no SAM call, explicitly recorded.
+                sam_target = ""
+                target_source = None
+                control_index = None
+                recon_inputs = [eval_obs]
                 sam_masks = 0
-                sam_status = "skipped" if not include_sam else "no-target"
-                if include_sam and sam_target:
-                    from PIL import Image as PILImage
-
-                    with PILImage.open(photos_root / photo_rel) as img:
-                        width, height = img.size
-                    sam_request = SamRequest(
-                        photo=attachment,
-                        image_width=width,
-                        image_height=height,
-                        concept=sam_target,
+                if not include_sam:
+                    sam_status = "skipped"
+                else:
+                    selection = select_sam_target(
+                        eval_obs, claim["advertised"], case["vehicle"]
                     )
-                    try:
-                        sam_result = budget.guarded(
-                            f"SAM {case['id']} {mode}",
-                            sam_adapter,
-                            sam_request,
-                            max_attempts=4,
+                    if selection is None:
+                        sam_status = "unavailable-target"
+                    else:
+                        sam_target, target_source, control_index = selection
+                        from PIL import Image as PILImage
+
+                        with PILImage.open(photos_root / photo_rel) as img:
+                            width, height = img.size
+                        sam_request = SamRequest(
+                            photo=attachment,
+                            image_width=width,
+                            image_height=height,
+                            concept=sam_target,
                         )
-                    except BudgetRefused as exc:
-                        _refuse(str(exc))
-                    flush()
-                    sam_masks = len(sam_result.records or [])
-                    sam_status = "localized" if sam_masks else "no-mask"
+                        try:
+                            sam_result = budget.guarded(
+                                f"SAM {case['id']} {mode}",
+                                sam_adapter,
+                                sam_request,
+                                max_attempts=4,
+                                case_id=case["id"],
+                                mode=mode,
+                            )
+                        except BudgetRefused as exc:
+                            _refuse(str(exc))
+                        sam_masks = len(sam_result.records or [])
+                        sam_status = "localized" if sam_masks else "no-mask"
+                        recon_inputs.append(
+                            build_sam_eval_observation(
+                                eval_obs,
+                                concept=sam_target,
+                                target_source=target_source,
+                                control_index=control_index,
+                                masks=sam_masks,
+                            )
+                        )
                 state, _summary = reconcile_claim(
-                    [eval_obs],
+                    recon_inputs,
                     claim["advertised"],
                     case["vehicle"],
                 )
@@ -412,6 +478,8 @@ def run_realworld_live(
                     if state in ("verified", "visually_supported")
                     else ("unknown" if verdict == "unclear" else "insufficient"),
                     "sam_target": sam_target,
+                    "sam_target_source": target_source,
+                    "sam_control_index": control_index,
                     "sam_masks": sam_masks,
                     "sam_status": sam_status,
                 }
@@ -422,6 +490,7 @@ def run_realworld_live(
                         "mode": mode,
                         "prompt_version": prompt_version,
                         "muse_observation": obs,
+                        "sam_target": sam_target,
                         "sam_status": sam_status,
                         "sam_masks": sam_masks,
                         "state": state,
@@ -429,16 +498,16 @@ def run_realworld_live(
                 )
     except SystemExit:
         raise
-    except Exception as exc:  # noqa: BLE001 - any failure aborts with ledger flushed
+    except Exception as exc:  # noqa: BLE001 - any failure aborts, ledger stays durable
         raise SystemExit(f"aborting live eval after provider error: {exc}")
     finally:
-        # Durable history: reservations, settlements, and unknown-cost
-        # freezes survive interruption instead of dying with the process.
-        flush()
-    summary = summarize(manifest_path.stem, rows)
+        # Every event was already fsync'd at reservation/settlement time;
+        # closing only flushes the file handle itself.
+        ledger_file.close()
+    summary = summarize(manifest_id, rows)
     return {
         "eval": "realworld-live",
-        "manifest": manifest_path.name,
+        "manifest": manifest_name,
         "manifest_version": "realworld-v1",
         "baseline_prompt": PROMPT_VERSION,
         "reference_prompt": REFERENCE_PROMPT_VERSION,
@@ -450,7 +519,7 @@ def run_realworld_live(
         "cost_usd": str(budget.spent),
         "spend_ledger": budget.totals(),
         "spend_ledger_path": ledger_path.name,
-        "markdown": render_markdown(manifest_path.stem, summary, rows),
+        "markdown": render_markdown(manifest_id, summary, rows),
     }
 
 
@@ -464,6 +533,13 @@ def main() -> None:
     parser.add_argument("--photos-root", type=str, default=None)
     parser.add_argument("--recorded", type=str, default=None)
     parser.add_argument("--skip-sam", action="store_true")
+    parser.add_argument(
+        "--ledger",
+        type=str,
+        default=None,
+        help="Resume audit trail: reuse an existing ledger file, which must "
+        "hold no outstanding reservations (refuses otherwise).",
+    )
     args = parser.parse_args()
     if args.eval == "reconcile":
         report = run_reconcile()
@@ -491,6 +567,7 @@ def main() -> None:
             _resolve_photos_root(manifest_path, args.photos_root),
             args.max_spend,
             include_sam=not args.skip_sam,
+            ledger_path=args.ledger,
         )
         print(report["markdown"])
         name = f"{date.today().isoformat()}-realworld-live.json"

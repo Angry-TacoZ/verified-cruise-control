@@ -2958,7 +2958,7 @@ def test_sam_target_from_observed_object():
         ),
     ]
     for extra, expected in cases:
-        concept, source, index = pipeline._sam_target_for(
+        concept, source, index = pipeline.sam_target_for(
             Obs(extra=extra), "adaptive cruise control"
         )
         assert concept == expected
@@ -2969,13 +2969,13 @@ def test_sam_target_from_observed_object():
 def test_sam_target_legacy_fallback_and_unavailable():
     from audits.models import Observation as Obs
 
-    concept, source, index = pipeline._sam_target_for(
+    concept, source, index = pipeline.sam_target_for(
         Obs(extra={"supports_localization": True}), "adaptive cruise control!"
     )
     assert concept == "adaptive cruise control"
     assert source == "claim_fallback"
     assert index is None
-    concept, source, index = pipeline._sam_target_for(
+    concept, source, index = pipeline.sam_target_for(
         Obs(extra={"visible_object": "!!!"}), "adaptive cruise control"
     )
     assert concept == ""
@@ -2997,7 +2997,7 @@ def test_sam_target_selects_nested_claim_relevant_control():
             }
         ],
     }
-    concept, source, index = pipeline._sam_target_for(
+    concept, source, index = pipeline.sam_target_for(
         Obs(extra=extra), "adaptive cruise control", FORTE_2021
     )
     assert concept == "following-distance button"
@@ -3019,7 +3019,7 @@ def test_sam_target_prefers_supporting_top_level():
             }
         ],
     }
-    concept, source, index = pipeline._sam_target_for(
+    concept, source, index = pipeline.sam_target_for(
         Obs(extra=extra), "adaptive cruise control", FORTE_2021
     )
     assert concept == "following-distance button"
@@ -3039,7 +3039,7 @@ def test_sam_target_prefers_claim_relevant_over_unrelated():
             }
         ],
     }
-    concept, source, index = pipeline._sam_target_for(
+    concept, source, index = pipeline.sam_target_for(
         Obs(extra=extra), "cruise control", FORTE_2021
     )
     assert concept == "cruise set and resume buttons"
@@ -3054,7 +3054,7 @@ def test_sam_target_skips_none_candidates():
         "visible_object": "none",
         "controls": [{"visible_object": "none"}],
     }
-    concept, source, index = pipeline._sam_target_for(
+    concept, source, index = pipeline.sam_target_for(
         Obs(extra=extra), "adaptive cruise control", FORTE_2021
     )
     assert concept == ""
