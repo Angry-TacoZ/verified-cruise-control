@@ -7,6 +7,8 @@ pipeline completes it.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import re
 import uuid
 from dataclasses import dataclass
@@ -96,10 +98,39 @@ class ScreenedJob:
     photos: list[Photograph]
 
 
-def load_images(photos: list[Photograph]) -> list[ImageAttachment]:
+def verified_original_bytes(job_id, worker_id: str, photo: Photograph) -> bytes:
+    """Read an original's bytes, proving they still match the snapshot.
+
+    The snapshot SHA-256 is the frozen truth: bytes that no longer match
+    fail the job with ``evidence_tampered`` before any inference can use
+    them. Never repairs or re-points; the snapshot is never rewritten.
+    """
+    job = AuditJob.objects.get(pk=job_id)
+    entries = {entry.get("id"): entry for entry in get_snapshot(job).get("photos", [])}
+    entry = entries.get(str(photo.pk))
+    if entry is None or not entry.get("sha256"):
+        detail = f"photo {photo.pk} has no snapshotted hash"
+        services.fail_job(job_id, worker_id, "evidence_missing", detail)
+        raise services.JobNotRunningError(f"job {job_id} lost evidence")
+    try:
+        data = original_path(photo.storage_ref, photo.image_format).read_bytes()
+    except OSError:
+        detail = f"snapshotted original {photo.pk} unreadable from storage"
+        services.fail_job(job_id, worker_id, "evidence_missing", detail)
+        raise services.JobNotRunningError(f"job {job_id} lost evidence")
+    if hashlib.sha256(data).hexdigest() != entry["sha256"]:
+        detail = f"original {photo.pk} no longer matches its snapshot SHA-256"
+        services.fail_job(job_id, worker_id, "evidence_tampered", detail)
+        raise services.JobNotRunningError(f"job {job_id} evidence tampered")
+    return data
+
+
+def load_images(
+    job_id, worker_id: str, photos: list[Photograph]
+) -> list[ImageAttachment]:
     attachments = []
     for photo in photos:
-        data = original_path(photo.storage_ref, photo.image_format).read_bytes()
+        data = verified_original_bytes(job_id, worker_id, photo)
         attachments.append(
             ImageAttachment(
                 photo_id=str(photo.id),
@@ -121,19 +152,34 @@ def get_snapshot(job: AuditJob) -> dict:
     return snapshot
 
 
+_SNAPSHOT_META_FIELDS = (
+    "sha256",
+    "width",
+    "height",
+    "mime_type",
+    "image_format",
+    "storage_ref",
+)
+
+
 def run_screening(job_id, worker_id: str) -> ScreenedJob:
     """Local pre-pass: the snapshot's claims + preserved originals must
-    exist and still be on disk.
+    exist, match their snapshotted metadata, and hash to their snapshotted
+    SHA-256.
 
     Records a LOCAL ledger row (never charged). Fails the job with an
-    exact blocker when there is nothing to audit or snapshotted evidence
-    went missing (never silently proceeds on a subset).
+    exact blocker when there is nothing to audit, snapshotted evidence
+    went missing, metadata drifted, or bytes no longer hash-match (never
+    silently proceeds on a subset, and never rewrites the snapshot).
+    Runs at the start of every ``run_stages`` pass, so a worker restart
+    re-verifies before any new provider call.
     """
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
     snapshot = get_snapshot(job)
     claims = [c["text"] for c in snapshot.get("claims", []) if c.get("text")]
-    wanted = [p["id"] for p in snapshot.get("photos", [])]
+    entries = {p["id"]: p for p in snapshot.get("photos", [])}
+    wanted = list(entries)
     if not claims:
         services.fail_job(job_id, worker_id, "no_claims", "listing has no claims")
         raise services.JobNotRunningError(f"job {job_id} has no claims")
@@ -147,6 +193,21 @@ def run_screening(job_id, worker_id: str) -> ScreenedJob:
         services.fail_job(job_id, worker_id, "evidence_missing", detail)
         raise services.JobNotRunningError(f"job {job_id} lost evidence")
     photos = [rows[photo_id] for photo_id in wanted]
+    drifted = [
+        str(p.pk)
+        for p in photos
+        if any(
+            getattr(p, field) != entries[str(p.pk)].get(field)
+            for field in _SNAPSHOT_META_FIELDS
+        )
+    ]
+    if drifted:
+        detail = (
+            f"{len(drifted)} photo(s) no longer match snapshot metadata: "
+            + ", ".join(sorted(drifted)[:3])
+        )
+        services.fail_job(job_id, worker_id, "evidence_metadata_drift", detail)
+        raise services.JobNotRunningError(f"job {job_id} evidence drifted")
     gone = [
         str(p.pk)
         for p in photos
@@ -156,13 +217,23 @@ def run_screening(job_id, worker_id: str) -> ScreenedJob:
         detail = f"{len(gone)} snapshotted original(s) missing from storage"
         services.fail_job(job_id, worker_id, "evidence_missing", detail)
         raise services.JobNotRunningError(f"job {job_id} lost evidence")
+    for photo in photos:
+        data = original_path(photo.storage_ref, photo.image_format).read_bytes()
+        if hashlib.sha256(data).hexdigest() != entries[str(photo.pk)]["sha256"]:
+            detail = f"original {photo.pk} no longer matches its snapshot SHA-256"
+            services.fail_job(job_id, worker_id, "evidence_tampered", detail)
+            raise services.JobNotRunningError(f"job {job_id} evidence tampered")
     services.record_execution(
         job_id,
         worker_id,
         stage=Stage.SCREENING,
         provider=Provider.LOCAL,
         photo_ids=[str(p.id) for p in photos],
-        usage={"claims": len(claims), "photos": len(photos)},
+        usage={
+            "claims": len(claims),
+            "photos": len(photos),
+            "integrity": "sha256-verified",
+        },
     )
     return ScreenedJob(claims=claims, photos=photos)
 
@@ -372,7 +443,7 @@ def run_muse(
     stored = 0
     images = {str(p.id): p for p in screened.photos}
     for photo in screened.photos:
-        photo_attachments = load_images([photo])
+        photo_attachments = load_images(job_id, worker_id, [photo])
         for chunk in chunked(entries, MUSE_MAX_CLAIMS_PER_CALL):
             expected = {(entry["id"], str(photo.pk)) for entry in chunk}
             if expected <= done:
@@ -537,7 +608,7 @@ def run_sam(
                     rationale="claim yields no SAM concept phrase",
                 )
             continue
-        data = original_path(photo.storage_ref, photo.image_format).read_bytes()
+        data = verified_original_bytes(job_id, worker_id, photo)
         request = SamRequest(
             photo=ImageAttachment(
                 photo_id=str(photo.id), mime_type=photo.mime_type, data=data
@@ -633,7 +704,8 @@ def run_crop(job_id, worker_id: str) -> int:
     ).order_by("claim_key", "photo_id")
     for obs in observations:
         photo = obs.photo
-        with Image.open(original_path(photo.storage_ref, photo.image_format)) as img:
+        data = verified_original_bytes(job_id, worker_id, photo)
+        with Image.open(io.BytesIO(data)) as img:
             width, height = img.size
             for entry in obs.boxes:
                 key = (
@@ -773,7 +845,7 @@ def run_recheck(
                     f"job {job_id} stopped during recheck"
                 )
             data = (crops_dir / f"{crop.storage_ref}.png").read_bytes()
-            context = original_path(photo.storage_ref, photo.image_format).read_bytes()
+            context = verified_original_bytes(job_id, worker_id, photo)
             request = MuseRequest(
                 prompt_version=RECHECK_PROMPT_VERSION,
                 system_instructions=RECHECK_SYSTEM_INSTRUCTIONS,

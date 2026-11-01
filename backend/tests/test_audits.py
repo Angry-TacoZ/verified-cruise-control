@@ -2159,3 +2159,96 @@ def test_stale_recheck_persists_nothing(listing, photos, enabled):
         for o in Observation.objects.filter(job=job, source=ObservationSource.RECHECK)
     }
     assert rows == {"c1": Verdict.ABSENT, "c2": Verdict.ABSENT}
+
+
+# --- snapshot integrity verification (remediation F3) ----------------------
+
+
+def _tamper_original(photo):
+    from evidence.images import original_path
+
+    path = original_path(photo.storage_ref, photo.image_format)
+    path.write_bytes(path.read_bytes() + b"tampered")
+
+
+def test_screening_rejects_tampered_bytes(listing, photos, enabled):
+    job = _running_job(listing)
+    before = pipeline.get_snapshot(job)["photos"][0]["sha256"]
+    _tamper_original(photos[0])
+    with pytest.raises(services.JobNotRunningError):
+        pipeline.run_screening(job.pk, "w1")
+    job.refresh_from_db()
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == "evidence_tampered"
+    # The snapshot is frozen truth: never rewritten, never "repaired".
+    assert pipeline.get_snapshot(job)["photos"][0]["sha256"] == before
+
+
+def test_screening_rejects_metadata_drift(listing, photos, enabled):
+    from evidence.models import Photograph
+
+    job = _running_job(listing)
+    pipeline.get_snapshot(job)
+    Photograph.objects.filter(pk=photos[0].pk).update(width=9999)
+    with pytest.raises(services.JobNotRunningError):
+        pipeline.run_screening(job.pk, "w1")
+    job.refresh_from_db()
+    assert job.status == JobStatus.FAILED
+    assert job.error_code == "evidence_metadata_drift"
+
+
+def test_screening_rejects_db_sha_mismatch(listing, photos, enabled):
+    from evidence.models import Photograph
+
+    job = _running_job(listing)
+    pipeline.get_snapshot(job)
+    Photograph.objects.filter(pk=photos[0].pk).update(sha256="0" * 64)
+    with pytest.raises(services.JobNotRunningError):
+        pipeline.run_screening(job.pk, "w1")
+    job.refresh_from_db()
+    assert job.error_code == "evidence_metadata_drift"
+
+
+def test_tampered_evidence_blocks_all_provider_calls(listing, photos, enabled):
+    job = _running_job(listing)
+    pipeline.get_snapshot(job)
+    _tamper_original(photos[1])
+    muse = ScriptedMuseAdapter(_two_photo_scripts(photos))
+    sam = FakeSamAdapter(records=[_segment()])
+    with pytest.raises(services.JobNotRunningError):
+        pipeline.run_stages(job.pk, "w1", muse, sam)
+    assert muse.calls == 0
+    assert sam.calls == 0
+    job.refresh_from_db()
+    assert job.status == JobStatus.FAILED
+    assert job.spend_usd == Decimal("0.0000")
+
+
+def test_verified_read_rejects_midrun_tamper(listing, photos, enabled):
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    _tamper_original(photos[0])
+    muse = ScriptedMuseAdapter(_two_photo_scripts(photos))
+    with pytest.raises(services.JobNotRunningError):
+        pipeline.run_muse(job.pk, "w1", screened, muse)
+    assert muse.calls == 0
+    job.refresh_from_db()
+    assert job.error_code == "evidence_tampered"
+
+
+def test_restart_reverifies_before_new_calls(listing, photos, enabled):
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    first = ScriptedMuseAdapter(_two_photo_scripts(photos))
+    assert pipeline.run_muse(job.pk, "w1", screened, first) == 4
+    _tamper_original(photos[1])
+    second = ScriptedMuseAdapter(_two_photo_scripts(photos))
+    with pytest.raises(services.JobNotRunningError):
+        pipeline.run_stages(job.pk, "w1", second, FakeSamAdapter(records=[]))
+    assert second.calls == 0
+    job.refresh_from_db()
+    assert job.error_code == "evidence_tampered"
+    # Committed evidence from the verified pass survives.
+    assert (
+        Observation.objects.filter(job=job, source=ObservationSource.Muse).count() == 4
+    )
