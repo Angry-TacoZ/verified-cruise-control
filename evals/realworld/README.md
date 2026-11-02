@@ -71,7 +71,9 @@ reservations refuses — pass `--ledger <path>` only for a clean trail.
 The default restart also scans the whole results directory for ledgers
 with outstanding reservations for the same dataset, identified by
 ledger content (not filename), so renaming a ledger cannot evade the
-check; unrelated `.jsonl` files are ignored. Concurrency is gated by
+check, performed while holding the dataset lock so a reservation
+landing mid-startup cannot slip through; unrelated `.jsonl` files are
+ignored. Concurrency is gated by
 an OS-backed per-dataset lock held open for the whole run — it cannot
 expire while the holder lives, and the OS releases it if the holder
 process dies. After a crash, allow a few seconds for OS handle teardown,

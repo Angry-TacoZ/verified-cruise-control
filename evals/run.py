@@ -312,28 +312,30 @@ def run_realworld_live(
     # Cross-run billing safety: one dataset-wide coordination lock (an
     # OS-backed exclusive lock held open for the whole run — no TTL, so a
     # live evaluation can never lose it by running long; the OS releases
-    # it if the holder process dies), then an automatic content-based
-    # scan of the ledger directory for unresolved reservations from
-    # previous runs of THIS dataset — including legacy files without
-    # dataset identity, treated conservatively, and ledgers saved under
-    # custom filenames. Any hit refuses before adapters are even
-    # constructed. An explicit --ledger path is additionally checked
-    # in full.
+    # it if the holder process dies), then — while holding that lock — an
+    # authoritative content-based scan of the ledger directory for
+    # unresolved reservations from previous runs of THIS dataset,
+    # including legacy files without dataset identity, treated
+    # conservatively, and ledgers saved under custom filenames. Any hit
+    # refuses before adapters are even constructed; only the scan under
+    # the held lock authorizes execution, so a reservation landing
+    # between scan and lock acquisition cannot slip through. An explicit
+    # --ledger path is additionally checked in full.
     dataset_id = dataset_fingerprint(manifest_path)
     per_call = str(settings.AUDIT_SPEND_CAP_USD)
     run_id = uuid.uuid4().hex[:12]
-    # Scan first so a restart reports the blocking reservations (not just
-    # a held lock); then claim the dataset lock. Either order is safe:
-    # two simultaneous starters cannot both pass, because the loser hits
-    # the other's outstanding reservations or its held lock.
-    try:
-        refuse_if_blocked(scan_ledger_dir(out_dir, dataset_id))
-    except BudgetRefused as exc:
-        _refuse(str(exc))
+    # Lock first: scanning before acquiring leaves a check-then-act race
+    # where another process persists an outstanding reservation after our
+    # scan but before our lock, and we would proceed on stale accounting.
     lock_path = ledger_lock_path(out_dir, dataset_id)
     try:
         dataset_lock = acquire_ledger_lock(lock_path, run_id)
     except BudgetRefused as exc:
+        _refuse(str(exc))
+    try:
+        refuse_if_blocked(scan_ledger_dir(out_dir, dataset_id))
+    except BudgetRefused as exc:
+        dataset_lock.release()
         _refuse(str(exc))
     if ledger_path is None:
         ledger_path = fresh_ledger_path(out_dir, "realworld-live", run_id)

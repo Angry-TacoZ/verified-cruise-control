@@ -1438,6 +1438,108 @@ def test_custom_filename_torn_ledger_fails_closed(tmp_path):
         scan_ledger_dir(ledgers, fingerprint)
 
 
+def test_post_lock_scan_catches_race_ledger(tmp_path, monkeypatch):
+    # P1 race: the authoritative scan runs under the held dataset lock.
+    # A reservation landing after any earlier check but before lock
+    # acquisition is still caught, and no provider call fires.
+    manifest = _harness_manifest(tmp_path)
+    results = tmp_path / "results"
+    results.mkdir()
+    runner = _load_eval_runner()
+    real_acquire = runner.acquire_ledger_lock
+
+    def raced_acquire(path, run_id):
+        # Simulate the other process winning the race: its outstanding
+        # reservation lands just before we hold the lock.
+        _crashed_ledger_for(manifest, results, run_id="runRACER")
+        return real_acquire(path, run_id)
+
+    monkeypatch.setattr(runner, "acquire_ledger_lock", raced_acquire)
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit, match="outstanding"):
+        runner.run_realworld_live(
+            manifest,
+            tmp_path,
+            10.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=results,
+        )
+    assert fake_muse.calls == []
+    assert fake_sam.calls == []
+
+
+def test_settled_race_ledger_does_not_block(tmp_path, monkeypatch):
+    # Control: a reservation that lands mid-startup but is fully settled
+    # before our post-lock scan must not block execution.
+    manifest = _harness_manifest(tmp_path)
+    fingerprint = dataset_fingerprint(manifest)
+    results = tmp_path / "results"
+    results.mkdir()
+    runner = _load_eval_runner()
+    real_acquire = runner.acquire_ledger_lock
+
+    def settled_acquire(path, run_id):
+        settled = results / "2026-01-01-realworld-live-runSETTLED.jsonl"
+        handle = LedgerFile(settled)
+        budget = EvalBudget(
+            authorized=True,
+            max_spend_usd="5.00",
+            max_attempts_total=12,
+            reserve_usd_per_call="2.00",
+            ledger_file=handle,
+            dataset_id=fingerprint,
+        )
+        token = budget.reserve(
+            "Muse case-a baseline",
+            max_attempts=3,
+            provider="fake-muse",
+            case_id="case-a",
+            mode="baseline",
+        )
+        budget.settle(token, attempts=1, cost_usd="0.01", provider="fake-muse")
+        handle.close()
+        return real_acquire(path, run_id)
+
+    monkeypatch.setattr(runner, "acquire_ledger_lock", settled_acquire)
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    report = runner.run_realworld_live(
+        manifest,
+        tmp_path,
+        10.0,
+        True,
+        muse_adapter=fake_muse,
+        sam_adapter=fake_sam,
+        results_dir=results,
+    )
+    assert fake_muse.calls != []
+    assert report["spend_ledger"]["unknown_cost"] is False
+
+
+def test_refused_run_releases_dataset_lock(tmp_path, monkeypatch):
+    # A run refused by the post-lock scan must release the lock, so the
+    # next attempt can start (and report the blockers, not a held lock).
+    manifest = _harness_manifest(tmp_path)
+    results = tmp_path / "results"
+    results.mkdir()
+    _crashed_ledger_for(manifest, results)
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit, match="outstanding"):
+        _harness_run(tmp_path, manifest, monkeypatch)
+    follow = acquire_ledger_lock(
+        ledger_lock_path(results, dataset_fingerprint(manifest)), "runNEXT"
+    )
+    follow.release()
+
+
 def test_accounting_history_immutable(tmp_path, monkeypatch):
     # Test G: refused or subsequent runs never modify existing events.
     manifest = _harness_manifest(tmp_path)
