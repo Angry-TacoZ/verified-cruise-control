@@ -43,6 +43,16 @@ Cruise family: conventional (set speed; speedometer or CRUISE/SET telltale) vs A
 
 Draft PR open early; prompt/reference versioned; baseline reproducible; ground truth independent; local-only photos; no unauthorized media; paired comparison with denominators; mocks + regression green; backend/Ruff/Django/goldens green; mother/extension checks green; no paid inference in CI; live needs auth; no unmeasured claims; PR unmerged.
 
+## Billing-safety defects 1–5 (5 fixes on `304ec25`)
+
+No paid inference; no RSA/catalog/scoring/SAM-parity/frontend changes; leave PR #3 open unmerged.
+
+- [x] D1 (P1) — default scan now blocks on ANY outstanding/settled-unknown reservation in the managed results dir, regardless of dataset (manifest edits and other datasets can no longer evade the guard); directory-wide `DatasetLock` (one fixed `.realworld-live.lock`) also closes the cross-dataset concurrency gap. `dataset_id` stays in records and refusal messages as diagnosis. Boundary documented: one managed results dir per provider account. Adjusted `test_different_dataset_not_blocked` into blocking (old per-dataset behavior retired); added added-case, other-dataset, and cross-dataset-lock tests.
+- [x] D2 (P2) — only non-empty string tokens enter the settled set; a reserved record with a missing/None/non-string token is always unresolved.
+- [x] D3 (P2) — `read_ledger` validates every line (dict + known event, else ValueError→BudgetRefused); a custom file whose first line is a non-object now fails closed before `read_ledger` is reached. Tests cover conventional + custom names, first and later lines, with lock release and zero provider calls.
+- [x] D4 (P3) — setup after acquisition runs inside the guarded try; nested finally keeps `close()` failure from skipping release; `LedgerFile` closed only if created.
+- [x] D5 (P3) — new-file creation fsyncs the parent dir on POSIX (`_fsync_parent`; skipped on `nt` with comment), for ledgers and the lock file; best-effort crash consistency documented, per-event file fsync unchanged. POSIX wiring tests skip on Windows (CI covers them); Windows-path msvcrt behavior unchanged and covered locally.
+
 ## Remediation pass 3 (review of `18349d2`, 1 finding — prior head CI 4/4 green)
 
 No paid inference; no RSA/catalog/prompt/ground-truth changes; leave PR #3 open unmerged.

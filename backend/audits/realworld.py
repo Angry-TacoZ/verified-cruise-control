@@ -539,20 +539,42 @@ class BudgetRefused(Exception):
     or blocked by an outstanding reservation from an earlier run."""
 
 
+def _fsync_parent(directory) -> None:
+    """Fsync a directory entry so a new file inside survives a hard crash.
+
+    Best-effort POSIX crash consistency: callers skip this on Windows
+    (``os.name == "nt"``), where directory fsync is not supported. It
+    narrows — but cannot eliminate — the window in which a crash right
+    after file creation loses the new file on some filesystems; per-event
+    file fsync still guarantees everything already reported.
+    """
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 class LedgerFile:
     """Append-only durable ledger file.
 
     Every event is serialized, flushed, and fsync'd before the call
     returns, so a hard crash loses nothing already reported. The file is
     opened for appending only: events are never rewritten or deleted,
-    and one run never overwrites another run's file.
+    and one run never overwrites another run's file. Creating a new file
+    also fsyncs its parent directory on POSIX (see :func:`_fsync_parent`).
     """
 
     def __init__(self, path) -> None:
         self.path = Path(path)
+        is_new = not self.path.exists()
         # The handle lifetime is the object lifetime; closed explicitly
         # via close() (LedgerFile is also usable as a context manager).
         self._handle = open(self.path, "ab")  # noqa: SIM115
+        if is_new and os.name != "nt":
+            # Windows has no directory fsync; the open file itself is
+            # still flushed and fsync'd per event below.
+            _fsync_parent(self.path.parent)
 
     def append(self, record: dict) -> None:
         import json
@@ -578,7 +600,12 @@ class LedgerFile:
 
 
 def read_ledger(path) -> list:
-    """Read persisted ledger events; a missing file reads as empty."""
+    """Read persisted ledger events; a missing file reads as empty.
+
+    Every non-blank line must decode to a ledger record object carrying a
+    known event; anything else raises ValueError so both callers convert
+    it to BudgetRefused and fail closed instead of leaking a traceback.
+    """
     import json
 
     target = Path(path)
@@ -587,36 +614,45 @@ def read_ledger(path) -> list:
     records = []
     for line in target.read_text(encoding="utf-8").splitlines():
         line = line.strip()
-        if line:
-            records.append(json.loads(line))
+        if not line:
+            continue
+        record = json.loads(line)
+        if not isinstance(record, dict) or record.get("event") not in (
+            LEDGER_EVENT_TYPES
+        ):
+            raise ValueError(f"ledger {target} holds a non-record line: {line[:80]!r}")
+        records.append(record)
     return records
 
 
-def find_outstanding(records: list, dataset_id=None) -> list:
+def find_outstanding(records: list) -> list:
     """Reserved events with no matching settlement, in ledger order.
 
     Settlements with unknown cost count as outstanding: the billing status
-    is unresolved, so a restart must not assume zero spend. When
-    ``dataset_id`` is given, only records for that dataset — plus legacy
-    records carrying no dataset identity, treated conservatively — block.
-    A reserved record without a token can never match a settlement.
+    is unresolved, so a restart must not assume zero spend. Only non-empty
+    string tokens enter the settled set, and only a reserved record with
+    such a token can match one — a reserved record whose token is missing,
+    None, or not a string is always unresolved. The guard protects the
+    provider account, so ANY unresolved reservation blocks regardless of
+    dataset; records keep their ``dataset_id`` (surfaced in error messages)
+    for diagnosis only.
     """
     settled = {
         record.get("token")
         for record in records
         if record.get("event") in ("settled", "settled-unknown")
+        and isinstance(record.get("token"), str)
+        and record.get("token")
     }
     blocking = []
     for record in records:
         event = record.get("event")
+        token = record.get("token")
         unresolved = event == "settled-unknown" or (
-            event == "reserved" and record.get("token") not in settled
+            event == "reserved"
+            and (not isinstance(token, str) or not token or token not in settled)
         )
-        same_dataset = dataset_id is None or record.get("dataset_id") in (
-            None,
-            dataset_id,
-        )
-        if unresolved and same_dataset:
+        if unresolved:
             blocking.append(record)
     return blocking
 
@@ -624,10 +660,14 @@ def find_outstanding(records: list, dataset_id=None) -> list:
 def _describe_blockers(outstanding: list) -> str:
     labels = sorted({str(item.get("label", "?")) for item in outstanding})
     runs = sorted({str(item.get("run_id", "?")) for item in outstanding})
-    return f"{len(outstanding)} outstanding reservation(s) ({', '.join(labels)}; runs: {', '.join(runs)})"
+    datasets = sorted({str(item.get("dataset_id", "?")) for item in outstanding})
+    return (
+        f"{len(outstanding)} outstanding reservation(s) ({', '.join(labels)}; "
+        f"runs: {', '.join(runs)}; datasets: {', '.join(datasets)})"
+    )
 
 
-def assert_ledger_clear(path, dataset_id=None) -> None:
+def assert_ledger_clear(path) -> None:
     """Fail closed when an earlier run left outstanding reservations.
 
     Never auto-replays: the operator reconciles billing externally, then
@@ -641,7 +681,7 @@ def assert_ledger_clear(path, dataset_id=None) -> None:
             f"ledger {path} is unreadable or malformed ({exc}): refusing "
             "evaluation until it is inspected, reconciled, or archived."
         )
-    outstanding = find_outstanding(records, dataset_id)
+    outstanding = find_outstanding(records)
     if outstanding:
         raise BudgetRefused(
             f"ledger {path} has {_describe_blockers(outstanding)}: reconcile "
@@ -725,20 +765,28 @@ def _unlock_fd(fd: int) -> None:
         _fcntl.flock(fd, _fcntl.LOCK_UN)
 
 
-def ledger_lock_path(directory, dataset_id: str):
-    """Coordination lock for one dataset (no new infrastructure)."""
-    return Path(directory) / f".realworld-live.{dataset_id[:16]}.lock"
+def ledger_lock_path(directory):
+    """One directory-wide coordination lock (no new infrastructure).
+
+    The lock guards every evaluation sharing the managed results
+    directory, regardless of dataset: outstanding reservations are
+    against the provider account, not one dataset, and two concurrent
+    runs must never both pass the pre-run gate. It does NOT guard the
+    same provider account across different results directories — see the
+    boundary note in ``scan_ledger_dir``.
+    """
+    return Path(directory) / ".realworld-live.lock"
 
 
-# Paths this process currently holds a dataset lock for. A second
-# in-process acquisition of the same dataset refuses instead of silently
-# succeeding, so one process can never hold the same dataset lock twice
+# Paths this process currently holds a ledger lock for. A second
+# in-process acquisition of the same directory refuses instead of
+# silently succeeding, so one process can never hold the same lock twice
 # (which would mask a real concurrency bug in the caller).
-_HELD_DATASET_LOCKS: dict = {}
+_HELD_LEDGER_LOCKS: dict = {}
 
 
 class DatasetLock:
-    """Exclusive per-dataset coordination lock with OS-backed ownership.
+    """Exclusive directory-wide coordination lock with OS-backed ownership.
 
     The lock is an open file descriptor held for the whole run: liveness
     is proved by the OS lock itself, not by a timestamp, so there is no
@@ -759,10 +807,10 @@ class DatasetLock:
         import time as _time
 
         key = str(path)
-        if key in _HELD_DATASET_LOCKS:
+        if key in _HELD_LEDGER_LOCKS:
             raise BudgetRefused(
-                f"this process already holds the dataset lock {path}: "
-                "refusing a second acquisition for the same dataset."
+                f"this process already holds the ledger lock {path}: "
+                "refusing a second acquisition for the same directory."
             )
         payload = {"run_id": run_id, "pid": os.getpid(), "created": _time.time()}
         line = _json.dumps(payload, sort_keys=True).encode("utf-8")
@@ -785,14 +833,14 @@ class DatasetLock:
             # ownership is uncertain, so the run is refused.
             os.close(fd)
             raise BudgetRefused(
-                f"another evaluation holds the dataset lock {path}: refusing "
-                "concurrent paid runs for this dataset."
+                f"another evaluation holds the ledger lock {path}: refusing "
+                "concurrent paid runs sharing this directory."
             )
         try:
             handle = os.fdopen(fd, "r+b")
         except OSError:  # pragma: no cover - descriptor vanished mid-acquire
             raise BudgetRefused(
-                f"dataset lock {path} cannot be tracked safely: refusing "
+                f"ledger lock {path} cannot be tracked safely: refusing "
                 "evaluation while ownership is uncertain."
             )
         try:
@@ -800,6 +848,11 @@ class DatasetLock:
             handle.truncate()
             handle.write(line + b"\n")
             handle.flush()
+            if os.name != "nt":
+                # Durable holder record + directory entry on POSIX; no
+                # directory fsync on Windows (not supported there).
+                os.fsync(handle.fileno())
+                _fsync_parent(Path(path).parent)
         except OSError:
             try:
                 _unlock_fd(fd)
@@ -807,14 +860,14 @@ class DatasetLock:
                 pass
             handle.close()
             raise BudgetRefused(
-                f"dataset lock {path} cannot record its holder: refusing "
+                f"ledger lock {path} cannot record its holder: refusing "
                 "evaluation while ownership is uncertain."
             )
         self._path = Path(path)
         self._run_id = run_id
         self._handle = handle
         self._released = False
-        _HELD_DATASET_LOCKS[key] = self
+        _HELD_LEDGER_LOCKS[key] = self
 
     @property
     def path(self):
@@ -837,7 +890,7 @@ class DatasetLock:
             self._handle.close()
         except OSError:
             pass
-        _HELD_DATASET_LOCKS.pop(str(self._path), None)
+        _HELD_LEDGER_LOCKS.pop(str(self._path), None)
 
     def __enter__(self):
         return self
@@ -847,7 +900,7 @@ class DatasetLock:
 
 
 def acquire_ledger_lock(path, run_id: str) -> DatasetLock:
-    """Claim the dataset coordination lock, or refuse.
+    """Claim the directory-wide coordination lock, or refuse.
 
     Ownership is an OS-backed exclusive file lock held open for the
     whole run — it cannot expire while the holder is alive, and the OS
@@ -859,14 +912,14 @@ def acquire_ledger_lock(path, run_id: str) -> DatasetLock:
 
 
 def release_ledger_lock(path, run_id: str) -> None:
-    """Release the dataset lock held by this process for ``run_id``.
+    """Release the directory lock held by this process for ``run_id``.
 
     Only releases a lock this process actually holds; anything else is
     left alone. Prefer keeping the :class:`DatasetLock` and calling its
     ``release`` method (or using it as a context manager).
     """
     key = str(path)
-    held = _HELD_DATASET_LOCKS.get(key)
+    held = _HELD_LEDGER_LOCKS.get(key)
     if held is None or held.run_id != run_id:
         return
     held.release()
@@ -893,9 +946,9 @@ def _iter_candidate_ledgers(directory):
 
     Convention-named files are always parsed as ledgers. Any other
     ``*.jsonl`` file is peeked at: ledger content is included even under
-    a custom filename, well-formed non-ledger JSON is ignored, and an
-    unreadable or unparseable first line fails closed because the file
-    cannot be proven irrelevant.
+    a custom filename, well-formed non-ledger JSON objects are ignored,
+    and an unreadable, unparseable, or non-object first line fails closed
+    because the file cannot be proven irrelevant.
     """
     root = Path(directory)
     try:
@@ -938,23 +991,35 @@ def _iter_candidate_ledgers(directory):
                 f"ledger candidate {path} is unparseable ({exc}): refusing "
                 "evaluation until it is inspected, reconciled, or archived."
             )
+        if not isinstance(parsed, dict):
+            raise BudgetRefused(
+                f"ledger candidate {path} first line is not a ledger record: "
+                "refusing evaluation until it is inspected, reconciled, or "
+                "archived."
+            )
         if _looks_like_eval_ledger(parsed):
             yield path
 
 
-def scan_ledger_dir(directory, dataset_id: str) -> list:
-    """Find same-dataset ledgers with outstanding reservations.
+def scan_ledger_dir(directory) -> list:
+    """Find ledgers with outstanding reservations in one managed directory.
 
-    Discovery is content-based: convention-named files plus any other
-    ``*.jsonl`` file whose first record carries evaluation-ledger
-    identity, so custom filenames cannot evade the scan. Returns
-    ``[(path, outstanding)]`` hits. Unreadable or malformed relevant
-    files fail closed instead of being silently skipped; legacy records
-    without dataset identity are treated conservatively.
+    Blocks on ANY unresolved or unknown-cost reservation found in the
+    directory, regardless of dataset: the reservations already left the
+    provider account, so a renamed manifest, an added case, or a
+    different dataset cannot evade the guard. Discovery is content-based:
+    convention-named files plus any other ``*.jsonl`` file whose first
+    record carries evaluation-ledger identity, so custom filenames cannot
+    evade the scan either. Returns ``[(path, outstanding)]`` hits.
+    Unreadable or malformed relevant files fail closed instead of being
+    silently skipped.
 
-    Limitation: only files inside the managed results directory are
-    scanned (non-recursively). A ledger moved outside that directory is
-    no longer discovered — archive reviewed ledgers into the
+    Boundary: only files inside the given managed results directory are
+    scanned (non-recursively), so this guards the evaluations sharing
+    that directory — it does NOT guard the same provider account when
+    separate processes use different results directories. Keep one local
+    billing workspace per account. A ledger moved outside the directory
+    is no longer discovered — archive reviewed ledgers into the
     ``archive/`` subdirectory, which the scan skips by design.
     """
     hits = []
@@ -966,7 +1031,7 @@ def scan_ledger_dir(directory, dataset_id: str) -> list:
                 f"ledger {path} is unreadable or malformed ({exc}): refusing "
                 "evaluation until it is inspected, reconciled, or archived."
             )
-        outstanding = find_outstanding(records, dataset_id)
+        outstanding = find_outstanding(records)
         if outstanding:
             hits.append((path, outstanding))
     return hits

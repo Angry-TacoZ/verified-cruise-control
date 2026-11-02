@@ -160,11 +160,16 @@ estimate.
 
 ## 9. Cross-run billing safety (pass 3 + final coordination)
 
-Default restarts scan the results directory for same-dataset ledgers
-with outstanding reservations (content-identified, including legacy
-records and custom filenames) and refuse before any provider call;
-per-dataset concurrency uses an OS-backed lock with no expiry while
-the holder lives (OS release on process death). Recovery is manual:
-reconcile billing externally, then archive or remove the ledger —
-never auto-replay or rewrite. Deterministic offline regression tests;
-still zero paid inference.
+Default restarts scan the results directory for ANY ledger with
+outstanding or unknown-cost reservations, regardless of dataset
+(content-identified, including legacy records and custom filenames),
+and refuse before any provider call — spend already left the provider
+account, so a renamed manifest, an added case, or a different dataset
+cannot evade the guard. One OS-backed directory-wide lock (no expiry
+while the holder lives; OS release on process death) gates concurrency
+for every evaluation sharing the directory; the authoritative scan runs
+under the held lock. Token-less records never cancel a reservation;
+non-record lines fail closed. Recovery is manual: reconcile billing
+externally, then archive or remove the ledger — never auto-replay or
+rewrite. Boundary: one managed results directory per provider account.
+Deterministic offline regression tests; still zero paid inference.

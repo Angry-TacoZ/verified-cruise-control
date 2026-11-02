@@ -1094,7 +1094,7 @@ def test_default_restart_refuses_unresolved(tmp_path, monkeypatch):
     ledgers = tmp_path / "results"
     ledgers.mkdir()
     _crashed_ledger_for(manifest, ledgers)
-    assert len(scan_ledger_dir(ledgers, dataset_fingerprint(manifest))) == 1
+    assert len(scan_ledger_dir(ledgers)) == 1
     import pytest as _pytest
 
     with _pytest.raises(SystemExit, match="outstanding"):
@@ -1186,18 +1186,34 @@ def _different_manifest(manifest_a):
     return manifest
 
 
-def test_different_dataset_not_blocked(tmp_path, monkeypatch):
-    # Test D: a crashed run for a demonstrably different dataset does not
-    # block a new evaluation.
+def test_different_dataset_outstanding_blocks(tmp_path, monkeypatch):
+    # Test D (updated for the directory-wide guard): a crashed run blocks
+    # a new evaluation even for a demonstrably different dataset, because
+    # the unresolved reservation already left the provider account.
     manifest_a = _harness_manifest(tmp_path)
     ledgers = tmp_path / "results"
     ledgers.mkdir()
     _crashed_ledger_for(manifest_a, ledgers, run_id="runAAAA")
     manifest_b = _different_manifest(manifest_a)
     assert dataset_fingerprint(manifest_a) != dataset_fingerprint(manifest_b)
-    report, fake_muse, _other = _harness_run(tmp_path, manifest_b, monkeypatch)
-    assert fake_muse.calls != []
-    assert report["spend_ledger"]["unknown_cost"] is False
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    import pytest as _pytest
+
+    with _pytest.raises(SystemExit, match="outstanding"):
+        runner.run_realworld_live(
+            manifest_b,
+            tmp_path,
+            10.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=tmp_path / "results",
+        )
+    assert fake_muse.calls == []
+    assert fake_sam.calls == []
 
 
 def test_malformed_ledger_fails_closed(tmp_path, monkeypatch):
@@ -1230,12 +1246,10 @@ def test_malformed_ledger_fails_closed(tmp_path, monkeypatch):
 
 
 def test_concurrent_start_single_winner(tmp_path):
-    # Test F: two simultaneous attempts for the same dataset cannot both
-    # pass the preflight coordination gate. The lock is an OS-held file
-    # descriptor with no TTL, so there is nothing to expire.
-    manifest = _harness_manifest(tmp_path)
-    fingerprint = dataset_fingerprint(manifest)
-    lock = ledger_lock_path(tmp_path, fingerprint)
+    # Test F: two simultaneous attempts sharing a results directory cannot
+    # both pass the preflight coordination gate. The lock is an OS-held
+    # file descriptor with no TTL, so there is nothing to expire.
+    lock = ledger_lock_path(tmp_path)
     held = acquire_ledger_lock(lock, "runA")
     import pytest as _pytest
 
@@ -1254,13 +1268,12 @@ def test_concurrent_start_single_winner(tmp_path):
 
 
 def test_concurrent_run_refuses_while_locked(tmp_path, monkeypatch):
-    # Test F (integration): a run started while another holds the dataset
-    # lock refuses before any provider request.
+    # Test F (integration): a run started while another holds the
+    # directory lock refuses before any provider request.
     manifest = _harness_manifest(tmp_path)
-    fingerprint = dataset_fingerprint(manifest)
     results = tmp_path / "results"
     results.mkdir()
-    other = acquire_ledger_lock(ledger_lock_path(results, fingerprint), "runOTHER")
+    other = acquire_ledger_lock(ledger_lock_path(results), "runOTHER")
     runner = _load_eval_runner()
     fake_muse = _HarnessMuseAdapter()
     fake_sam = _HarnessSamAdapter()
@@ -1293,8 +1306,7 @@ def test_stale_lock_content_never_blocks(tmp_path):
     import json as _json
     import time as _time
 
-    manifest = _harness_manifest(tmp_path)
-    lock = ledger_lock_path(tmp_path, dataset_fingerprint(manifest))
+    lock = ledger_lock_path(tmp_path)
     lock.write_text(
         _json.dumps({"run_id": "runCRASH", "pid": 1, "created": _time.time() - 7200}),
         encoding="utf-8",
@@ -1306,7 +1318,7 @@ def test_stale_lock_content_never_blocks(tmp_path):
     second.release()
 
 
-def test_crashed_process_releases_dataset_lock(tmp_path):
+def test_crashed_process_releases_directory_lock(tmp_path):
     # F1: the lock is OS-owned, so duration never matters. A second
     # process cannot take it while the holder lives (however long that
     # is — there is no TTL to expire), and the OS releases it when the
@@ -1316,8 +1328,7 @@ def test_crashed_process_releases_dataset_lock(tmp_path):
 
     import pytest as _pytest
 
-    manifest = _harness_manifest(tmp_path)
-    lock = ledger_lock_path(tmp_path, dataset_fingerprint(manifest))
+    lock = ledger_lock_path(tmp_path)
     backend = Path(__file__).resolve().parents[1]
     child = (
         "import os, sys, time; "
@@ -1368,8 +1379,9 @@ def test_crashed_process_releases_dataset_lock(tmp_path):
 
 
 def test_custom_filename_ledger_blocks_default_restart(tmp_path, monkeypatch):
-    # F2: discovery is content-based, not filename-based. A same-dataset
-    # ledger with outstanding reservations blocks a default restart even
+    # F2: discovery is content-based, not filename-based. A ledger with
+    # outstanding reservations under a custom filename blocks a default
+    # restart even
     # under a custom filename, before any provider call. Well-formed
     # non-ledger JSONL and empty files are ignored.
     manifest = _harness_manifest(tmp_path)
@@ -1396,7 +1408,7 @@ def test_custom_filename_ledger_blocks_default_restart(tmp_path, monkeypatch):
         mode="baseline",
     )
     handle.close()
-    hits = scan_ledger_dir(ledgers, fingerprint)
+    hits = scan_ledger_dir(ledgers)
     assert len(hits) == 1
     assert hits[0][0].name == "friday-run-notes.jsonl"
     runner = _load_eval_runner()
@@ -1422,8 +1434,7 @@ def test_custom_filename_ledger_blocks_default_restart(tmp_path, monkeypatch):
 def test_custom_filename_torn_ledger_fails_closed(tmp_path):
     # F2: a custom-named file carrying ledger identity but torn content
     # fails closed instead of being skipped as "unrelated".
-    manifest = _harness_manifest(tmp_path)
-    fingerprint = dataset_fingerprint(manifest)
+    _harness_manifest(tmp_path)
     ledgers = tmp_path / "results"
     ledgers.mkdir()
     import json as _json
@@ -1435,11 +1446,11 @@ def test_custom_filename_torn_ledger_fails_closed(tmp_path):
         _json.dumps(first) + "\n{ torn content\n", encoding="utf-8"
     )
     with _pytest.raises(BudgetRefused):
-        scan_ledger_dir(ledgers, fingerprint)
+        scan_ledger_dir(ledgers)
 
 
 def test_post_lock_scan_catches_race_ledger(tmp_path, monkeypatch):
-    # P1 race: the authoritative scan runs under the held dataset lock.
+    # P1 race: the authoritative scan runs under the held directory lock.
     # A reservation landing after any earlier check but before lock
     # acquisition is still caught, and no provider call fires.
     manifest = _harness_manifest(tmp_path)
@@ -1523,7 +1534,7 @@ def test_settled_race_ledger_does_not_block(tmp_path, monkeypatch):
     assert report["spend_ledger"]["unknown_cost"] is False
 
 
-def test_refused_run_releases_dataset_lock(tmp_path, monkeypatch):
+def test_refused_run_releases_directory_lock(tmp_path, monkeypatch):
     # A run refused by the post-lock scan must release the lock, so the
     # next attempt can start (and report the blockers, not a held lock).
     manifest = _harness_manifest(tmp_path)
@@ -1534,10 +1545,322 @@ def test_refused_run_releases_dataset_lock(tmp_path, monkeypatch):
 
     with _pytest.raises(SystemExit, match="outstanding"):
         _harness_run(tmp_path, manifest, monkeypatch)
-    follow = acquire_ledger_lock(
-        ledger_lock_path(results, dataset_fingerprint(manifest)), "runNEXT"
-    )
+    follow = acquire_ledger_lock(ledger_lock_path(results), "runNEXT")
     follow.release()
+
+
+def test_added_case_does_not_evade_guard(tmp_path, monkeypatch):
+    # Defect 1: adding a case changes the fingerprint, but the crashed
+    # run's outstanding reservation already left the provider account,
+    # so the extended run must still refuse before any provider call.
+    import copy as _copy
+
+    import pytest as _pytest
+
+    manifest = _harness_manifest(tmp_path)
+    results = tmp_path / "results"
+    results.mkdir()
+    _crashed_ledger_for(manifest, results, run_id="runOLD")
+    extended = _copy.deepcopy(manifest)
+    extra = _copy.deepcopy(manifest["cases"][1])
+    extra["id"] = "case-c"
+    extended["cases"].append(extra)
+    assert dataset_fingerprint(extended) != dataset_fingerprint(manifest)
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    with _pytest.raises(SystemExit, match="outstanding"):
+        runner.run_realworld_live(
+            extended,
+            tmp_path,
+            15.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=results,
+        )
+    assert fake_muse.calls == []
+    assert fake_sam.calls == []
+
+
+def test_directory_lock_blocks_different_datasets(tmp_path):
+    # Defect 1: the directory-wide lock refuses concurrent runs even for
+    # different datasets, closing the cross-dataset concurrency gap.
+    import pytest as _pytest
+
+    first = acquire_ledger_lock(ledger_lock_path(tmp_path), "runA")
+    try:
+        with _pytest.raises(BudgetRefused):
+            acquire_ledger_lock(ledger_lock_path(tmp_path), "runB")
+    finally:
+        first.release()
+
+
+def test_tokenless_records_stay_outstanding():
+    # Defect 2: a settled record without a usable token must never cancel
+    # a reservation; a reserved record without one is always unresolved.
+    assert (
+        find_outstanding(
+            [
+                {"event": "reserved", "label": "x"},
+                {"event": "settled", "label": "x"},
+            ]
+        )
+        != []
+    )
+    assert (
+        find_outstanding(
+            [
+                {"event": "reserved", "token": None, "label": "x"},
+                {"event": "settled", "token": None, "label": "x"},
+            ]
+        )
+        != []
+    )
+    assert (
+        find_outstanding(
+            [
+                {"event": "reserved", "token": 123, "label": "x"},
+                {"event": "settled", "token": 123, "label": "x"},
+            ]
+        )
+        != []
+    )
+    assert (
+        find_outstanding(
+            [
+                {"event": "reserved", "token": "", "label": "x"},
+                {"event": "settled", "token": "", "label": "x"},
+            ]
+        )
+        != []
+    )
+
+
+def test_nondict_json_fails_closed_both_names(tmp_path):
+    # Defect 3 (+review note 2): a ledger line that is valid JSON but not
+    # an object fails closed, whether the file uses the conventional name
+    # or a custom one.
+    import pytest as _pytest
+
+    import audits.realworld as _realworld
+
+    for sub, name in (
+        ("conv", "2026-01-01-realworld-live-runARR.jsonl"),
+        ("custom", "renamed-array.jsonl"),
+    ):
+        ledgers = tmp_path / sub
+        ledgers.mkdir()
+        (ledgers / name).write_text("[1,2]\n", encoding="utf-8")
+        with _pytest.raises(BudgetRefused):
+            _realworld.scan_ledger_dir(ledgers)
+
+
+def test_nondict_later_line_releases_lock_no_calls(tmp_path, monkeypatch):
+    # Defect 3: a torn later line (valid JSON, not an object) refuses with
+    # BudgetRefused — releasing the lock — before any provider call.
+    import json as _json
+
+    import pytest as _pytest
+
+    manifest = _harness_manifest(tmp_path)
+    results = tmp_path / "results"
+    results.mkdir()
+    first = {
+        "event": "reserved",
+        "token": "tok1",
+        "run_id": "runX",
+        "label": "Muse case-a baseline",
+        "dataset_id": dataset_fingerprint(manifest),
+    }
+    (results / "custom-torn.jsonl").write_text(
+        _json.dumps(first) + "\n[1,2]\n", encoding="utf-8"
+    )
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    with _pytest.raises(SystemExit, match="malformed|unreadable"):
+        runner.run_realworld_live(
+            manifest,
+            tmp_path,
+            10.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=results,
+        )
+    assert fake_muse.calls == []
+    assert fake_sam.calls == []
+    follow = acquire_ledger_lock(ledger_lock_path(results), "runNEXT")
+    follow.release()
+
+
+def test_ledger_creation_failure_releases_lock(tmp_path, monkeypatch):
+    # Defect 4: if LedgerFile creation fails after lock acquisition, the
+    # lock is still released and an in-process retry can acquire it.
+    import pytest as _pytest
+
+    manifest = _harness_manifest(tmp_path)
+    results = tmp_path / "results"
+    results.mkdir()
+    runner = _load_eval_runner()
+
+    def _boom(path):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(runner, "LedgerFile", _boom)
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    with _pytest.raises(OSError, match="disk full"):
+        runner.run_realworld_live(
+            manifest,
+            tmp_path,
+            10.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=results,
+        )
+    assert fake_muse.calls == []
+    assert fake_sam.calls == []
+    follow = acquire_ledger_lock(ledger_lock_path(results), "runNEXT")
+    follow.release()
+
+
+def test_close_failure_still_releases_lock(tmp_path, monkeypatch):
+    # Defect 4: a ledger_file.close() failure must not skip the release.
+    import pytest as _pytest
+
+    manifest = _harness_manifest(tmp_path)
+    results = tmp_path / "results"
+    results.mkdir()
+    runner = _load_eval_runner()
+    _real_ledger_file = runner.LedgerFile
+
+    class _ExplodingClose(_real_ledger_file):
+        def close(self):
+            raise OSError("fsync failed")
+
+    monkeypatch.setattr(runner, "LedgerFile", _ExplodingClose)
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    with _pytest.raises(OSError, match="fsync failed"):
+        runner.run_realworld_live(
+            manifest,
+            tmp_path,
+            10.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=results,
+        )
+    follow = acquire_ledger_lock(ledger_lock_path(results), "runNEXT")
+    follow.release()
+
+
+def test_ledger_creation_fsyncs_parent_dir(tmp_path, monkeypatch):
+    # Defect 5: creating a new ledger fsyncs its parent directory on
+    # POSIX (best-effort crash consistency); skipped on Windows, where
+    # directory fsync is not supported.
+    import os as _os
+
+    import pytest as _pytest
+
+    import audits.realworld as _realworld
+
+    if _os.name == "nt":
+        _pytest.skip("POSIX-only directory fsync")
+    calls = []
+    monkeypatch.setattr(
+        _realworld, "_fsync_parent", lambda directory: calls.append(directory)
+    )
+    handle = _realworld.LedgerFile(tmp_path / "new-ledger.jsonl")
+    try:
+        assert calls == [tmp_path]
+    finally:
+        handle.close()
+    # Reopening an existing ledger does not fsync the directory again.
+    handle2 = _realworld.LedgerFile(tmp_path / "new-ledger.jsonl")
+    try:
+        assert calls == [tmp_path]
+    finally:
+        handle2.close()
+
+
+def test_ledger_creation_skips_dir_fsync_on_windows(tmp_path, monkeypatch):
+    # Defect 5: on Windows the directory fsync is skipped with a comment.
+    import os as _os
+
+    import pytest as _pytest
+
+    import audits.realworld as _realworld
+
+    if _os.name != "nt":
+        _pytest.skip("Windows-only directory-fsync skip")
+    calls = []
+    monkeypatch.setattr(
+        _realworld, "_fsync_parent", lambda directory: calls.append(directory)
+    )
+    handle = _realworld.LedgerFile(tmp_path / "new-ledger.jsonl")
+    try:
+        assert calls == []
+    finally:
+        handle.close()
+
+
+def test_fsync_parent_fsyncs_directory(tmp_path, monkeypatch):
+    # Defect 5 mechanics: the helper fsyncs exactly the directory fd.
+    import os as _os
+
+    import pytest as _pytest
+
+    import audits.realworld as _realworld
+
+    if _os.name == "nt":
+        _pytest.skip("POSIX-only directory fsync")
+    opened = {}
+    _real_open = _os.open
+
+    def _spy_open(path, flags, *args, **kwargs):
+        fd = _real_open(path, flags, *args, **kwargs)
+        opened.setdefault(str(path), []).append(fd)
+        return fd
+
+    seen = []
+    monkeypatch.setattr(_os, "open", _spy_open)
+    monkeypatch.setattr(_os, "fsync", lambda fd: seen.append(fd))
+    _realworld._fsync_parent(tmp_path)
+    # Exactly one fsync, targeting a descriptor opened for the directory.
+    assert len(seen) == 1
+    assert seen[0] in opened.get(str(tmp_path), [])
+
+
+def test_lock_creation_fsyncs_on_posix(tmp_path, monkeypatch):
+    # Defect 5: the lock file payload and its directory are fsync'd on
+    # POSIX too; skipped on Windows.
+    import os as _os
+
+    import pytest as _pytest
+
+    import audits.realworld as _realworld
+
+    if _os.name == "nt":
+        _pytest.skip("POSIX-only lock fsync")
+    calls = []
+    monkeypatch.setattr(
+        _realworld, "_fsync_parent", lambda directory: calls.append(directory)
+    )
+    held = _realworld.acquire_ledger_lock(
+        _realworld.ledger_lock_path(tmp_path), "runFSYNC"
+    )
+    try:
+        assert calls == [tmp_path]
+    finally:
+        held.release()
 
 
 def test_accounting_history_immutable(tmp_path, monkeypatch):

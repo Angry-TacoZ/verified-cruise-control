@@ -309,114 +309,212 @@ def run_realworld_live(
     out_dir = Path(results_dir) if results_dir is not None else RESULTS
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Cross-run billing safety: one dataset-wide coordination lock (an
+    # Cross-run billing safety: one directory-wide coordination lock (an
     # OS-backed exclusive lock held open for the whole run — no TTL, so a
     # live evaluation can never lose it by running long; the OS releases
     # it if the holder process dies), then — while holding that lock — an
-    # authoritative content-based scan of the ledger directory for
-    # unresolved reservations from previous runs of THIS dataset,
-    # including legacy files without dataset identity, treated
-    # conservatively, and ledgers saved under custom filenames. Any hit
+    # authoritative content-based scan of the ledger directory for ANY
+    # unresolved reservation from previous runs, regardless of dataset:
+    # spend already left the provider account, so a renamed manifest, an
+    # added case, or a different dataset cannot evade the guard. Any hit
     # refuses before adapters are even constructed; only the scan under
     # the held lock authorizes execution, so a reservation landing
     # between scan and lock acquisition cannot slip through. An explicit
-    # --ledger path is additionally checked in full.
+    # --ledger path is additionally checked in full. Boundary: this
+    # guards the evaluations sharing the managed results directory only.
     dataset_id = dataset_fingerprint(manifest_path)
     per_call = str(settings.AUDIT_SPEND_CAP_USD)
     run_id = uuid.uuid4().hex[:12]
     # Lock first: scanning before acquiring leaves a check-then-act race
     # where another process persists an outstanding reservation after our
     # scan but before our lock, and we would proceed on stale accounting.
-    lock_path = ledger_lock_path(out_dir, dataset_id)
+    lock_path = ledger_lock_path(out_dir)
     try:
         dataset_lock = acquire_ledger_lock(lock_path, run_id)
     except BudgetRefused as exc:
         _refuse(str(exc))
+    # Everything below runs under the held lock; the finally releases it
+    # on every path, and a close() failure cannot skip the release.
+    ledger_file = None
     try:
-        refuse_if_blocked(scan_ledger_dir(out_dir, dataset_id))
-    except BudgetRefused as exc:
-        dataset_lock.release()
-        _refuse(str(exc))
-    if ledger_path is None:
-        ledger_path = fresh_ledger_path(out_dir, "realworld-live", run_id)
-    else:
-        ledger_path = Path(ledger_path)
-        if ledger_path.exists():
-            try:
-                assert_ledger_clear(ledger_path)
-            except BudgetRefused as exc:
-                dataset_lock.release()
-                _refuse(str(exc))
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    ledger_file = LedgerFile(ledger_path)
-    budget = EvalBudget(
-        # Authorization verified above (VCC_LIVE_SMOKE + configured keys).
-        authorized=True,
-        max_spend_usd=str(max_spend),
-        max_attempts_total=preflight["muse_calls_planned"] * 3
-        + preflight["sam_calls_planned"] * 4,
-        reserve_usd_per_call=per_call,
-        ledger_file=ledger_file,
-        run_id=run_id,
-        dataset_id=dataset_id,
-    )
-
-    rows = []
-    raw = []
-    try:
-        for case in cases:
-            photo_rel = case["photo"]["path"]
-            data = (photos_root / photo_rel).read_bytes()
-            claim = case["claim"]
-            entries = [{"id": claim["claim_id"], "text": claim["advertised"]}]
-            photo_id = case["id"]
-            attachment = ImageAttachment(
-                photo_id=photo_id,
-                mime_type=MIME[Path(photo_rel).suffix.lower()],
-                data=data,
-            )
-            for mode in ("baseline", "reference"):
-                if mode == "reference":
-                    block = build_reference_block([claim["advertised"]])
-                    if block:
-                        system = build_system_instructions(block)
-                        prompt_version = REFERENCE_PROMPT_VERSION
-                    else:
-                        # No RSA guidance maps to this claim: reference mode
-                        # degrades to the baseline prompt; record the fallback.
-                        system = SYSTEM_INSTRUCTIONS
-                        prompt_version = PROMPT_VERSION
-                else:
-                    system = SYSTEM_INSTRUCTIONS
-                    prompt_version = PROMPT_VERSION
-                request = MuseRequest(
-                    prompt_version=prompt_version,
-                    system_instructions=system,
-                    user_text=build_user_text(entries, [photo_id]),
-                    photo_ids=(photo_id,),
-                    images=(attachment,),
-                    max_output_tokens=MUSE_MAX_OUTPUT_TOKENS,
-                )
+        try:
+            refuse_if_blocked(scan_ledger_dir(out_dir))
+        except BudgetRefused as exc:
+            _refuse(str(exc))
+        if ledger_path is None:
+            ledger_path = fresh_ledger_path(out_dir, "realworld-live", run_id)
+        else:
+            ledger_path = Path(ledger_path)
+            if ledger_path.exists():
                 try:
-                    result = budget.guarded(
-                        f"Muse {case['id']} {mode}",
-                        muse_adapter,
-                        request,
-                        max_attempts=3,
-                        case_id=case["id"],
-                        mode=mode,
-                    )
+                    assert_ledger_clear(ledger_path)
                 except BudgetRefused as exc:
                     _refuse(str(exc))
-                obs_list = list(result.observations or [])
-                if not obs_list:
-                    # Empty model output is not evidence: record the gap,
-                    # never reconcile a fabricated observation.
+        ledger_path.parent.mkdir(parents=True, exist_ok=True)
+        ledger_file = LedgerFile(ledger_path)
+        budget = EvalBudget(
+            # Authorization verified above (VCC_LIVE_SMOKE + configured keys).
+            authorized=True,
+            max_spend_usd=str(max_spend),
+            max_attempts_total=preflight["muse_calls_planned"] * 3
+            + preflight["sam_calls_planned"] * 4,
+            reserve_usd_per_call=per_call,
+            ledger_file=ledger_file,
+            run_id=run_id,
+            dataset_id=dataset_id,
+        )
+
+        rows = []
+        raw = []
+        try:
+            for case in cases:
+                photo_rel = case["photo"]["path"]
+                data = (photos_root / photo_rel).read_bytes()
+                claim = case["claim"]
+                entries = [{"id": claim["claim_id"], "text": claim["advertised"]}]
+                photo_id = case["id"]
+                attachment = ImageAttachment(
+                    photo_id=photo_id,
+                    mime_type=MIME[Path(photo_rel).suffix.lower()],
+                    data=data,
+                )
+                for mode in ("baseline", "reference"):
+                    if mode == "reference":
+                        block = build_reference_block([claim["advertised"]])
+                        if block:
+                            system = build_system_instructions(block)
+                            prompt_version = REFERENCE_PROMPT_VERSION
+                        else:
+                            # No RSA guidance maps to this claim: reference mode
+                            # degrades to the baseline prompt; record the fallback.
+                            system = SYSTEM_INSTRUCTIONS
+                            prompt_version = PROMPT_VERSION
+                    else:
+                        system = SYSTEM_INSTRUCTIONS
+                        prompt_version = PROMPT_VERSION
+                    request = MuseRequest(
+                        prompt_version=prompt_version,
+                        system_instructions=system,
+                        user_text=build_user_text(entries, [photo_id]),
+                        photo_ids=(photo_id,),
+                        images=(attachment,),
+                        max_output_tokens=MUSE_MAX_OUTPUT_TOKENS,
+                    )
+                    try:
+                        result = budget.guarded(
+                            f"Muse {case['id']} {mode}",
+                            muse_adapter,
+                            request,
+                            max_attempts=3,
+                            case_id=case["id"],
+                            mode=mode,
+                        )
+                    except BudgetRefused as exc:
+                        _refuse(str(exc))
+                    obs_list = list(result.observations or [])
+                    if not obs_list:
+                        # Empty model output is not evidence: record the gap,
+                        # never reconcile a fabricated observation.
+                        recorded = {
+                            "case_id": case["id"],
+                            "mode": mode,
+                            "status": "missing-observation",
+                            "prompt_version": prompt_version,
+                        }
+                        rows.append(score_case(case, recorded))
+                        raw.append(
+                            {
+                                "case_id": case["id"],
+                                "mode": mode,
+                                "prompt_version": prompt_version,
+                                "muse_observation": None,
+                                "sam_status": "skipped",
+                                "sam_masks": 0,
+                                "state": None,
+                            }
+                        )
+                        continue
+                    obs = obs_list[0]
+                    verdict = muse_verdict(obs)
+                    visible = str(obs.get("visible_object", "") or "")
+                    # F2: reconcile the complete validated observation —
+                    # symbols, locations, dedicated flags, nested controls —
+                    # not a visible_object-only projection.
+                    eval_obs = build_eval_observation(
+                        obs, claim_id=claim["claim_id"], photo_id=photo_id
+                    )
+                    # F2: SAM target comes from the production selector over
+                    # the full observation (nested controls included), never
+                    # from the top-level object alone. No valid target means
+                    # no SAM call, explicitly recorded.
+                    sam_target = ""
+                    target_source = None
+                    control_index = None
+                    recon_inputs = [eval_obs]
+                    sam_masks = 0
+                    if not include_sam:
+                        sam_status = "skipped"
+                    else:
+                        selection = select_sam_target(
+                            eval_obs, claim["advertised"], case["vehicle"]
+                        )
+                        if selection is None:
+                            sam_status = "unavailable-target"
+                        else:
+                            sam_target, target_source, control_index = selection
+                            from PIL import Image as PILImage
+
+                            with PILImage.open(photos_root / photo_rel) as img:
+                                width, height = img.size
+                            sam_request = SamRequest(
+                                photo=attachment,
+                                image_width=width,
+                                image_height=height,
+                                concept=sam_target,
+                            )
+                            try:
+                                sam_result = budget.guarded(
+                                    f"SAM {case['id']} {mode}",
+                                    sam_adapter,
+                                    sam_request,
+                                    max_attempts=4,
+                                    case_id=case["id"],
+                                    mode=mode,
+                                )
+                            except BudgetRefused as exc:
+                                _refuse(str(exc))
+                            sam_masks = len(sam_result.records or [])
+                            sam_status = "localized" if sam_masks else "no-mask"
+                            recon_inputs.append(
+                                build_sam_eval_observation(
+                                    eval_obs,
+                                    concept=sam_target,
+                                    target_source=target_source,
+                                    control_index=control_index,
+                                    masks=sam_masks,
+                                )
+                            )
+                    state, _summary = reconcile_claim(
+                        recon_inputs,
+                        claim["advertised"],
+                        case["vehicle"],
+                    )
                     recorded = {
                         "case_id": case["id"],
                         "mode": mode,
-                        "status": "missing-observation",
+                        "status": "scored",
+                        "state": state,
                         "prompt_version": prompt_version,
+                        "control": visible,
+                        "nested_control_count": len(obs.get("controls") or []),
+                        "interpretation": "supports"
+                        if state in ("verified", "visually_supported")
+                        else ("unknown" if verdict == "unclear" else "insufficient"),
+                        "sam_target": sam_target,
+                        "sam_target_source": target_source,
+                        "sam_control_index": control_index,
+                        "sam_masks": sam_masks,
+                        "sam_status": sam_status,
                     }
                     rows.append(score_case(case, recorded))
                     raw.append(
@@ -424,119 +522,31 @@ def run_realworld_live(
                             "case_id": case["id"],
                             "mode": mode,
                             "prompt_version": prompt_version,
-                            "muse_observation": None,
-                            "sam_status": "skipped",
-                            "sam_masks": 0,
-                            "state": None,
+                            "muse_observation": obs,
+                            "sam_target": sam_target,
+                            "sam_status": sam_status,
+                            "sam_masks": sam_masks,
+                            "state": state,
                         }
                     )
-                    continue
-                obs = obs_list[0]
-                verdict = muse_verdict(obs)
-                visible = str(obs.get("visible_object", "") or "")
-                # F2: reconcile the complete validated observation —
-                # symbols, locations, dedicated flags, nested controls —
-                # not a visible_object-only projection.
-                eval_obs = build_eval_observation(
-                    obs, claim_id=claim["claim_id"], photo_id=photo_id
-                )
-                # F2: SAM target comes from the production selector over
-                # the full observation (nested controls included), never
-                # from the top-level object alone. No valid target means
-                # no SAM call, explicitly recorded.
-                sam_target = ""
-                target_source = None
-                control_index = None
-                recon_inputs = [eval_obs]
-                sam_masks = 0
-                if not include_sam:
-                    sam_status = "skipped"
-                else:
-                    selection = select_sam_target(
-                        eval_obs, claim["advertised"], case["vehicle"]
-                    )
-                    if selection is None:
-                        sam_status = "unavailable-target"
-                    else:
-                        sam_target, target_source, control_index = selection
-                        from PIL import Image as PILImage
-
-                        with PILImage.open(photos_root / photo_rel) as img:
-                            width, height = img.size
-                        sam_request = SamRequest(
-                            photo=attachment,
-                            image_width=width,
-                            image_height=height,
-                            concept=sam_target,
-                        )
-                        try:
-                            sam_result = budget.guarded(
-                                f"SAM {case['id']} {mode}",
-                                sam_adapter,
-                                sam_request,
-                                max_attempts=4,
-                                case_id=case["id"],
-                                mode=mode,
-                            )
-                        except BudgetRefused as exc:
-                            _refuse(str(exc))
-                        sam_masks = len(sam_result.records or [])
-                        sam_status = "localized" if sam_masks else "no-mask"
-                        recon_inputs.append(
-                            build_sam_eval_observation(
-                                eval_obs,
-                                concept=sam_target,
-                                target_source=target_source,
-                                control_index=control_index,
-                                masks=sam_masks,
-                            )
-                        )
-                state, _summary = reconcile_claim(
-                    recon_inputs,
-                    claim["advertised"],
-                    case["vehicle"],
-                )
-                recorded = {
-                    "case_id": case["id"],
-                    "mode": mode,
-                    "status": "scored",
-                    "state": state,
-                    "prompt_version": prompt_version,
-                    "control": visible,
-                    "nested_control_count": len(obs.get("controls") or []),
-                    "interpretation": "supports"
-                    if state in ("verified", "visually_supported")
-                    else ("unknown" if verdict == "unclear" else "insufficient"),
-                    "sam_target": sam_target,
-                    "sam_target_source": target_source,
-                    "sam_control_index": control_index,
-                    "sam_masks": sam_masks,
-                    "sam_status": sam_status,
-                }
-                rows.append(score_case(case, recorded))
-                raw.append(
-                    {
-                        "case_id": case["id"],
-                        "mode": mode,
-                        "prompt_version": prompt_version,
-                        "muse_observation": obs,
-                        "sam_target": sam_target,
-                        "sam_status": sam_status,
-                        "sam_masks": sam_masks,
-                        "state": state,
-                    }
-                )
-    except SystemExit:
-        raise
-    except Exception as exc:  # noqa: BLE001 - any failure aborts, ledger stays durable
-        raise SystemExit(f"aborting live eval after provider error: {exc}")
+        except SystemExit:
+            raise
+        except Exception as exc:  # noqa: BLE001 - any failure aborts, ledger stays durable
+            raise SystemExit(f"aborting live eval after provider error: {exc}")
     finally:
         # Every event was already fsync'd at reservation/settlement time;
-        # closing only flushes the file handle itself. The dataset lock is
-        # always released so a finished run never blocks the next one; a
-        # crashed holder's lock is released by the OS on process death.
-        ledger_file.close()
-        dataset_lock.release()
+        # closing only flushes the file handle itself. The directory lock
+        # is always released so a finished run never blocks the next one;
+        # a crashed holder's lock is released by the OS on process death.
+        # The nested finally keeps a close() failure from skipping the
+        # release; a run that never created its ledger still releases it.
+        if ledger_file is not None:
+            try:
+                ledger_file.close()
+            finally:
+                dataset_lock.release()
+        else:
+            dataset_lock.release()
     summary = summarize(manifest_id, rows)
     return {
         "eval": "realworld-live",
