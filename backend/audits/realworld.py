@@ -876,9 +876,9 @@ class DatasetLock:
             handle.truncate()
             handle.write(line + b"\n")
             handle.flush()
-            if os.name != "nt":
-                # Durable holder record + directory entry on POSIX; no
-                # directory fsync on Windows (not supported there).
+            if _should_fsync_parent():
+                # Durable holder record + directory entry where supported;
+                # skipped on Windows (no directory fsync there).
                 os.fsync(handle.fileno())
                 _fsync_parent(Path(path).parent)
         except OSError:

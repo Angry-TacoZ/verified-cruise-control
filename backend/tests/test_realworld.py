@@ -1976,6 +1976,9 @@ def test_fsync_failure_end_to_end_refuses_cleanly(tmp_path, monkeypatch):
         )
     assert fake_muse.calls == []
     assert fake_sam.calls == []
+    # Disarm the gated fsync: the follow-up acquisition must exercise the
+    # real path (which fsyncs on POSIX), proving the run released the lock.
+    armed["on"] = False
     follow = acquire_ledger_lock(ledger_lock_path(results), "runNEXT")
     follow.release()
 
