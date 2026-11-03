@@ -3,11 +3,14 @@
 Muse (Layer B) identifies physical controls; SAM (Layer C) localizes the
 observed object; this module (Layer D) deterministically maps validated
 object observations to supported vehicle capabilities using the
-versioned reference catalog (``adas_catalog_v1.json``).
+versioned reference catalog (``adas_catalog_v2.json`` by default).
 
 Nothing here calls a model. Unknown controls, unknown manufacturers, and
 ambiguous matches all resolve to documented unknowns — never to invented
-equipment knowledge.
+equipment knowledge. Cross-manufacturer visual patterns (scope
+``general_pattern``) may support a capability up to ``visually_supported``
+but can never verify it; verification still requires authoritative
+vehicle-specific evidence.
 """
 
 from __future__ import annotations
@@ -19,7 +22,8 @@ from pathlib import Path
 
 from .models import Verdict
 
-CATALOG_PATH = Path(__file__).resolve().parent / "adas_catalog_v1.json"
+CATALOG_PATH = Path(__file__).resolve().parent / "adas_catalog_v2.json"
+CATALOG_V1_PATH = Path(__file__).resolve().parent / "adas_catalog_v1.json"
 CATALOG_VERSION = "2026-11-01/v1"
 
 FEATURE_UNKNOWN = "unknown"
@@ -124,6 +128,7 @@ class CatalogEntry:
     sources: tuple[dict, ...]
     certainty: str
     certainty_note: str
+    verdict_ceiling: str | None = None
 
     @property
     def is_naming_only(self) -> bool:
@@ -155,6 +160,7 @@ class Interpretation:
     explanation: str = ""
     reference: str = ""
     location_note: str = ""
+    scope: str = ""
 
 
 @dataclass(frozen=True)
@@ -274,6 +280,31 @@ def load_catalog(path: Path | None = None) -> Catalog:
                     f"catalog entry {entry_id}: general entries must not "
                     "carry make/model/year applicability"
                 )
+        elif scope == "general_pattern":
+            if (
+                item["manufacturer"] is not None
+                or item["models"]
+                or item["model_years"]
+            ):
+                raise ValueError(
+                    f"catalog entry {entry_id}: general-pattern entries must "
+                    "not carry make/model/year applicability"
+                )
+            ceiling = item.get("verdict_ceiling")
+            if ceiling != "visually_supported":
+                raise ValueError(
+                    f"catalog entry {entry_id}: general-pattern ceiling must "
+                    f"be visually_supported, got {ceiling!r}"
+                )
+            if item["strength"] not in (
+                "supportive",
+                "ambiguous",
+                "non_diagnostic",
+            ):
+                raise ValueError(
+                    f"catalog entry {entry_id}: general-pattern strength "
+                    f"above the cap is not allowed, got {item['strength']!r}"
+                )
         elif scope == "manufacturer_specific":
             if not item["manufacturer"] or not item["models"]:
                 raise ValueError(
@@ -282,6 +313,17 @@ def load_catalog(path: Path | None = None) -> Catalog:
                 )
         else:
             raise ValueError(f"catalog entry {entry_id}: bad scope {scope!r}")
+        ceiling = item.get("verdict_ceiling")
+        if ceiling is not None and ceiling not in (
+            "verified",
+            "visually_supported",
+            "contradicted",
+            "insufficient_evidence",
+            "not_visually_verifiable",
+        ):
+            raise ValueError(
+                f"catalog entry {entry_id}: bad verdict ceiling {ceiling!r}"
+            )
         trim = item.get("trim")
         if trim is not None and not isinstance(trim, str):
             raise ValueError(f"catalog entry {entry_id}: bad trim")
@@ -322,6 +364,7 @@ def load_catalog(path: Path | None = None) -> Catalog:
                 sources=tuple(item["sources"]),
                 certainty=item["certainty"],
                 certainty_note=item["certainty_note"],
+                verdict_ceiling=item.get("verdict_ceiling"),
             )
         )
     return Catalog(version=version, feature_ids=feature_ids, entries=tuple(entries))
@@ -359,35 +402,57 @@ def match_entry(
     control_symbol: str = "",
     control_type: str = "",
     vehicle: dict | None = None,
+    scopes: tuple[str, ...] | None = None,
 ) -> CatalogEntry | None:
     """Find the catalog entry for an observed control, if exactly one fits.
 
     Naming-only entries never match physical controls. Candidates rank
     by identifier specificity (phrase hits, then matched characters),
-    then by verified vehicle applicability, then by raw keyword count —
-    so a documented multi-word control identifier beats a generic
-    overlapping word, and the applicable entry wins exact-specificity
-    ties. Full-key ties and zero-score controls resolve to ``None``
+    then by manufacturer-specific scope (the documented entry for the
+    vehicle wins exact-specificity ties over a general pattern), then
+    by verified vehicle applicability, then by raw keyword count — so
+    a documented multi-word control identifier beats a generic
+    overlapping word. Full-key ties and zero-score controls resolve to ``None``
     (documented unknown) rather than a guessed association. Only
     observed-control text is matched; claim wording never enters
     selection.
+
+    ``scopes`` optionally restricts candidates to the given entry
+    scopes (used by the two-phase specific-then-general lookup in
+    :func:`interpret_control`); ``None`` matches any scope.
     """
     haystack = f"{visible_object} {control_symbol} {control_type}".lower()
     scored = []
     for entry in catalog.entries:
         if entry.is_naming_only:
             continue
+        if scopes is not None and entry.scope not in scopes:
+            continue
         score, phrases, chars = _match_detail(entry, haystack)
         if score <= 0:
             continue
         eligible, _ = entry_applicable(entry, vehicle)
-        scored.append(((phrases, chars), eligible, score, entry))
+        scored.append(
+            (
+                entry.scope == "manufacturer_specific",
+                (phrases, chars),
+                eligible,
+                score,
+                entry,
+            )
+        )
     if not scored:
         return None
-    scored.sort(key=lambda candidate: candidate[:3], reverse=True)
-    if len(scored) > 1 and scored[0][:3] == scored[1][:3]:
+    # Applicability beats lexical specificity (specific-first precedence):
+    # a documented manufacturer-specific entry that fits this vehicle
+    # wins even when its keyword match is weaker than a general one.
+    scored.sort(
+        key=lambda candidate: (candidate[1], candidate[0], candidate[2], candidate[3]),
+        reverse=True,
+    )
+    if len(scored) > 1 and scored[0][:4] == scored[1][:4]:
         return None
-    return scored[0][3]
+    return scored[0][4]
 
 
 def _downgrade(strength: str) -> str:
@@ -439,14 +504,21 @@ def _entry_span(entry: CatalogEntry) -> str:
 def entry_applicable(entry: CatalogEntry, vehicle: dict | None) -> tuple[bool, str]:
     """Whether a matched entry may support a claim for this audit vehicle.
 
-    General entries apply to any vehicle (including unknown ones).
-    Manufacturer-specific entries require a documented make/model/year
-    match against the audit's trusted listing metadata — never against
-    the model's visual guess. Missing or uncertain identity rejects the
-    entry rather than merely weakening it. Returns (eligible, reason).
+    General and general-pattern entries apply to any vehicle (including
+    unknown ones); general patterns are capped at visually_supported by
+    the interpretation layer. Manufacturer-specific entries require a
+    documented make/model/year match against the audit's trusted listing
+    metadata — never against the model's visual guess. Missing or
+    uncertain identity rejects the entry rather than merely weakening it.
+    Returns (eligible, reason).
     """
     if entry.scope == "general":
         return True, "general mapping"
+    if entry.scope == "general_pattern":
+        return True, (
+            "general-pattern mapping applies to any vehicle; "
+            "evidence capped at visually_supported"
+        )
     if not vehicle:
         return False, (
             "audit vehicle identity is unknown; entry verified for "
@@ -515,23 +587,65 @@ def interpret_control(
     (location is context, but documented placement is part of the
     evidence), as does a model-observed shared/menu control matching a
     dedicated entry. The catalog wins disagreements about menu-ness: a
-    documented menu never upgrades. Manufacturer-specific entries must
-    also be applicable to the audit vehicle (trusted listing metadata);
-    inapplicable entries are rejected, never merely weakened. Controls
-    with no entry, tied entries, menu/non-diagnostic entries, and
-    feature mismatches never support the claim. The model's visual
+    documented menu never upgrades. Lookup is two-phase: an applicable
+    manufacturer-specific entry always wins over a general pattern, while
+    an inapplicable specific entry falls through to the general scopes
+    (general or general_pattern) instead of closing the case as unknown.
+    A general-pattern match is structurally capped at supportive strength
+    and labeled as cross-manufacturer evidence for reviewer confirmation.
+    Controls with no entry, tied entries, menu/non-diagnostic entries,
+    and feature mismatches never support the claim. The model's visual
     manufacturer guess never overrides listing metadata for
     applicability, but a conflict is recorded explicitly.
     """
-    entry = match_entry(
+    # Two-phase precedence: an applicable manufacturer-specific entry
+    # always wins over a general pattern; an inapplicable specific entry
+    # falls through to the general scopes instead of closing the case as
+    # unknown. A documented menu/non-diagnostic specific entry is used as
+    # matched and is never upgraded by a general pattern (it stays
+    # non-supporting below).
+    observed = control_symbol or visible_object
+    specific = match_entry(
         catalog,
         visible_object=visible_object,
         control_symbol=control_symbol,
         control_type=control_type,
         vehicle=vehicle,
+        scopes=("manufacturer_specific",),
     )
-    observed = control_symbol or visible_object
+    entry = None
+    if specific is not None:
+        eligible, _ = entry_applicable(specific, vehicle)
+        if eligible:
+            entry = specific
     if entry is None:
+        entry = match_entry(
+            catalog,
+            visible_object=visible_object,
+            control_symbol=control_symbol,
+            control_type=control_type,
+            vehicle=vehicle,
+            scopes=("general", "general_pattern"),
+        )
+    if entry is None:
+        if specific is not None:
+            _, applicability = entry_applicable(specific, vehicle)
+            return Interpretation(
+                entry_id=specific.id,
+                feature=specific.feature,
+                strength="unknown",
+                supports_claim=False,
+                cannot_infer=specific.cannot_infer,
+                explanation=(
+                    f"observed {observed!r} matches catalog entry {specific.id}, "
+                    f"but {applicability}"
+                ),
+                reference="; ".join(
+                    f"{source.get('doc', '')} [{specific.certainty}]".strip()
+                    for source in specific.sources
+                ),
+                scope=specific.scope,
+            )
         return Interpretation(
             entry_id=None,
             feature=None,
@@ -566,6 +680,18 @@ def interpret_control(
             "model reports a dedicated control but the catalog documents "
             "a shared menu; catalog wins"
         )
+    if entry.scope == "general_pattern":
+        # Structural verdict ceiling (defense in depth behind the loader
+        # rejection): a general cross-manufacturer pattern can never be
+        # stronger than supportive, so photo evidence built on it caps at
+        # visually_supported however the entry was constructed.
+        if STRENGTH_RANK.get(strength, -1) > STRENGTH_RANK["supportive"]:
+            strength = "supportive"
+        notes.append(
+            "general cross-manufacturer pattern, not vehicle-specific "
+            "evidence; support caps at visually_supported and the "
+            "reviewer should confirm the control against the actual vehicle"
+        )
     context = (manufacturer_context or "").strip()
     listing_make = _norm_name((vehicle or {}).get("make"))
     listing_model = _norm_name((vehicle or {}).get("model"))
@@ -586,21 +712,10 @@ def interpret_control(
         f"{source.get('doc', '')} [{entry.certainty}]".strip()
         for source in entry.sources
     )
-    eligible, applicability = entry_applicable(entry, vehicle)
-    if not eligible:
-        return Interpretation(
-            entry_id=entry.id,
-            feature=entry.feature,
-            strength="unknown",
-            supports_claim=False,
-            cannot_infer=entry.cannot_infer,
-            explanation=(
-                f"observed {observed!r} matches catalog entry {entry.id}, "
-                f"but {applicability}"
-            ),
-            reference=reference,
-            location_note=location_note,
-        )
+    # ``entry`` is eligible by construction here: a specific entry is
+    # only used after an applicability check, and the general scopes
+    # always apply. Inapplicable specific matches are handled above
+    # (fall through to the general scopes, else documented unknown).
     if entry.feature is None:
         return Interpretation(
             entry_id=entry.id,
@@ -615,6 +730,7 @@ def interpret_control(
             ),
             reference=reference,
             location_note=location_note,
+            scope=entry.scope,
         )
     if entry.feature != claimed_feature:
         return Interpretation(
@@ -630,21 +746,33 @@ def interpret_control(
             ),
             reference=reference,
             location_note=location_note,
+            scope=entry.scope,
         )
     supports = strength in ("diagnostic", "supportive")
+    explanation = (
+        f"observed {observed!r} ({entry.control_description}) is "
+        f"{strength} evidence for {claimed_feature} per "
+        f"{entry.official_feature_name}"
+    )
+    if supports and entry.scope == "general_pattern":
+        # A.6 truthful labeling: the finding-level summary (reconcile)
+        # quotes this explanation, so the general-pattern nature travels
+        # with the verdict and prompts reviewer confirmation.
+        explanation += (
+            " This support is a general cross-manufacturer pattern, not "
+            "vehicle-specific evidence; the reviewer should confirm the "
+            "control against the actual vehicle."
+        )
     return Interpretation(
         entry_id=entry.id,
         feature=entry.feature,
         strength=strength,
         supports_claim=supports,
         cannot_infer=entry.cannot_infer,
-        explanation=(
-            f"observed {observed!r} ({entry.control_description}) is "
-            f"{strength} evidence for {claimed_feature} per "
-            f"{entry.official_feature_name}"
-        ),
+        explanation=explanation,
         reference=reference,
         location_note=location_note,
+        scope=entry.scope,
     )
 
 
@@ -710,6 +838,7 @@ def explain_claim(
         "feature": best.feature,
         "strength": best.strength,
         "supports_claim": best.supports_claim,
+        "scope": best.scope,
         "cannot_infer": list(best.cannot_infer),
         "explanation": best.explanation,
         "reference": best.reference,
@@ -727,6 +856,7 @@ def explain_claim(
                 "feature": interp.feature,
                 "strength": interp.strength,
                 "supports_claim": interp.supports_claim,
+                "scope": interp.scope,
                 "explanation": interp.explanation,
                 "reference": interp.reference,
             }

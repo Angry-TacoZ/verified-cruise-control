@@ -3,7 +3,9 @@
 Prompt v2 (``PROMPT_VERSION = "m2"``): Muse identifies physical ADAS
 controls (symbol, type, location, dedicated vs menu) for manufacturer-aware
 interpretation; SAM localizes the observed object; deterministic
-reconciliation maps evidence to the five-state taxonomy.
+reconciliation maps evidence to the five-state taxonomy. Prompt m3 adds
+versioned RSA reference guidance; prompt m4 (default OFF, unvalidated)
+adds short cross-brand pattern guidance for later paired comparison.
 """
 
 from __future__ import annotations
@@ -117,6 +119,26 @@ def build_user_text(entries: list[dict], photo_ids: list[str]) -> str:
 REFERENCE_PROMPT_VERSION = "m3"
 REFERENCE_BLOCK_MAX_CHARS = 2000
 
+# Prompt m4 (Part B): m2 plus short cross-brand pattern guidance. Gated
+# OFF by default; shipped unvalidated (recognition accuracy on real
+# photos is still unmeasured) so the paired harness can compare
+# m2/m3/m4 later. m4 carries no RSA reference block on its own.
+PATTERN_PROMPT_VERSION = "m4"
+PATTERN_GUIDANCE = (
+    "Cross-manufacturer pattern guidance (general knowledge only, never "
+    "proof of equipment): equivalent ADAS controls sit in different "
+    "places across brands. For example, the Kia Forte lane-keeping "
+    "assist button sits on the left dashboard (lower left), while "
+    "Jetta/GLI assistance functions sit behind a stalk-end button that "
+    "opens an assistance menu. These are TWO EXAMPLES, not a complete "
+    "list of brands or locations. Describe exactly what is visible -- "
+    "symbol, control type, and location -- even when the brand or "
+    "location is not listed here. Location must be one of: "
+    "steering_wheel, left_dashboard, stalk, instrument_cluster, "
+    "infotainment, center_console, exterior_sensor, windshield_camera, "
+    "unknown. The JSON observation schema is unchanged."
+)
+
 
 def build_reference_block(claim_texts: list[str]) -> str:
     """Per-chunk RSA guidance for the claimed features (reference mode).
@@ -145,16 +167,24 @@ def build_reference_block(claim_texts: list[str]) -> str:
     return "\n\n".join(parts)
 
 
-def build_system_instructions(reference_block: str = "") -> str:
+def build_system_instructions(
+    reference_block: str = "", *, pattern_guidance: bool = False
+) -> str:
     """Baseline m2 instructions, optionally with RSA reference notes.
 
-    Empty block returns the baseline verbatim so default behavior is
-    byte-identical to PR #2.
+    Empty block and no pattern guidance returns the baseline verbatim
+    so default behavior is byte-identical to PR #2. Pattern guidance
+    appends the m4 paragraph after the baseline (and before any RSA
+    reference notes); the gate defaults OFF so m2 and m3 are unchanged
+    unless explicitly requested.
     """
+    base = SYSTEM_INSTRUCTIONS
+    if pattern_guidance:
+        base = base + "\n\n" + PATTERN_GUIDANCE
     if not reference_block:
-        return SYSTEM_INSTRUCTIONS
+        return base
     return (
-        SYSTEM_INSTRUCTIONS
+        base
         + "\n\nReference notes for the claimed features "
         + f"(RSA ADAS guide, {RSA_REFERENCE_VERSION}; general knowledge only, "
         + "never proof of equipment):\n"
@@ -523,6 +553,7 @@ def run_muse(
     screened: ScreenedJob,
     adapter: BasetenMuseAdapter | None = None,
     reference_mode: bool = False,
+    pattern_guidance: bool = False,
 ) -> int:
     """Batched Muse observation: one photo and up to six claims per call.
 
@@ -534,7 +565,10 @@ def run_muse(
 
     With ``reference_mode`` each chunk carries short RSA guidance for
     its claimed features (prompt m3); chunks without mapped features
-    fall back to the baseline m2 prompt, recorded per call.
+    fall back to the baseline m2 prompt, recorded per call. With
+    ``pattern_guidance`` (default OFF) each call carries the m4
+    cross-brand paragraph instead; m4 is shipped unvalidated for later
+    paired comparison and never enabled implicitly.
     """
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
@@ -564,11 +598,17 @@ def run_muse(
                 if reference_mode
                 else ""
             )
-            request = MuseRequest(
-                prompt_version=(
+            if pattern_guidance:
+                prompt_version = PATTERN_PROMPT_VERSION
+            else:
+                prompt_version = (
                     REFERENCE_PROMPT_VERSION if reference_block else PROMPT_VERSION
+                )
+            request = MuseRequest(
+                prompt_version=prompt_version,
+                system_instructions=build_system_instructions(
+                    reference_block, pattern_guidance=pattern_guidance
                 ),
-                system_instructions=build_system_instructions(reference_block),
                 user_text=build_user_text(chunk, [str(photo.pk)]),
                 photo_ids=(str(photo.pk),),
                 images=tuple(photo_attachments),
@@ -1238,6 +1278,7 @@ def reconcile_claim(
     observations: list[Observation],
     claim_text: str = "",
     vehicle: dict | None = None,
+    catalog: adas_evidence.Catalog | None = None,
 ) -> tuple[str, str]:
     """Deterministic five-state rule for one claim (pure, testable).
 
@@ -1245,7 +1286,10 @@ def reconcile_claim(
     negative, so photo-only audits can only reach VISUALLY_SUPPORTED,
     INSUFFICIENT, or NOT_VISUALLY_VERIFIABLE. CONTRADICTED and VERIFIED
     require authoritative vehicle-specific evidence (the channel exists
-    for hand-supplied docs evidence).
+    for hand-supplied docs evidence). Layer D support built on a
+    general cross-manufacturer pattern is structurally capped at
+    VISUALLY_SUPPORTED by the interpretation layer; no control path
+    reaches VERIFIED without authoritative evidence.
     Layer D (rule v4): every control item in PRESENT observations
     carrying control identification is evaluated independently through
     the manufacturer-aware catalog; a diagnostic/supportive mapping
@@ -1276,7 +1320,11 @@ def reconcile_claim(
             EvidenceState.INSUFFICIENT,
             "authoritative evidence disagrees with itself; human review needed",
         )
-    catalog = get_catalog()
+    # Optional catalog override exists so versioned golden sets can pin
+    # the catalog they were written against (v2/v4 goldens pin v1, v5
+    # exercises v2). Production callers omit it and get the default.
+    if catalog is None:
+        catalog = get_catalog()
     feature = adas_evidence.normalize_feature(claim_text)
     keyed = _keyed_present(observations)
     v3_unknown_note = ""

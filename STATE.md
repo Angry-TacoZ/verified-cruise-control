@@ -1,5 +1,42 @@
 # STATE.md — PR #3 Real-World ADAS Recognition & Source-Grounded Evaluation
 
+Branch: `feat/004-cross-brand-evidence` (from PR #3 head `431ce9f`; PR #3 OPEN/unmerged at branch time — see PR body for base).
+
+## PR #4 — Cross-brand ADAS evidence generalization (this branch)
+
+Goal: Forte (dash LKA) and Jetta/GLI (stalk/menu assistance) become two
+examples of location variance, not the only reasoned-about vehicles.
+Generalized evidence caps at `visually_supported`; never `verified`
+(Rule E) and never `contradicted`. Tiers never collapse; menu-only stays
+non-diagnostic. Sources: `rsa_reference.json` (19 concepts) + existing
+Forte/GLI entries; no new concepts invented. $0 spend, fake adapters only.
+
+Step-0g inspection findings (verified in code, recorded here + PR body):
+- Verdict mapping: photo-only `reconcile_claim` supporters reach at most
+  `VISUALLY_SUPPORTED`; `VERIFIED`/`CONTRADICTED` require an
+  `AUTHORITATIVE`-source observation. No control path reaches `verified`
+  (the assumed "supporting_control and sam_ok" control branch does not
+  exist in this tree) — so the structural cap lives in
+  `interpret_control` (general patterns capped at `supportive`) plus the
+  loader (rejects higher ceiling/strength).
+- `match_entry` is lexical (specificity first); `interpret_control` did a
+  single unscoped lookup, so an inapplicable specific match closed the
+  case as unknown. Part A makes lookup two-phase (specific-first with
+  applicability, then general scopes) with a `scopes` parameter.
+- Default catalog is now `adas_catalog_v2.json` (= v1 entries
+  byte-identical + 5 `general_pattern` entries, `verdict_ceiling:
+  visually_supported`); v1 frozen; v2/v4 goldens pin v1, v5 exercises v2.
+- `run_muse` records `prompt_version` per execution row; m4 =
+  m2 + short pattern paragraph, default OFF, m2 byte-identical, m3
+  unaffected. Paired-harness m2/m3/m4 comparison wired via the
+  `pattern_guidance` param (harness opt-in later; `evals/run.py` live
+  loop untouched per scope). No live inference run.
+
+Status: Part A + Part B implemented, goldens v5 (14 cases) green, full
+suite green, mutations a–h fail-as-required, docs updated. Draft PR pending;
+DO NOT MERGE without James Lane approval. Recognition accuracy on real
+photos is STILL UNMEASURED; m4 ships OFF.
+
 Branch: `feat/003-real-world-adas-evaluation` (from `main` @ `97dafb3`, PR #2 merged).
 Reference: RSA "Advanced Driver Assistance Systems (ADAS)", September 2026 (22 pp).
 Budget: $0 authorized. No live Baseten/Meta inference without James Lane's explicit approval. No paid calls in CI, startup, imports, or unit tests.

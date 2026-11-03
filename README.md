@@ -257,10 +257,13 @@ in CI.
 - Reconciliation is conservative by design: photo-only audits reach
   `contradicted`/`verified` only with authoritative backing, so most
   real listings land in `insufficient_evidence` until more sources exist.
-  The v1 ADAS catalog covers only Kia Forte and VW Jetta/GLI mappings
-  (initial entries — every other vehicle resolves to documented
-  unknown rather than a guessed support; see docs/adas-catalog.md for
-  sourcing status).
+  The v2 ADAS catalog keeps the Kia Forte and VW Jetta/GLI mappings
+  and adds general cross-manufacturer patterns (dedicated LKA/LDW and
+  ACC-distance controls, centering controls, assistance menus) that
+  apply to any brand, capped at `visually_supported` and labeled for
+  reviewer confirmation (see docs/adas-catalog.md). Recognition
+  accuracy on real photographs is still unmeasured, and the m4 pattern
+  prompt ships OFF for that reason.
 - Single local operator, single pairing token family, no multi-user auth.
 - SQLite + local disk only; no backups, no replication.
 

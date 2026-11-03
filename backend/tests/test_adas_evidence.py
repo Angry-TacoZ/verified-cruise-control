@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -32,7 +33,17 @@ def catalog() -> Catalog:
     return load_catalog()
 
 
-def test_catalog_loads_with_provenance(catalog):
+@pytest.fixture()
+def catalog_v1() -> Catalog:
+    # Pins the preserved v1 narrowing semantics: v4 goldens and the
+    # pre-existing narrowing tests below run against catalog v1, while
+    # new cross-brand behavior runs against the v2 default.
+    return load_catalog(adas_evidence.CATALOG_V1_PATH)
+
+
+def test_catalog_loads_with_provenance(catalog_v1):
+    # v1 pin: locks the preserved manufacturer-specific narrowing.
+    catalog = catalog_v1
     assert catalog.version == "2026-11-01/v1"
     assert len(catalog.entries) == 6
     for entry in catalog.entries:
@@ -126,7 +137,9 @@ def test_normalize_feature_tiers(claim, expected):
     assert normalize_feature(claim) == expected
 
 
-def test_match_dedicated_acc_button(catalog):
+def test_match_dedicated_acc_button(catalog_v1):
+    # v1 pin: locks the preserved manufacturer-specific narrowing.
+    catalog = catalog_v1
     entry = match_entry(
         catalog,
         visible_object="following-distance button",
@@ -248,7 +261,9 @@ def test_match_shared_control_downgrades(catalog):
     assert result.supports_claim is True
 
 
-def test_match_other_manufacturer_rejected(catalog):
+def test_match_other_manufacturer_rejected(catalog_v1):
+    # v1 pin: locks the preserved manufacturer-specific narrowing.
+    catalog = catalog_v1
     # F1 correction: a manufacturer mismatch rejects the entry instead of
     # merely downgrading it — a weakened match could still support the
     # wrong vehicle's claim.
@@ -395,7 +410,9 @@ def test_applicable_kia_lka_supported(catalog):
     assert result.strength == "diagnostic"
 
 
-def test_vw_golf_cannot_borrow_kia_lka(catalog):
+def test_vw_golf_cannot_borrow_kia_lka(catalog_v1):
+    # v1 pin: locks the preserved manufacturer-specific narrowing.
+    catalog = catalog_v1
     result = interpret_control(
         catalog,
         "lane_keeping_assist",
@@ -412,7 +429,9 @@ def test_vw_golf_cannot_borrow_kia_lka(catalog):
     assert "Volkswagen Golf" in result.explanation
 
 
-def test_toyota_cannot_borrow_kia_acc(catalog):
+def test_toyota_cannot_borrow_kia_acc(catalog_v1):
+    # v1 pin: locks the preserved manufacturer-specific narrowing.
+    catalog = catalog_v1
     result = interpret_control(
         catalog,
         "adaptive_cruise_control",
@@ -426,7 +445,9 @@ def test_toyota_cannot_borrow_kia_acc(catalog):
     assert "not verified for" in result.explanation
 
 
-def test_model_year_out_of_range_rejected(catalog):
+def test_model_year_out_of_range_rejected(catalog_v1):
+    # v1 pin: locks the preserved manufacturer-specific narrowing.
+    catalog = catalog_v1
     kwargs = {
         "visible_object": "following-distance button",
         "location": "steering_wheel",
@@ -449,7 +470,9 @@ def test_model_year_out_of_range_rejected(catalog):
     assert in_range.supports_claim is True
 
 
-def test_missing_vehicle_rejects_specific_entry(catalog):
+def test_missing_vehicle_rejects_specific_entry(catalog_v1):
+    # v1 pin: locks the preserved manufacturer-specific narrowing.
+    catalog = catalog_v1
     result = interpret_control(
         catalog,
         "adaptive_cruise_control",
@@ -465,7 +488,9 @@ def test_missing_vehicle_rejects_specific_entry(catalog):
     assert "identity" in result.explanation
 
 
-def test_incomplete_identity_rejected(catalog):
+def test_incomplete_identity_rejected(catalog_v1):
+    # v1 pin: locks the preserved manufacturer-specific narrowing.
+    catalog = catalog_v1
     kwargs = {
         "visible_object": "following-distance button",
         "location": "steering_wheel",
@@ -576,7 +601,9 @@ def test_model_name_containment(catalog):
     assert entry_applicable(entry, {**FORTE_2021, "model": "K5"})[0] is False
 
 
-def test_year_string_coerced_uncertain_rejected(catalog):
+def test_year_string_coerced_uncertain_rejected(catalog_v1):
+    # v1 pin: locks the preserved manufacturer-specific narrowing.
+    catalog = catalog_v1
     kwargs = {
         "visible_object": "following-distance button",
         "location": "steering_wheel",
@@ -958,7 +985,9 @@ def test_collision_specific_entry_wins_for_valid_vehicle(catalog):
     assert result.strength == "diagnostic"
 
 
-def test_collision_wrong_vehicle_still_rejected(catalog):
+def test_collision_wrong_vehicle_still_rejected(catalog_v1):
+    # v1 pin: locks the preserved manufacturer-specific narrowing.
+    catalog = catalog_v1
     entry = match_entry(
         catalog, visible_object="smart cruise button", vehicle=CAMRY_2020
     )
@@ -972,12 +1001,17 @@ def test_collision_wrong_vehicle_still_rejected(catalog):
         dedicated=True,
         vehicle=CAMRY_2020,
     )
-    assert result.entry_id == "kia-forte-2021-scc-distance"
+    # Two-phase lookup: the inapplicable Forte entry falls through to the
+    # applicable general cruise mapping, which still cannot support the
+    # ACC claim (generic cruise never establishes ACC).
+    assert result.entry_id == "generic-cruise-set-res"
     assert result.supports_claim is False
-    assert "not verified for" in result.explanation
+    assert "not to the claimed adaptive_cruise_control" in result.explanation
 
 
-def test_applicability_breaks_specificity_tie(catalog):
+def test_applicability_breaks_specificity_tie(catalog_v1):
+    # v1 pin: locks the preserved manufacturer-specific narrowing.
+    catalog = catalog_v1
     # "scc lka button" matches one 3-letter identifier on each side:
     # identical specificity. For a 2023 Forte only the LKA entry is
     # applicable (the SCC entry covers 2021-2022), so it must win; for
@@ -1077,3 +1111,379 @@ def test_claim_wording_alone_never_establishes_acc(catalog):
     )
     assert result.entry_id == "generic-cruise-set-res"
     assert result.supports_claim is False
+
+
+# --- Cross-brand general patterns (v2) ---
+
+
+def _pattern_catalog() -> Catalog:
+    """One specific entry plus general-pattern entries for precedence tests.
+
+    Self-contained (no v2 file dependency): the scope, ceiling, and
+    fallback semantics under test, not the shipped v2 content.
+    """
+    raw = {
+        "catalog_version": "test-patterns",
+        "feature_ids": [
+            "adaptive_cruise_control",
+            "lane_keeping_assist",
+            "lane_centering_assist",
+        ],
+        "entries": [
+            {
+                "id": "test-specific-lka",
+                "scope": "manufacturer_specific",
+                "manufacturer": "Kia",
+                "models": ["Forte"],
+                "model_years": [2021],
+                "trim": None,
+                "official_feature_name": "Test LKA",
+                "feature": "lane_keeping_assist",
+                "control_category": "button",
+                "control_description": "test specific LKA button",
+                "symbol": "test",
+                "locations": ["left_dashboard"],
+                "dedicated": True,
+                "strength": "diagnostic",
+                "match_keywords": ["zzlka"],
+                "distinctions": "test",
+                "cannot_infer": ["lane_centering_assist"],
+                "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+                "certainty": "definitional",
+                "certainty_note": "test",
+            },
+            {
+                "id": "test-pattern-lka",
+                "scope": "general_pattern",
+                "manufacturer": None,
+                "models": [],
+                "model_years": [],
+                "trim": None,
+                "official_feature_name": "Test general LKA pattern",
+                "feature": "lane_keeping_assist",
+                "control_category": "button",
+                "control_description": "test general LKA button",
+                "symbol": "test",
+                # Broad documented set (mirrors the real v2 entries): no
+                # location in the property grid downgrades the pattern.
+                "locations": [
+                    "steering_wheel",
+                    "left_dashboard",
+                    "stalk",
+                    "instrument_cluster",
+                    "center_console",
+                ],
+                "dedicated": True,
+                "strength": "supportive",
+                "verdict_ceiling": "visually_supported",
+                "match_keywords": ["zzlka"],
+                "distinctions": "test",
+                "cannot_infer": ["lane_centering_assist"],
+                "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+                "certainty": "provisional",
+                "certainty_note": "test",
+            },
+            {
+                "id": "test-specific-menu",
+                "scope": "manufacturer_specific",
+                "manufacturer": "Kia",
+                "models": ["Forte"],
+                "model_years": [2021],
+                "trim": None,
+                "official_feature_name": "Test assistance menu",
+                "feature": None,
+                "control_category": "menu entry",
+                "control_description": "test shared menu",
+                "symbol": "test",
+                "locations": ["infotainment"],
+                "dedicated": False,
+                "strength": "non_diagnostic",
+                "match_keywords": ["zzmenu"],
+                "distinctions": "test",
+                "cannot_infer": ["lane_keeping_assist"],
+                "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+                "certainty": "definitional",
+                "certainty_note": "test",
+            },
+            {
+                "id": "test-pattern-supportive-menu-text",
+                "scope": "general_pattern",
+                "manufacturer": None,
+                "models": [],
+                "model_years": [],
+                "trim": None,
+                "official_feature_name": "Test general pattern on menu text",
+                "feature": "lane_keeping_assist",
+                "control_category": "button",
+                "control_description": "test",
+                "symbol": "test",
+                "locations": ["infotainment"],
+                "dedicated": True,
+                "strength": "supportive",
+                "verdict_ceiling": "visually_supported",
+                "match_keywords": ["zzmenu"],
+                "distinctions": "test",
+                "cannot_infer": [],
+                "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+                "certainty": "provisional",
+                "certainty_note": "test",
+            },
+        ],
+    }
+    import os
+    import tempfile
+
+    fd, name = tempfile.mkstemp(suffix=".json")
+    path = Path(name)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(raw, handle)
+    return load_catalog(path)
+
+
+def _pattern_entry(tmp_path, **overrides):
+    base = {
+        "id": "test-pattern-x",
+        "scope": "general_pattern",
+        "manufacturer": None,
+        "models": [],
+        "model_years": [],
+        "trim": None,
+        "official_feature_name": "Test pattern",
+        "feature": "lane_keeping_assist",
+        "control_category": "button",
+        "control_description": "test",
+        "symbol": "test",
+        "locations": ["steering_wheel"],
+        "dedicated": True,
+        "strength": "supportive",
+        "verdict_ceiling": "visually_supported",
+        "match_keywords": ["zzpattern"],
+        "distinctions": "test",
+        "cannot_infer": [],
+        "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+        "certainty": "provisional",
+        "certainty_note": "test",
+    }
+    base.update(overrides)
+    raw = {
+        "catalog_version": "test",
+        "feature_ids": ["lane_keeping_assist"],
+        "entries": [base],
+    }
+    path = tmp_path / "pattern.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return path
+
+
+def test_general_pattern_entry_loads_with_ceiling():
+    catalog = _pattern_catalog()
+    entry = catalog.by_id("test-pattern-lka")
+    assert entry is not None
+    assert entry.scope == "general_pattern"
+    assert entry.verdict_ceiling == "visually_supported"
+
+
+def test_general_pattern_rejects_higher_ceiling(tmp_path):
+    with pytest.raises(ValueError, match="ceiling"):
+        load_catalog(_pattern_entry(tmp_path, verdict_ceiling="verified"))
+
+
+def test_general_pattern_rejects_diagnostic_strength(tmp_path):
+    with pytest.raises(ValueError, match="strength"):
+        load_catalog(_pattern_entry(tmp_path, strength="diagnostic"))
+
+
+def test_general_pattern_rejects_missing_ceiling(tmp_path):
+    raw = json.loads((_pattern_entry(tmp_path)).read_text(encoding="utf-8"))
+    del raw["entries"][0]["verdict_ceiling"]
+    path = tmp_path / "no-ceiling.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="ceiling"):
+        load_catalog(path)
+
+
+def test_general_pattern_scope_always_applicable():
+    catalog = _pattern_catalog()
+    entry = catalog.by_id("test-pattern-lka")
+    for vehicle in (FORTE_2021, CAMRY_2020, GOLF_2022, {}, None):
+        eligible, _ = adas_evidence.entry_applicable(entry, vehicle)
+        assert eligible is True
+
+
+def test_general_pattern_verdict_bounds_property():
+    # Every general-pattern interpretation across vehicles x locations:
+    # never diagnostic, and support only ever at supportive strength
+    # (the verdict layer caps photo-only evidence at visually_supported;
+    # verified/contradicted need authoritative vehicle-specific evidence).
+    catalog = _pattern_catalog()
+    vehicles = [FORTE_2021, CAMRY_2020, GOLF_2022, {}, None, {"make": "Kia"}]
+    locations = [
+        "steering_wheel",
+        "left_dashboard",
+        "stalk",
+        "instrument_cluster",
+        "center_console",
+        "unknown",
+        "exotic_location",
+    ]
+    for vehicle in vehicles:
+        for location in locations:
+            result = interpret_control(
+                catalog,
+                "lane_keeping_assist",
+                visible_object="zzlka button",
+                location=location,
+                dedicated=True,
+                vehicle=vehicle,
+            )
+            if vehicle == FORTE_2021:
+                # Applicable specific entry wins over the general pattern.
+                assert result.entry_id == "test-specific-lka"
+                if location in ("left_dashboard", "unknown", "exotic_location"):
+                    assert result.strength == "diagnostic", (vehicle, location)
+                else:
+                    # Undocumented placement downgrades one level (rule 3).
+                    assert result.strength == "supportive", (vehicle, location)
+            else:
+                assert result.entry_id == "test-pattern-lka"
+                assert result.strength == "supportive", (vehicle, location)
+                assert "general" in result.explanation.lower()
+            assert result.supports_claim is True
+
+
+def test_general_pattern_code_cap_overrides_declared_strength():
+    # Structural enforcement below the loader: even a hand-built
+    # general-pattern entry declaring diagnostic strength is capped at
+    # supportive by interpret_control, so photo evidence built on it
+    # can never exceed visually_supported however it was constructed.
+    raw_pattern = {
+        "id": "test-pattern-hot",
+        "scope": "general_pattern",
+        "manufacturer": None,
+        "models": [],
+        "model_years": [],
+        "trim": None,
+        "official_feature_name": "Test hot pattern",
+        "feature": "lane_keeping_assist",
+        "control_category": "button",
+        "control_description": "test",
+        "symbol": "test",
+        "locations": [
+            "steering_wheel",
+            "left_dashboard",
+            "stalk",
+            "instrument_cluster",
+            "center_console",
+        ],
+        "dedicated": True,
+        "strength": "diagnostic",
+        "verdict_ceiling": "visually_supported",
+        "match_keywords": ["zzhot"],
+        "distinctions": "test",
+        "cannot_infer": [],
+        "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+        "certainty": "provisional",
+        "certainty_note": "test",
+    }
+    hot = adas_evidence.CatalogEntry(
+        id=raw_pattern["id"],
+        scope=raw_pattern["scope"],
+        manufacturer=raw_pattern["manufacturer"],
+        models=tuple(raw_pattern["models"]),
+        model_years=tuple(raw_pattern["model_years"]),
+        trim=raw_pattern["trim"],
+        official_feature_name=raw_pattern["official_feature_name"],
+        feature=raw_pattern["feature"],
+        control_category=raw_pattern["control_category"],
+        control_description=raw_pattern["control_description"],
+        symbol=raw_pattern["symbol"],
+        locations=tuple(raw_pattern["locations"]),
+        dedicated=bool(raw_pattern["dedicated"]),
+        strength=raw_pattern["strength"],
+        match_keywords=tuple(raw_pattern["match_keywords"]),
+        distinctions=raw_pattern["distinctions"],
+        cannot_infer=tuple(raw_pattern["cannot_infer"]),
+        sources=tuple(raw_pattern["sources"]),
+        certainty=raw_pattern["certainty"],
+        certainty_note=raw_pattern["certainty_note"],
+        verdict_ceiling=raw_pattern["verdict_ceiling"],
+    )
+    catalog = adas_evidence.Catalog(
+        version="test-hot", feature_ids=("lane_keeping_assist",), entries=(hot,)
+    )
+    result = interpret_control(
+        catalog,
+        "lane_keeping_assist",
+        visible_object="zzhot button",
+        location="steering_wheel",
+        dedicated=True,
+        vehicle=GOLF_2022,
+    )
+    assert result.entry_id == "test-pattern-hot"
+    assert result.strength == "supportive"
+    assert result.supports_claim is True
+    assert "reviewer should confirm" in result.explanation
+
+
+def test_specific_entry_wins_over_general_pattern():
+    catalog = _pattern_catalog()
+    result = interpret_control(
+        catalog,
+        "lane_keeping_assist",
+        visible_object="zzlka button",
+        location="left_dashboard",
+        dedicated=True,
+        vehicle=FORTE_2021,
+    )
+    assert result.entry_id == "test-specific-lka"
+    assert result.strength == "diagnostic"
+    assert result.supports_claim is True
+
+
+def test_inapplicable_specific_falls_through_to_general():
+    catalog = _pattern_catalog()
+    result = interpret_control(
+        catalog,
+        "lane_keeping_assist",
+        visible_object="zzlka button",
+        location="steering_wheel",
+        dedicated=True,
+        vehicle=CAMRY_2020,
+    )
+    assert result.entry_id == "test-pattern-lka"
+    assert result.strength == "supportive"
+    assert result.supports_claim is True
+
+
+def test_documented_menu_never_upgraded_by_general():
+    catalog = _pattern_catalog()
+    result = interpret_control(
+        catalog,
+        "lane_keeping_assist",
+        visible_object="zzmenu control",
+        location="infotainment",
+        dedicated=False,
+        vehicle=FORTE_2021,
+    )
+    assert result.entry_id == "test-specific-menu"
+    assert result.supports_claim is False
+
+
+def test_default_catalog_is_v2_with_general_patterns():
+    # A.4: production default is catalog v2 (v1 stays available by path
+    # for the pinned v2/v4 goldens). Switching the default back to v1
+    # must fail this test.
+    catalog = load_catalog()
+    assert catalog.version == "2026-11-03/v2"
+    patterns = [entry for entry in catalog.entries if entry.scope == "general_pattern"]
+    assert len(patterns) >= 4
+    assert all(entry.verdict_ceiling == "visually_supported" for entry in patterns)
+
+
+def test_v2_preserves_v1_entries_byte_semantics():
+    v1 = json.loads(adas_evidence.CATALOG_V1_PATH.read_text(encoding="utf-8"))
+    v2path = adas_evidence.CATALOG_PATH.parent / "adas_catalog_v2.json"
+    v2 = json.loads(v2path.read_text(encoding="utf-8"))
+    assert v2["feature_ids"] == v1["feature_ids"]
+    assert v2["entries"][: len(v1["entries"])] == v1["entries"]
+    assert len(v2["entries"]) > len(v1["entries"])
