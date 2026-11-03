@@ -53,6 +53,13 @@ No paid inference; no RSA/catalog/scoring/SAM-parity/frontend changes; leave PR 
 - [x] D4 (P3) — setup after acquisition runs inside the guarded try; nested finally keeps `close()` failure from skipping release; `LedgerFile` closed only if created.
 - [x] D5 (P3) — new-file creation fsyncs the parent dir on POSIX (`_fsync_parent`; skipped on `nt` with comment), for ledgers and the lock file; best-effort crash consistency documented, per-event file fsync unchanged. POSIX wiring tests skip on Windows (CI covers them); Windows-path msvcrt behavior unchanged and covered locally.
 
+## Remaining billing-safety issues (2 items on `907d14c`)
+
+No paid inference; no RSA/catalog/scoring/SAM-parity/frontend changes; leave PR #3 open unmerged.
+
+- [x] Issue 1 — `LedgerFile` construction is fail-closed: an `open()` failure raises `BudgetRefused`; a parent-dir fsync failure closes the new handle then raises `BudgetRefused` naming durable-creation uncertainty (empty file left in place, blocks nothing). run.py converts ledger-creation refusal into SystemExit "refusing: ..." like every other pre-inference gate. Testable `_should_fsync_parent()` predicate replaces the inline `os.name` check (Windows skip unchanged). Docstrings state refusal, not best-effort.
+- [x] Issue 2 (+2b) — CLI verified to expose no results-dir option and to pass none (regression test asserts both, including argparse rejection of `--results-dir`); docs state the single-checkout boundary and the extension limitation (only top-level `*.jsonl` scanned; keep `.jsonl` when archiving, never rename to disable).
+
 ## Remediation pass 3 (review of `18349d2`, 1 finding — prior head CI 4/4 green)
 
 No paid inference; no RSA/catalog/prompt/ground-truth changes; leave PR #3 open unmerged.

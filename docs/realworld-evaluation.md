@@ -169,7 +169,16 @@ cannot evade the guard. One OS-backed directory-wide lock (no expiry
 while the holder lives; OS release on process death) gates concurrency
 for every evaluation sharing the directory; the authoritative scan runs
 under the held lock. Token-less records never cancel a reservation;
-non-record lines fail closed. Recovery is manual: reconcile billing
-externally, then archive or remove the ledger — never auto-replay or
-rewrite. Boundary: one managed results directory per provider account.
-Deterministic offline regression tests; still zero paid inference.
+non-record lines fail closed. A ledger that cannot be opened or whose
+durable creation cannot be confirmed refuses at construction instead of
+leaking a raw error. Recovery is manual: reconcile billing externally,
+then archive or remove the ledger — never auto-replay or rewrite.
+Boundary: the guard covers the single repo checkout's evals/results
+directory only; separate checkouts, clones, or machines sharing
+provider accounts are NOT coordinated, so never run paid evaluations
+from two checkouts concurrently and reconcile billing from every
+checkout before rerunning. Only top-level *.jsonl files are scanned: a
+ledger renamed to another extension is not discovered, so keep .jsonl
+when archiving into archive/ and never rename extensions to "disable"
+a ledger. Deterministic offline regression tests; still zero paid
+inference.

@@ -351,7 +351,13 @@ def run_realworld_live(
                 except BudgetRefused as exc:
                     _refuse(str(exc))
         ledger_path.parent.mkdir(parents=True, exist_ok=True)
-        ledger_file = LedgerFile(ledger_path)
+        # A ledger that cannot be opened or confirmed durable refuses
+        # cleanly (as SystemExit "refusing: ..."), like every other
+        # pre-inference gate, instead of escaping as a raw exception.
+        try:
+            ledger_file = LedgerFile(ledger_path)
+        except BudgetRefused as exc:
+            _refuse(str(exc))
         budget = EvalBudget(
             # Authorization verified above (VCC_LIVE_SMOKE + configured keys).
             authorized=True,

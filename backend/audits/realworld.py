@@ -539,14 +539,22 @@ class BudgetRefused(Exception):
     or blocked by an outstanding reservation from an earlier run."""
 
 
+def _should_fsync_parent() -> bool:
+    # Separate predicate (rather than an inline ``os.name`` check) so
+    # tests can force either branch on any platform. Windows (``nt``)
+    # has no directory fsync.
+    return os.name != "nt"
+
+
 def _fsync_parent(directory) -> None:
     """Fsync a directory entry so a new file inside survives a hard crash.
 
-    Best-effort POSIX crash consistency: callers skip this on Windows
-    (``os.name == "nt"``), where directory fsync is not supported. It
-    narrows — but cannot eliminate — the window in which a crash right
-    after file creation loses the new file on some filesystems; per-event
-    file fsync still guarantees everything already reported.
+    Callers attempt this only when :func:`_should_fsync_parent` holds;
+    on other platforms they skip it. It narrows — but cannot eliminate —
+    the window in which a crash right after file creation loses the new
+    file on some filesystems; per-event file fsync still guarantees
+    everything already reported. A failure raises OSError, and every
+    caller converts it into a fail-closed refusal.
     """
     fd = os.open(directory, os.O_RDONLY)
     try:
@@ -562,7 +570,10 @@ class LedgerFile:
     returns, so a hard crash loses nothing already reported. The file is
     opened for appending only: events are never rewritten or deleted,
     and one run never overwrites another run's file. Creating a new file
-    also fsyncs its parent directory on POSIX (see :func:`_fsync_parent`).
+    also attempts a parent-directory fsync where supported (see
+    :func:`_fsync_parent`); if that confirmation fails, construction
+    refuses with :class:`BudgetRefused` instead of running on uncertain
+    durability — and likewise if the file cannot be opened at all.
     """
 
     def __init__(self, path) -> None:
@@ -570,11 +581,28 @@ class LedgerFile:
         is_new = not self.path.exists()
         # The handle lifetime is the object lifetime; closed explicitly
         # via close() (LedgerFile is also usable as a context manager).
-        self._handle = open(self.path, "ab")  # noqa: SIM115
-        if is_new and os.name != "nt":
-            # Windows has no directory fsync; the open file itself is
-            # still flushed and fsync'd per event below.
-            _fsync_parent(self.path.parent)
+        try:
+            self._handle = open(self.path, "ab")  # noqa: SIM115
+        except OSError as exc:
+            raise BudgetRefused(
+                f"ledger {self.path} cannot be opened ({exc}): refusing "
+                "evaluation until the directory is writable and the file "
+                "is inspected."
+            )
+        if is_new and _should_fsync_parent():
+            try:
+                _fsync_parent(self.path.parent)
+            except OSError as exc:
+                try:
+                    self._handle.close()
+                except OSError:
+                    pass
+                raise BudgetRefused(
+                    f"ledger {self.path} was created but its durable "
+                    f"creation could not be confirmed ({exc}): refusing "
+                    "evaluation until the filesystem is inspected. The "
+                    "empty file is left in place and blocks nothing."
+                )
 
     def append(self, record: dict) -> None:
         import json
@@ -1020,7 +1048,11 @@ def scan_ledger_dir(directory) -> list:
     separate processes use different results directories. Keep one local
     billing workspace per account. A ledger moved outside the directory
     is no longer discovered — archive reviewed ledgers into the
-    ``archive/`` subdirectory, which the scan skips by design.
+    ``archive/`` subdirectory, which the scan skips by design. A ledger
+    renamed to another extension is likewise not discovered: only
+    top-level ``*.jsonl`` files are read, so keep the ``.jsonl``
+    extension when archiving and never rename extensions to "disable"
+    a ledger.
     """
     hits = []
     for path in _iter_candidate_ledgers(directory):

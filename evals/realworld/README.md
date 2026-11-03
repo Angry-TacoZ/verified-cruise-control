@@ -83,9 +83,14 @@ handle teardown, reconcile provider billing externally, then archive
 rerunning. Ledgers moved outside the results directory are no longer
 discovered.
 Boundary: the lock and scan guard the evaluations sharing one managed
-results directory; they do not guard the same provider account when
-separate processes use different results directories — keep one local
-billing workspace per account.
+results directory — the single repo checkout's evals/results. Separate
+checkouts, clones, or machines using the same provider accounts are NOT
+coordinated: do not run paid evaluations from two checkouts
+concurrently, and reconcile billing from every checkout before rerunning.
+Likewise, a ledger renamed to another extension (.bak, .json, .txt) is
+not discovered: the scan only reads top-level *.jsonl. Archive reviewed
+ledgers into archive/ keeping the .jsonl extension; never rename
+extensions to "disable" a ledger.
 SAM localization additionally requires `VCC_LIVE_SAM=1`; its target
 comes from the production selector over the full observation (nested
 controls included) with production provenance, and without a valid

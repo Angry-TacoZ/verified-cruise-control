@@ -1863,6 +1863,179 @@ def test_lock_creation_fsyncs_on_posix(tmp_path, monkeypatch):
         held.release()
 
 
+def test_ledger_fsync_failure_closes_and_refuses(tmp_path, monkeypatch):
+    # Issue 1: a parent-dir fsync failure must close the new handle and
+    # refuse fail-closed (not leak the descriptor or raise raw OSError).
+    # The supported branch is forced via the predicate so this runs
+    # everywhere; real fsync mechanics stay covered by POSIX-only tests.
+    import builtins as _builtins
+
+    import pytest as _pytest
+
+    import audits.realworld as _realworld
+
+    monkeypatch.setattr(_realworld, "_should_fsync_parent", lambda: True)
+
+    def _boom(directory):
+        raise OSError("EINVAL")
+
+    monkeypatch.setattr(_realworld, "_fsync_parent", _boom)
+    real_open = _builtins.open
+    handles = []
+
+    def _spy_open(*args, **kwargs):
+        handle = real_open(*args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(_builtins, "open", _spy_open)
+    target = tmp_path / "new-ledger.jsonl"
+    with _pytest.raises(BudgetRefused, match="durable creation"):
+        _realworld.LedgerFile(target)
+    assert handles != []
+    assert all(handle.closed for handle in handles)
+    # The empty file is left in place; it reads as no reservations.
+    assert target.exists()
+    assert target.stat().st_size == 0
+    assert _realworld.read_ledger(target) == []
+
+
+def test_ledger_open_failure_refuses(tmp_path, monkeypatch):
+    # Issue 1: an open() failure surfaces as BudgetRefused, never a raw
+    # OSError, so run.py has no raw exception path from ledger creation.
+    import builtins as _builtins
+
+    import pytest as _pytest
+
+    import audits.realworld as _realworld
+
+    def _boom(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(_builtins, "open", _boom)
+    with _pytest.raises(BudgetRefused, match="cannot be opened"):
+        _realworld.LedgerFile(tmp_path / "nope.jsonl")
+
+
+def test_ledger_creation_calls_dir_fsync(tmp_path, monkeypatch):
+    # Issue 1 wiring: creating a new ledger calls the directory fsync
+    # exactly once (supported branch forced so this runs everywhere).
+    import audits.realworld as _realworld
+
+    monkeypatch.setattr(_realworld, "_should_fsync_parent", lambda: True)
+    calls = []
+    monkeypatch.setattr(
+        _realworld, "_fsync_parent", lambda directory: calls.append(directory)
+    )
+    handle = _realworld.LedgerFile(tmp_path / "wired.jsonl")
+    try:
+        assert calls == [tmp_path]
+    finally:
+        handle.close()
+
+
+def test_fsync_failure_end_to_end_refuses_cleanly(tmp_path, monkeypatch):
+    # Issue 1 end-to-end: a dir-fsync failure during a live run refuses
+    # via SystemExit "refusing: ..." (not "aborting ..."), fires zero
+    # provider calls, and releases the directory lock.
+    import pytest as _pytest
+
+    import audits.realworld as _realworld
+
+    monkeypatch.setattr(_realworld, "_should_fsync_parent", lambda: True)
+    runner = _load_eval_runner()
+    real_acquire = runner.acquire_ledger_lock
+    armed = {"on": False}
+
+    def _gated_acquire(path, run_id):
+        lock = real_acquire(path, run_id)
+        armed["on"] = True
+        return lock
+
+    def _gated_fsync(directory):
+        if armed["on"]:
+            raise OSError("EINVAL")
+
+    monkeypatch.setattr(runner, "acquire_ledger_lock", _gated_acquire)
+    monkeypatch.setattr(_realworld, "_fsync_parent", _gated_fsync)
+    manifest = _harness_manifest(tmp_path)
+    results = tmp_path / "results"
+    results.mkdir()
+    fake_muse = _HarnessMuseAdapter()
+    fake_sam = _HarnessSamAdapter()
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    with _pytest.raises(SystemExit, match="refusing"):
+        runner.run_realworld_live(
+            manifest,
+            tmp_path,
+            10.0,
+            True,
+            muse_adapter=fake_muse,
+            sam_adapter=fake_sam,
+            results_dir=results,
+        )
+    assert fake_muse.calls == []
+    assert fake_sam.calls == []
+    follow = acquire_ledger_lock(ledger_lock_path(results), "runNEXT")
+    follow.release()
+
+
+def test_cli_never_selects_results_dir(tmp_path, monkeypatch):
+    # Issue 2: the CLI exposes no results-dir option and passes none, so
+    # production always guards the repo checkout's evals/results
+    # directory and the boundary cannot be widened by accident later.
+    import sys as _sys
+
+    import pytest as _pytest
+
+    runner = _load_eval_runner()
+    seen = {}
+
+    def _capture(*args, **kwargs):
+        seen.update(kwargs)
+        raise SystemExit("captured")
+
+    monkeypatch.setattr(runner, "run_realworld_live", _capture)
+    manifest = (
+        Path(__file__).resolve().parents[2]
+        / "fixtures"
+        / "realworld-sample"
+        / "manifest.json"
+    )
+    monkeypatch.setattr(
+        _sys,
+        "argv",
+        [
+            "run.py",
+            "realworld-live",
+            "--manifest",
+            str(manifest),
+            "--max-spend",
+            "5.00",
+            "--skip-sam",
+        ],
+    )
+    with _pytest.raises(SystemExit, match="captured"):
+        runner.main()
+    assert "results_dir" not in seen
+    # An explicit results-dir flag is rejected by the CLI parser.
+    monkeypatch.setattr(
+        _sys,
+        "argv",
+        [
+            "run.py",
+            "realworld-live",
+            "--manifest",
+            str(manifest),
+            "--results-dir",
+            str(tmp_path),
+        ],
+    )
+    with _pytest.raises(SystemExit) as exc_info:
+        runner.main()
+    assert exc_info.value.code == 2
+
+
 def test_accounting_history_immutable(tmp_path, monkeypatch):
     # Test G: refused or subsequent runs never modify existing events.
     manifest = _harness_manifest(tmp_path)
