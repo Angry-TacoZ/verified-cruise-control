@@ -721,6 +721,27 @@ def test_validate_intake_enforces_holdout_freeze(tmp_path, monkeypatch):
     assert hard["passed"] is False
 
 
+def test_validate_intake_detects_tampered_photo_bytes(tmp_path):
+    """SHA-256 verification against the photos root catches corruption."""
+    import json
+    import shutil
+
+    from audits.realworld_intake import validate_intake
+
+    shutil.copytree(REPO_ROOT / "fixtures" / "realworld-sample", tmp_path / "sample")
+    manifest_path = tmp_path / "sample" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert (
+        validate_intake(manifest=manifest, photos_root=tmp_path / "sample")["passed"]
+        is True
+    )
+    with open(tmp_path / "sample" / "photos" / "synth-acc-001.png", "ab") as handle:
+        handle.write(b"tampered")
+    report = validate_intake(manifest=manifest, photos_root=tmp_path / "sample")
+    assert report["passed"] is False
+    assert any("sha256 mismatch" in failure for failure in report["failures"])
+
+
 def test_validate_intake_public_branch_has_no_identifiers():
     """The public branch of the intake report stays counts-only."""
     import json

@@ -66,7 +66,14 @@ class IntakeError(ValueError):
 # license plates cannot be detected reliably, so admission additionally
 # requires a recorded manual privacy review. Regex scanning never
 # proves the absence of personal information.
-_VIN_RE = re.compile(r"\b[A-HJ-NPR-Z0-9]{17}\b", re.IGNORECASE)
+# Leading boundary only (no trailing \b): a 64-hex digest is one
+# unbroken run, so a both-sides boundary could never match inside it
+# and the sha256 exclusion would be dead code — but naive
+# 17-alphanumeric matching DOES hit digest content, which is why the
+# exclusion is load-bearing. The fail-closed direction is kept: a VIN
+# followed by more identifier chars still flags; ordinary prose
+# almost always contains I/O/Q within any 17-char window.
+_VIN_RE = re.compile(r"\b[A-HJ-NPR-Z0-9]{17}", re.IGNORECASE)
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE_RE = re.compile(
     r"(?<!\d)(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)?\d{3}[-.\s]?\d{4}\b"
