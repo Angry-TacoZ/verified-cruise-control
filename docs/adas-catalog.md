@@ -44,7 +44,14 @@ finding summary and `finding.evidence.interpretation`.
    ceiling among the supporters (entries without a ceiling are
    unaffected). Shipped photo evidence therefore reaches at most
    `visually_supported` on general patterns — never `verified`,
-   never `contradicted`.
+   never `contradicted`. On shipped data the clamp is a no-op
+   (general patterns already map to `visually_supported` at the
+   single clamp point, and no shipped entry declares a lower
+   ceiling): it guards future ceilings, not a future `verified`
+   path. The ceiling ladder covers support states only —
+   `verified` > `visually_supported` > `insufficient_evidence` >
+   `not_visually_verifiable` — and `contradicted`, a negative
+   finding rather than weaker support, can never be a ceiling.
    A documented menu/non-diagnostic entry is never upgraded by a
    general pattern.
 6. Feature mismatch (entry maps to X, claim is Y) → does not support,

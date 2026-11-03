@@ -40,6 +40,7 @@ to main. DO NOT MERGE without James Lane approval. Recognition accuracy
 on real photos is STILL UNMEASURED; m4 ships OFF.
 
 Review follow-ups (5 minor items, no verdict-behavior change):
+- Ceiling-ladder fix: `contradicted` removed from the support-state ladder (support only); loader and clamp reject it fail-closed, and the clamp leaves negative findings untouched. On shipped data the clamp is a no-op guard for future ceilings, not for a future `verified` path.
 - Item 1 (ceiling load-bearing): interpretation carries `verdict_ceiling`;
   `reconcile_claim` clamps Layer D support to the highest supporter
   ceiling. Goldens unchanged.

@@ -1744,6 +1744,102 @@ def test_reconcile_clamp_applies_supporter_ceiling_below_mapped_state():
     assert state == "insufficient_evidence"
 
 
+def _ceiling_entry(tmp_path, scope, ceiling, name):
+    """One-entry catalog where only scope/applicability/ceiling vary."""
+    entry = {
+        "id": "test-ceiling-" + name,
+        "scope": scope,
+        "manufacturer": None,
+        "models": [],
+        "model_years": [],
+        "trim": None,
+        "official_feature_name": "Test ceiling",
+        "feature": "lane_keeping_assist",
+        "control_category": "button",
+        "control_description": "test",
+        "symbol": "test",
+        "locations": ["steering_wheel"],
+        "dedicated": True,
+        "strength": "supportive",
+        "match_keywords": ["zzceiling"],
+        "distinctions": "test",
+        "cannot_infer": [],
+        "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+        "certainty": "provisional",
+        "certainty_note": "test",
+    }
+    if scope == "general_pattern":
+        entry["verdict_ceiling"] = ceiling
+    elif scope == "manufacturer_specific":
+        entry["manufacturer"] = "Toyota"
+        entry["models"] = ["Camry"]
+        entry["model_years"] = [2020]
+        if ceiling is not None:
+            entry["verdict_ceiling"] = ceiling
+    else:
+        if ceiling is not None:
+            entry["verdict_ceiling"] = ceiling
+    raw = {
+        "catalog_version": "test",
+        "feature_ids": ["lane_keeping_assist"],
+        "entries": [entry],
+    }
+    path = tmp_path / ("ceiling-" + name + ".json")
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    return path
+
+
+def test_loader_rejects_contradicted_ceiling_every_scope(tmp_path):
+    for scope in ("general_pattern", "general", "manufacturer_specific"):
+        with pytest.raises(ValueError, match="ceiling"):
+            load_catalog(_ceiling_entry(tmp_path, scope, "contradicted", scope))
+
+
+def test_loader_rejects_unknown_ceiling_string(tmp_path):
+    for scope in ("general_pattern", "general", "manufacturer_specific"):
+        with pytest.raises(ValueError, match="ceiling"):
+            load_catalog(_ceiling_entry(tmp_path, scope, "super_verified", scope))
+
+
+def test_apply_verdict_ceiling_rejects_off_ladder_ceilings():
+    clamp = adas_evidence.apply_verdict_ceiling
+    with pytest.raises(ValueError, match="ceiling"):
+        clamp("visually_supported", ["contradicted"])
+    with pytest.raises(ValueError, match="ceiling"):
+        clamp("visually_supported", ["mystery"])
+
+
+def test_apply_verdict_ceiling_leaves_negative_findings_untouched():
+    clamp = adas_evidence.apply_verdict_ceiling
+    assert clamp("contradicted", ["visually_supported"]) == "contradicted"
+    assert clamp("contradicted", ["insufficient_evidence"]) == "contradicted"
+    assert clamp("contradicted", []) == "contradicted"
+
+
+def test_apply_verdict_ceiling_ladder_property():
+    clamp = adas_evidence.apply_verdict_ceiling
+    rank = {
+        "verified": 3,
+        "visually_supported": 2,
+        "insufficient_evidence": 1,
+        "not_visually_verifiable": 0,
+    }
+    ladder = list(rank)
+    ceiling_lists = [[], [None], [None, None]]
+    ceiling_lists += [[c] for c in ladder + [None]]
+    ceiling_lists += [[a, b] for a in ladder + [None] for b in ladder + [None]]
+    ceiling_lists.append(["contradicted"])
+    for state in ladder:
+        for ceilings in ceiling_lists:
+            if "contradicted" in ceilings:
+                with pytest.raises(ValueError, match="ceiling"):
+                    clamp(state, ceilings)
+                continue
+            result = clamp(state, ceilings)
+            assert result in rank
+            assert rank[result] <= rank[state]
+
+
 def test_no_stale_module_version_constant():
     assert not hasattr(adas_evidence, "CATALOG_VERSION")
     assert load_catalog().version == "2026-11-03/v2"

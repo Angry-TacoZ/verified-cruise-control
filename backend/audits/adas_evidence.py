@@ -29,25 +29,31 @@ FEATURE_UNKNOWN = "unknown"
 
 STRENGTH_RANK = {"diagnostic": 3, "supportive": 2, "ambiguous": 1, "non_diagnostic": 0}
 
-# Verdict-ceiling ordering for Item 1: higher means a stronger claim.
-# Photo-only Layer D support maps to VISUALLY_SUPPORTED at most, so a
-# supporting entry with no ceiling (or a ceiling at/above the mapped
-# state) leaves the verdict untouched.
+# Ceiling ladder over SUPPORT STATES ONLY, strongest first: a ceiling
+# caps how strong support may be, so the negative finding
+# "contradicted" is not on the ladder and can never be a ceiling.
 STATE_CEILING_RANK = {
     "not_visually_verifiable": 0,
     "insufficient_evidence": 1,
-    "contradicted": 2,
-    "visually_supported": 3,
-    "verified": 4,
+    "visually_supported": 2,
+    "verified": 3,
 }
 
 
 def apply_verdict_ceiling(state: str, ceilings: list[str | None]) -> str:
     """Clamp a mapped evidence state to supporting entries' ceilings.
 
-    Uses the highest ceiling among the supporters (entries with no
-    ceiling are unaffected); unknown ceiling strings fail closed.
+    Uses the highest ceiling among supporters; entries with no ceiling
+    (None) are ignored, so a single capped supporter caps the verdict
+    even when an uncapped supporter is present — the conservative
+    direction. Off-ladder ceilings (including "contradicted") fail
+    closed with ValueError. A state that is not on the ladder (e.g. a
+    "contradicted" negative finding) is returned unchanged: the clamp
+    never alters a negative finding, and the result is always on the
+    ladder and never stronger than the input state.
     """
+    if state not in STATE_CEILING_RANK:
+        return state
     ranked = []
     for ceiling in ceilings:
         if ceiling is None:
@@ -58,7 +64,7 @@ def apply_verdict_ceiling(state: str, ceilings: list[str | None]) -> str:
     if not ranked:
         return state
     cap = max(ranked)
-    if STATE_CEILING_RANK.get(state, cap) <= cap:
+    if STATE_CEILING_RANK[state] <= cap:
         return state
     return next(name for name, rank in STATE_CEILING_RANK.items() if rank == cap)
 
@@ -349,13 +355,7 @@ def load_catalog(path: Path | None = None) -> Catalog:
         else:
             raise ValueError(f"catalog entry {entry_id}: bad scope {scope!r}")
         ceiling = item.get("verdict_ceiling")
-        if ceiling is not None and ceiling not in (
-            "verified",
-            "visually_supported",
-            "contradicted",
-            "insufficient_evidence",
-            "not_visually_verifiable",
-        ):
+        if ceiling is not None and ceiling not in STATE_CEILING_RANK:
             raise ValueError(
                 f"catalog entry {entry_id}: bad verdict ceiling {ceiling!r}"
             )
