@@ -755,6 +755,104 @@ def test_validate_intake_public_branch_has_no_identifiers():
         assert secret not in blob, secret
 
 
+def _candidate_source(**overrides):
+    source = {
+        "id": "cand-forte-2015-dash",
+        "source_group": "group-c1a2b3",
+        "file_page_url": "https://commons.wikimedia.org/wiki/File:2015_Kia_Forte_06.jpg",
+        "file_url": "https://upload.wikimedia.org/wikipedia/commons/3/3e/2015_Kia_Forte_06.jpg",
+        "rights_holder": "CapCase (Flickr James Case stream, via Commons UploadWizard)",
+        "license": "CC BY 2.0",
+        "license_url": "https://creativecommons.org/licenses/by/2.0",
+        "license_verified": True,
+        "vehicle": {
+            "make": "Kia",
+            "model": "Forte",
+            "year": 2015,
+            "trim": "unstated",
+            "market": "unstated",
+        },
+        "visible_control_note": "categories state steering wheel and dashboard; exact controls unconfirmed without visual inspection",
+        "claim_text": "Lane Keeping Assist",
+        "claim_origin": "researcher",
+        "equipment_evidence_needed": "window sticker, build sheet, or verified equipment record for this vehicle",
+        "privacy_note": "plates and EXIF unknown until bytes are inspected under a privacy review",
+        "image_bytes": "not downloaded",
+        "candidate_status": "pending",
+        "status_reason": "license verified from Commons metadata; equipment and privacy evidence outstanding",
+        "date_researched": "2026-11-04",
+    }
+    source.update(overrides)
+    return source
+
+
+def test_candidate_sources_validate():
+    """A well-formed public-metadata candidate list passes."""
+    from audits.realworld_intake import validate_candidate_sources
+
+    doc = {"candidate_version": "candidates-v1", "sources": [_candidate_source()]}
+    assert validate_candidate_sources(doc) == doc
+
+
+def test_candidate_sources_reject_unknown_fields_and_bad_license():
+    """Candidate records reject unknown fields and unverified licenses."""
+    from audits.realworld_intake import IntakeError, validate_candidate_sources
+
+    with pytest.raises(IntakeError):
+        validate_candidate_sources(
+            {
+                "candidate_version": "candidates-v1",
+                "sources": [_candidate_source(surprise=1)],
+            }
+        )
+    with pytest.raises(IntakeError):
+        validate_candidate_sources(
+            {
+                "candidate_version": "candidates-v1",
+                "sources": [
+                    _candidate_source(
+                        license="all rights reserved", license_verified=False
+                    )
+                ],
+            }
+        )
+
+
+def test_candidate_sources_never_accepted_without_phase_c():
+    """Phase B research never marks a candidate accepted."""
+    from audits.realworld_intake import IntakeError, validate_candidate_sources
+
+    with pytest.raises(IntakeError):
+        validate_candidate_sources(
+            {
+                "candidate_version": "candidates-v1",
+                "sources": [_candidate_source(candidate_status="accepted")],
+            }
+        )
+
+
+def test_candidate_sources_contain_no_image_bytes():
+    """The research register holds pointers only, never image content."""
+    import base64
+
+    from audits.realworld_intake import validate_candidate_sources
+
+    doc = {"candidate_version": "candidates-v1", "sources": [_candidate_source()]}
+    validate_candidate_sources(doc)
+    for source in doc["sources"]:
+        for key, value in source.items():
+            if not isinstance(value, str):
+                continue
+            assert not value.startswith("data:"), key
+            if len(value) > 1000:
+                try:
+                    base64.b64decode(value, validate=True)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError(f"{key} looks like embedded bytes")
+
+
 def test_intake_never_derives_labels_from_reconciliation():
     """Admission code must not call the production reconciler."""
     source = (REPO_ROOT / "backend" / "audits" / "realworld_intake.py").read_text(

@@ -844,6 +844,121 @@ def validate_intake(
     }
 
 
+# Phase B candidate-source research. Assembled from public metadata
+# ONLY (file page URL, rights holder, stated license, vehicle, and
+# what the categories say is visible). No image bytes are downloaded
+# or scraped, no permission is assumed, and nothing here is equipment
+# proof. Every candidate stays pending: acceptance requires the Phase
+# C gates (verified rights for evaluation use, privacy review of the
+# actual bytes, vehicle-specific equipment evidence, hashes of the
+# final evaluation copy). Researcher-authored claims are never
+# presented as seller claims.
+CANDIDATE_VERSION = "candidates-v1"
+CANDIDATE_LICENSES = frozenset(
+    {"CC BY 2.0", "CC BY 4.0", "CC BY-SA 3.0", "CC BY-SA 4.0", "Public domain"}
+)
+CANDIDATE_FIELDS = frozenset(
+    {
+        "id",
+        "source_group",
+        "file_page_url",
+        "file_url",
+        "rights_holder",
+        "license",
+        "license_url",
+        "license_verified",
+        "vehicle",
+        "visible_control_note",
+        "claim_text",
+        "claim_origin",
+        "equipment_evidence_needed",
+        "privacy_note",
+        "image_bytes",
+        "candidate_status",
+        "status_reason",
+        "date_researched",
+    }
+)
+
+
+def validate_candidate_sources(doc: dict) -> dict:
+    """Validate a Phase B candidate-source list. Returns it unchanged."""
+    doc = _require_mapping(doc, "candidates")
+    unknown = set(doc) - {"candidate_version", "sources"}
+    if unknown:
+        raise IntakeError(f"candidates has unexpected fields {sorted(unknown)}")
+    if doc.get("candidate_version") != CANDIDATE_VERSION:
+        raise IntakeError(
+            f"unsupported candidate_version {doc.get('candidate_version')!r}"
+        )
+    sources = doc.get("sources")
+    if not isinstance(sources, list) or not sources:
+        raise IntakeError("candidates sources must be a non-empty list")
+    seen = set()
+    for source in sources:
+        source = _require_mapping(source, "candidate source")
+        extra = set(source) - CANDIDATE_FIELDS
+        if extra:
+            raise IntakeError(f"candidate source has unexpected fields {sorted(extra)}")
+        source_id = source.get("id")
+        if not source_id or not isinstance(source_id, str):
+            raise IntakeError("candidate source id must be a non-empty string")
+        if source_id in seen:
+            raise IntakeError(f"duplicate candidate source id {source_id!r}")
+        seen.add(source_id)
+        if source.get("candidate_status") != "pending":
+            raise IntakeError(
+                f"candidate {source_id}: Phase B research never marks accepted; "
+                "acceptance requires Phase C gates"
+            )
+        if source.get("license") not in CANDIDATE_LICENSES or not source.get(
+            "license_verified"
+        ):
+            raise IntakeError(f"candidate {source_id}: license not verified reusable")
+        if source.get("image_bytes") != "not downloaded":
+            raise IntakeError(
+                f"candidate {source_id}: image bytes must stay undownloaded in Phase B"
+            )
+        vehicle = _require_mapping(
+            source.get("vehicle"), f"candidate {source_id} vehicle"
+        )
+        if VEHICLE_FIELDS - set(vehicle):
+            raise IntakeError(f"candidate {source_id}: vehicle incomplete")
+        for field in (
+            "source_group",
+            "file_page_url",
+            "rights_holder",
+            "visible_control_note",
+            "claim_text",
+            "equipment_evidence_needed",
+            "privacy_note",
+            "status_reason",
+            "date_researched",
+        ):
+            if not source.get(field) or not isinstance(source.get(field), str):
+                raise IntakeError(
+                    f"candidate {source_id}: {field} must be a non-empty string"
+                )
+        if source.get("claim_origin") != "researcher":
+            raise IntakeError(
+                f"candidate {source_id}: Phase B claims are researcher-authored only"
+            )
+    return doc
+
+
+def candidates_path() -> Path:
+    return private_dir() / "candidate-sources.json"
+
+
+def save_candidate_sources(doc: dict) -> Path:
+    """Validate and persist the private candidate-source list."""
+    validate_candidate_sources(doc)
+    target = candidates_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
+    return target
+
+
 def load_register() -> dict:
     """Load and validate the private register (fails when absent)."""
     path = register_path()
