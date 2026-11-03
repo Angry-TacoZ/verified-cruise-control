@@ -404,6 +404,51 @@ def prepare_evaluation_copy(src, dest) -> dict:
     }
 
 
+# Photo-only pilot semantics. ground_truth.equipment is the
+# independently established vehicle truth (equipped / not-equipped /
+# unknown). ground_truth.expected_state is the evidence state the
+# PHOTO-ONLY evaluation can legitimately support: without an
+# authoritative evidence input the photo-only pipeline cannot reach
+# verified or contradicted, so the admission validator rejects those
+# labels here. The public schema and production reconciliation are
+# unchanged — this gate applies to pilot admission only.
+PHOTO_ONLY_FORBIDDEN_STATES = frozenset({"verified", "contradicted"})
+
+
+def validate_admission(entry: dict, case: dict) -> str:
+    """Admit one register entry + manifest case pair. Returns "accepted".
+
+    Every gate fails closed: rights verified, privacy passed, status
+    accepted, independent equipment evidence present, reviewer
+    attestation recorded, source group assigned, register claim text
+    identical to the manifest's seller wording, and expected_state
+    within photo-only reach. Labels must come from independently
+    reviewed evidence — this module never calls the reconciler.
+    """
+    _validate_entry(entry, set())
+    case_id = case.get("id")
+    if entry.get("candidate_status") != "accepted":
+        raise IntakeError(f"case {case_id}: register status is not accepted")
+    if entry.get("license_status") != "verified":
+        raise IntakeError(f"case {case_id}: usage rights are not verified")
+    if entry.get("privacy_review") != "passed":
+        raise IntakeError(f"case {case_id}: manual privacy review has not passed")
+    require_source_group(case, "admission")
+    advertised = (case.get("claim") or {}).get("advertised")
+    if entry.get("claim_text") != advertised:
+        raise IntakeError(
+            f"case {case_id}: register claim text does not match the "
+            "manifest's seller wording verbatim"
+        )
+    expected = (case.get("ground_truth") or {}).get("expected_state")
+    if expected in PHOTO_ONLY_FORBIDDEN_STATES:
+        raise IntakeError(
+            f"case {case_id}: photo-only pilot cannot label {expected!r}; "
+            "verified needs authoritative input and absence is not contradiction"
+        )
+    return "accepted"
+
+
 def load_register() -> dict:
     """Load and validate the private register (fails when absent)."""
     path = register_path()

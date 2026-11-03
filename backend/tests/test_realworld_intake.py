@@ -387,6 +387,112 @@ def test_evaluation_sha_computed_after_final(tmp_path):
     assert report["original_sha256"] == hashlib.sha256(src.read_bytes()).hexdigest()
 
 
+def _admission_pair(**case_overrides):
+    entry = _register_entry()
+    case = _manifest_case()
+    case["source_group"] = "group-a1b2c3"
+    case.update(case_overrides)
+    return entry, case
+
+
+def test_admission_accepts_complete_record():
+    """A fully evidenced photo-only case is admitted."""
+    from audits.realworld_intake import validate_admission
+
+    entry, case = _admission_pair()
+    assert validate_admission(entry, case) == "accepted"
+
+
+def test_admission_rejects_verified_and_contradicted_states():
+    """Photo-only pilot manifests cannot promise verified/contradicted."""
+    from audits.realworld_intake import IntakeError, validate_admission
+
+    for state in ("verified", "contradicted"):
+        entry, case = _admission_pair()
+        case["ground_truth"]["expected_state"] = state
+        with pytest.raises(IntakeError):
+            validate_admission(entry, case)
+
+
+def test_admission_accepts_non_authoritative_states():
+    """insufficient_evidence / visually_supported / not_visually_verifiable pass."""
+    from audits.realworld_intake import validate_admission
+
+    for state in (
+        "insufficient_evidence",
+        "visually_supported",
+        "not_visually_verifiable",
+    ):
+        entry, case = _admission_pair()
+        case["ground_truth"]["expected_state"] = state
+        assert validate_admission(entry, case) == "accepted"
+
+
+def test_admission_requires_rights_privacy_equipment():
+    """Pending license, failed privacy, or missing equipment blocks admission."""
+    from audits.realworld_intake import IntakeError, validate_admission
+
+    entry, case = _admission_pair()
+    for field, bad in [
+        ("license_status", "pending"),
+        ("license_status", "rejected"),
+        ("privacy_review", "pending"),
+        ("privacy_review", "failed"),
+        ("candidate_status", "pending"),
+        ("equipment_method", ""),
+        ("equipment_evidence", ""),
+    ]:
+        with pytest.raises(IntakeError):
+            validate_admission({**entry, field: bad}, case)
+
+
+def test_admission_requires_matching_claim_text():
+    """Register claim text must equal the manifest's seller wording."""
+    from audits.realworld_intake import IntakeError, validate_admission
+
+    entry, case = _admission_pair()
+    case["claim"]["advertised"] = "Adaptive Cruise Control with Stop & Go"
+    with pytest.raises(IntakeError):
+        validate_admission(entry, case)
+
+
+def test_not_equipped_positive_prediction_scores_hallucinated():
+    """A visually_supported prediction on a not-equipped case is penalized."""
+    from audits.realworld import score_case
+
+    entry, case = _admission_pair()
+    case["ground_truth"]["equipment"] = "not-equipped"
+    case["ground_truth"]["interpretation"] = "generic"
+    case["ground_truth"]["expected_state"] = "insufficient_evidence"
+    row = score_case(
+        case, {"mode": "baseline", "status": "scored", "state": "visually_supported"}
+    )
+    assert row["hallucinated_positive"] is True
+    assert row["state_correct"] is False
+
+
+def test_correct_insufficient_prediction_scores_clean():
+    """insufficient_evidence predicted on a not-equipped case is correct."""
+    from audits.realworld import score_case
+
+    entry, case = _admission_pair()
+    case["ground_truth"]["equipment"] = "not-equipped"
+    case["ground_truth"]["expected_state"] = "insufficient_evidence"
+    row = score_case(
+        case, {"mode": "baseline", "status": "scored", "state": "insufficient_evidence"}
+    )
+    assert row["state_correct"] is True
+    assert row["hallucinated_positive"] is False
+
+
+def test_intake_never_derives_labels_from_reconciliation():
+    """Admission code must not call the production reconciler."""
+    source = (REPO_ROOT / "backend" / "audits" / "realworld_intake.py").read_text(
+        encoding="utf-8"
+    )
+    assert "reconcile_claim" not in source
+
+
 def test_existing_fixtures_pass_value_scan():
     """Synthetic fixtures and the example manifest validate unchanged."""
     from audits.realworld import validate_manifest
