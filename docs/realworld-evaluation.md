@@ -182,3 +182,8 @@ ledger renamed to another extension is not discovered, so keep .jsonl
 when archiving into archive/ and never rename extensions to "disable"
 a ledger. Deterministic offline regression tests; still zero paid
 inference.
+
+## 10. Pilot intake infrastructure (PR #5, zero genuine photographs)
+
+Phase A shipped with no real photos admitted: gitignored private register (intake-v1; rights/privacy/equipment records, opaque source groups), value-level privacy scan (VIN/email/phone/data-URI patterns; sha256 excluded; fixtures pass unchanged) wired into validate_manifest so dry-run and live paths are protected, photo-only admission (verified/contradicted rejected; rights verified, privacy passed, equipment evidenced, claim text verbatim), EXIF-aware evaluation copies (orientation recorded, rotation baked, GPS quarantined), source-group cross-split gates with exact (SHA-256) and perceptual (Pillow dHash, threshold 6) duplicate detection, holdout freeze records with hash enforcement and a manual evaluation log, counts-only public reports, and the zero-inference realworld-validate command. Labeling rules: docs/realworld-labeling-rubric.md. Operator guide: evals/realworld/INTAKE.md. No model accuracy established; no live inference occurred.
+
