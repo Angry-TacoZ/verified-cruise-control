@@ -485,6 +485,124 @@ def test_correct_insufficient_prediction_scores_clean():
     assert row["hallucinated_positive"] is False
 
 
+def _photo_manifest(ids, digest="f" * 64):
+    return _manifest(
+        [
+            {
+                **_manifest_case(id=cid),
+                "source_group": f"group-{cid}",
+                "photo": {
+                    "path": f"photos/{cid}.png",
+                    "sha256": digest,
+                    "provenance": "evaluator photograph",
+                },
+            }
+            for cid in ids
+        ]
+    )
+
+
+def test_holdout_freeze_round_trip(tmp_path, monkeypatch):
+    """Freeze records manifest hash + inventory; unchanged check passes."""
+    from audits.realworld_intake import check_holdout_freeze, freeze_holdout
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    manifest = _photo_manifest(["h1", "h2"])
+    record = freeze_holdout(
+        dataset="pilot", manifest=manifest, reviewer_role="dataset-reviewer"
+    )
+    assert record["manifest_sha256"]
+    assert record["case_ids"] == ["h1", "h2"]
+    assert (
+        check_holdout_freeze("pilot", manifest)["manifest_sha256"]
+        == record["manifest_sha256"]
+    )
+
+
+def test_holdout_change_detected(tmp_path, monkeypatch):
+    """A changed holdout manifest fails the freeze check."""
+    from audits.realworld_intake import (
+        IntakeError,
+        check_holdout_freeze,
+        freeze_holdout,
+    )
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    manifest = _photo_manifest(["h1", "h2"])
+    freeze_holdout(dataset="pilot", manifest=manifest, reviewer_role="dataset-reviewer")
+    tampered = _photo_manifest(["h1", "h2", "h3"])
+    with pytest.raises(IntakeError):
+        check_holdout_freeze("pilot", tampered)
+
+
+def test_missing_freeze_record_reported(tmp_path, monkeypatch):
+    """No freeze record is an explicit failure, never a silent pass."""
+    from audits.realworld_intake import IntakeError, check_holdout_freeze
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    with pytest.raises(IntakeError):
+        check_holdout_freeze("pilot", _photo_manifest(["h1"]))
+
+
+def test_duplicates_block_freeze_until_disposition(tmp_path, monkeypatch):
+    """Exact and near duplicates across splits block the freeze."""
+    from PIL import Image
+
+    from audits.realworld_intake import IntakeError, freeze_holdout
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    dev = _photo_manifest(["d1"])
+    holdout = _photo_manifest(["h1"])  # same digest "f"*64 as dev
+    with pytest.raises(IntakeError):
+        freeze_holdout(
+            dataset="pilot",
+            manifest=holdout,
+            dev_manifest=dev,
+            reviewer_role="dataset-reviewer",
+        )
+
+    distinct = _photo_manifest(["h1"], digest="e" * 64)
+    red = tmp_path / "red.png"
+    Image.new("RGB", (32, 32), (200, 30, 30)).save(red)
+    photos = {"d1": tmp_path / "dev.png", "h1": red}
+    Image.new("RGB", (32, 32), (200, 30, 30)).save(photos["d1"])
+    with pytest.raises(IntakeError):
+        freeze_holdout(
+            dataset="pilot",
+            manifest=distinct,
+            dev_manifest=dev,
+            photo_paths=photos,
+            reviewer_role="dataset-reviewer",
+        )
+    record = freeze_holdout(
+        dataset="pilot",
+        manifest=distinct,
+        dev_manifest=dev,
+        photo_paths=photos,
+        reviewer_role="dataset-reviewer",
+        dispositions={"d1|h1": "distinct vehicles confirmed by dataset-reviewer"},
+    )
+    assert record["dispositions"] == {
+        "d1|h1": "distinct vehicles confirmed by dataset-reviewer"
+    }
+
+
+def test_holdout_evaluation_log_is_manual(tmp_path, monkeypatch):
+    """Authorized evaluations append a manual log entry with full context."""
+    from audits.realworld_intake import log_holdout_evaluation, read_evaluation_log
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    entry = log_holdout_evaluation(
+        dataset="pilot",
+        manifest_hash="ab" * 32,
+        prompt_versions={"muse": "m2", "sam": "s1"},
+        run_date="2026-11-04",
+        reason="pilot smoke check",
+    )
+    assert entry["reason"] == "pilot smoke check"
+    assert read_evaluation_log("pilot") == [entry]
+
+
 def test_intake_never_derives_labels_from_reconciliation():
     """Admission code must not call the production reconciler."""
     source = (REPO_ROOT / "backend" / "audits" / "realworld_intake.py").read_text(

@@ -13,6 +13,7 @@ credentials. Tests use synthetic registers in tmp_path only.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -352,8 +353,6 @@ def prepare_evaluation_copy(src, dest) -> dict:
     transform applied, and the GPS finding. GPS-carrying originals
     are quarantined, never silently stripped.
     """
-    import hashlib
-
     from PIL import Image, ImageOps
 
     src = Path(src)
@@ -447,6 +446,162 @@ def validate_admission(entry: dict, case: dict) -> str:
             "verified needs authoritative input and absence is not contradiction"
         )
     return "accepted"
+
+
+# Holdout integrity. Dev and holdout are allocated by source group
+# (cross-split check above); before any model evaluation the holdout
+# is frozen. The freeze record is private: holdout manifest SHA-256 +
+# case inventory + date + reviewer role. Every later validation
+# flags a changed holdout manifest; a missing freeze record is
+# reported, never silently passed. Authorized holdout evaluations
+# are logged MANUALLY (an honor system — the log is a local file the
+# operator appends to; run.py is deliberately not modified to
+# automate it). Never tune on holdout; never report dev as validation.
+def manifest_hash(manifest: dict) -> str:
+    """Stable content hash for one manifest (canonical JSON, SHA-256)."""
+    canonical = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _freeze_path(dataset: str) -> Path:
+    return private_dir() / f"holdout-freeze-{dataset}.json"
+
+
+def _evaluations_path(dataset: str) -> Path:
+    return private_dir() / f"holdout-evaluations-{dataset}.jsonl"
+
+
+def freeze_holdout(
+    *,
+    dataset: str,
+    manifest: dict,
+    reviewer_role: str,
+    run_date=None,
+    dev_manifest: dict | None = None,
+    photo_paths: dict | None = None,
+    dispositions: dict | None = None,
+) -> dict:
+    """Freeze a holdout manifest after all cross-split gates pass.
+
+    Blocks on: source_group overlap, exact duplicate bytes across
+    splits, and probable near-duplicates across splits without a
+    recorded human disposition. Returns and persists the record.
+    """
+    from datetime import date as _date
+
+    cases = manifest.get("cases", [])
+    case_ids = sorted(case.get("id") for case in cases)
+    dev_ids: set = set()
+    if dev_manifest is not None:
+        dev_cases = dev_manifest.get("cases", [])
+        dev_ids = {case.get("id") for case in dev_cases}
+        check_cross_split(dev_cases, cases)
+        dupes = check_exact_duplicates(dev_cases + cases)
+        cross_exact = {
+            digest: ids
+            for digest, ids in dupes.items()
+            if any(cid in dev_ids for cid in ids)
+            and any(cid not in dev_ids for cid in ids)
+        }
+        if cross_exact:
+            raise IntakeError(
+                f"holdout freeze refused: exact duplicate bytes across splits {cross_exact}"
+            )
+    near_hits = []
+    if photo_paths:
+        labeled = [
+            (cid, photo_paths[cid])
+            for cid in case_ids + sorted(dev_ids)
+            if cid in photo_paths
+        ]
+        for first, second, distance in find_near_duplicates(labeled):
+            if (first in dev_ids) == (second in dev_ids):
+                continue
+            key = "|".join(sorted((first, second)))
+            if not (dispositions or {}).get(key):
+                raise IntakeError(
+                    f"holdout freeze refused: probable near-duplicate {first}/{second} "
+                    f"(distance {distance}) unresolved; record a human disposition"
+                )
+            near_hits.append(
+                {
+                    "pair": [first, second],
+                    "distance": distance,
+                    "disposition": dispositions[key],
+                }
+            )
+    record = {
+        "dataset": dataset,
+        "split": manifest.get("split"),
+        "manifest_sha256": manifest_hash(manifest),
+        "case_ids": case_ids,
+        "date": run_date or _date.today().isoformat(),
+        "reviewer_role": reviewer_role,
+        "dispositions": dispositions or {},
+        "resolved_near_duplicates": near_hits,
+    }
+    target = _freeze_path(dataset)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+    return record
+
+
+def check_holdout_freeze(dataset: str, manifest: dict) -> dict:
+    """Validate a holdout manifest against its freeze record."""
+    target = _freeze_path(dataset)
+    try:
+        record = json.loads(target.read_text(encoding="utf-8"))
+    except OSError:
+        raise IntakeError(
+            f"dataset {dataset}: no holdout freeze record at {target}; "
+            "freeze the holdout before any model evaluation"
+        ) from None
+    except ValueError as exc:
+        raise IntakeError(
+            f"dataset {dataset}: freeze record unreadable ({exc})"
+        ) from exc
+    current = manifest_hash(manifest)
+    if record.get("manifest_sha256") != current:
+        raise IntakeError(
+            f"dataset {dataset}: holdout manifest changed since freeze "
+            f"(frozen {record.get('manifest_sha256')}, now {current})"
+        )
+    return record
+
+
+def log_holdout_evaluation(
+    *,
+    dataset: str,
+    manifest_hash: str,
+    prompt_versions: dict,
+    run_date: str,
+    reason: str,
+) -> dict:
+    """Manually record one authorized holdout evaluation (honor system)."""
+    entry = {
+        "dataset": dataset,
+        "manifest_hash": manifest_hash,
+        "prompt_versions": dict(prompt_versions),
+        "run_date": run_date,
+        "reason": reason,
+    }
+    target = _evaluations_path(dataset)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+    return entry
+
+
+def read_evaluation_log(dataset: str) -> list:
+    """Read the manual holdout-evaluation log (empty when never logged)."""
+    target = _evaluations_path(dataset)
+    if not target.exists():
+        return []
+    entries = []
+    for line in target.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            entries.append(json.loads(line))
+    return entries
 
 
 def load_register() -> dict:
