@@ -700,6 +700,143 @@ def public_report(private: dict) -> dict:
     }
 
 
+# Zero-inference validation command. One reproducible run performs:
+# schema + value-level privacy scan + SHA-256 verification against the
+# photos root + photo-only label constraints + admission gates (when a
+# register is linked) + source_group and cross-split checks + exact and
+# near-duplicate checks + holdout freeze check + quality reports. It
+# makes no network or provider calls.
+
+
+def validate_intake(
+    *,
+    manifest,
+    photos_root=None,
+    other_manifest=None,
+    entries: dict | None = None,
+    enforce_freeze: bool = False,
+    photo_paths: dict | None = None,
+) -> dict:
+    """Run the full offline intake validation; never raises on findings.
+
+    Returns a report with ``passed``, ``failures`` (safe strings, never
+    repeating quarantined values), the private and public quality
+    reports, and the freeze status. Without a linked register,
+    rights/privacy/equipment admission is reported as not measured;
+    the photo-only state rule still applies to every manifest.
+    """
+    from audits.realworld import validate_manifest
+
+    failures: list = []
+    if isinstance(manifest, (str, Path)):
+        manifest = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    cases = []
+    try:
+        cases = validate_manifest(manifest, photos_root=photos_root)
+    except (TypeError, ValueError) as exc:
+        failures.append(f"manifest invalid: {exc}")
+        cases = []
+    for case in cases:
+        expected = (case.get("ground_truth") or {}).get("expected_state")
+        if expected in PHOTO_ONLY_FORBIDDEN_STATES:
+            failures.append(
+                f"case {case.get('id')}: photo-only pilot cannot label {expected!r}"
+            )
+    if entries:
+        case_ids = {case.get("id") for case in cases}
+        for orphan in sorted(set(entries) - case_ids):
+            failures.append(f"register entry {orphan}: no manifest case links it")
+        for case in cases:
+            entry = entries.get(case.get("id"))
+            if entry is None:
+                failures.append(f"case {case.get('id')}: no linked register entry")
+                continue
+            try:
+                validate_admission(entry, case)
+            except IntakeError as exc:
+                failures.append(f"case {case.get('id')}: {exc}")
+    admission_measured = bool(entries)
+    if other_manifest is not None:
+        if isinstance(other_manifest, (str, Path)):
+            other_manifest = json.loads(
+                Path(other_manifest).read_text(encoding="utf-8")
+            )
+        try:
+            other_cases = validate_manifest(other_manifest)
+        except (TypeError, ValueError) as exc:
+            failures.append(f"comparison manifest invalid: {exc}")
+            other_cases = []
+        else:
+            try:
+                check_cross_split(other_cases, cases)
+            except IntakeError as exc:
+                failures.append(str(exc))
+            dupes = check_exact_duplicates(other_cases + cases)
+            cross = {
+                digest: ids
+                for digest, ids in dupes.items()
+                if any(i in {c.get("id") for c in other_cases} for i in ids)
+                and len(ids) > 1
+            }
+            if cross:
+                failures.append(
+                    f"exact duplicate bytes across manifests: {sorted(cross)}"
+                )
+    near_pairs = []
+    auto_paths = {}
+    if photos_root is not None:
+        root = Path(photos_root)
+        for case in cases:
+            candidate = root / (case.get("photo") or {}).get("path", "")
+            if candidate.is_file():
+                auto_paths[case.get("id")] = candidate
+    merged_paths = {**auto_paths, **(photo_paths or {})}
+    if merged_paths:
+        labeled = [
+            (cid, merged_paths[cid])
+            for cid in [c.get("id") for c in cases]
+            if cid in merged_paths
+        ]
+        try:
+            near_pairs = [
+                {"pair": [first, second], "distance": distance}
+                for first, second, distance in find_near_duplicates(labeled)
+            ]
+        except IntakeError as exc:
+            failures.append(str(exc))
+    freeze: dict = {"status": "not applicable"}
+    if manifest.get("split") == "holdout":
+        dataset = manifest.get("dataset", "unknown")
+        try:
+            record = check_holdout_freeze(dataset, manifest)
+            freeze = {"status": "frozen", "manifest_sha256": record["manifest_sha256"]}
+        except IntakeError as exc:
+            if enforce_freeze or _freeze_path(dataset).exists():
+                failures.append(str(exc))
+                freeze = {"status": "mismatch"}
+            else:
+                freeze = {"status": "missing"}
+    private_report = build_quality_report(
+        entries=list((entries or {}).values()),
+        dev_cases=cases if manifest.get("split") == "dev" else [],
+        holdout_cases=cases if manifest.get("split") == "holdout" else [],
+        freeze=freeze if freeze["status"] != "not applicable" else None,
+        leakage=near_pairs or None,
+    )
+    return {
+        "eval": "realworld-intake-validate",
+        "manifest": manifest.get("dataset"),
+        "split": manifest.get("split"),
+        "cases": len(cases),
+        "passed": not failures,
+        "failures": failures,
+        "admission_measured": admission_measured,
+        "freeze": freeze,
+        "private_report": private_report,
+        "public_report": public_report(private_report),
+    }
+
+
 def load_register() -> dict:
     """Load and validate the private register (fails when absent)."""
     path = register_path()

@@ -668,6 +668,72 @@ def test_public_report_uses_not_measured():
     assert public["claim_origin"]["seller"] == 3
 
 
+def test_validate_intake_passes_on_synthetic_fixtures():
+    """The full intake validator runs clean on the synthetic fixtures."""
+    from audits.realworld_intake import validate_intake
+
+    report = validate_intake(
+        manifest=REPO_ROOT / "fixtures" / "realworld-sample" / "manifest.json",
+        photos_root=REPO_ROOT / "fixtures" / "realworld-sample",
+    )
+    assert report["passed"] is True, report["failures"]
+    assert report["public_report"]["counts"] == {
+        "accepted": 0,
+        "pending": 0,
+        "rejected": 0,
+    }
+
+
+def test_validate_intake_surfaces_admission_failure():
+    """A pending license in the linked register fails the run."""
+    from audits.realworld_intake import validate_intake
+
+    manifest = _photo_manifest(["case-zz-1"])
+    entry = _register_entry(id="case-zz-1", license_status="pending")
+    report = validate_intake(manifest=manifest, entries={"case-zz-1": entry})
+    assert report["passed"] is False
+    assert any("rights" in failure for failure in report["failures"])
+
+
+def test_validate_intake_rejects_photo_only_forbidden_states():
+    """verified/contradicted labels fail even without a register."""
+    from audits.realworld_intake import validate_intake
+
+    manifest = _photo_manifest(["case-zz-1"])
+    manifest["cases"][0]["ground_truth"]["expected_state"] = "verified"
+    report = validate_intake(manifest=manifest)
+    assert report["passed"] is False
+    assert any("photo-only" in failure for failure in report["failures"])
+
+
+def test_validate_intake_enforces_holdout_freeze(tmp_path, monkeypatch):
+    """Frozen holdouts pass; tampered ones fail; missing needs the flag."""
+    from audits.realworld_intake import validate_intake
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    manifest = _photo_manifest(["h1"])
+    manifest["split"] = "holdout"
+    manifest["dataset"] = "pilot"
+    soft = validate_intake(manifest=manifest)
+    assert soft["passed"] is True
+    assert soft["freeze"]["status"] == "missing"
+    hard = validate_intake(manifest=manifest, enforce_freeze=True)
+    assert hard["passed"] is False
+
+
+def test_validate_intake_public_branch_has_no_identifiers():
+    """The public branch of the intake report stays counts-only."""
+    import json
+
+    from audits.realworld_intake import validate_intake
+
+    manifest = _photo_manifest(["case-zz-1"])
+    report = validate_intake(manifest=manifest)
+    blob = json.dumps(report["public_report"])
+    for secret in ("case-zz-1", "group-", "Forte", "Kia"):
+        assert secret not in blob, secret
+
+
 def test_intake_never_derives_labels_from_reconciliation():
     """Admission code must not call the production reconciler."""
     source = (REPO_ROOT / "backend" / "audits" / "realworld_intake.py").read_text(
