@@ -20,6 +20,8 @@ from django.conf import settings
 from django.db import transaction
 from PIL import Image
 
+from audits.rsa_reference import REFERENCE_VERSION as RSA_REFERENCE_VERSION
+from audits.rsa_reference import guidance_for as _rsa_guidance_for
 from evidence.images import original_path
 from evidence.models import Photograph
 from providers.base import (
@@ -110,6 +112,54 @@ def build_user_text(entries: list[dict], photo_ids: list[str]) -> str:
         ),
     ]
     return "\n".join(lines)
+
+
+REFERENCE_PROMPT_VERSION = "m3"
+REFERENCE_BLOCK_MAX_CHARS = 2000
+
+
+def build_reference_block(claim_texts: list[str]) -> str:
+    """Per-chunk RSA guidance for the claimed features (reference mode).
+
+    One short snippet per distinct normalized feature, in first-seen
+    order; unmapped features contribute nothing. Whole snippets only:
+    accumulation stops before exceeding the cap so a truncated
+    half-guidance is never sent. Empty string means no guidance
+    applies and the caller falls back to the baseline prompt.
+    """
+    seen: set[str] = set()
+    parts: list[str] = []
+    total = 0
+    for text in claim_texts:
+        feature = adas_evidence.normalize_feature(text)
+        if feature in seen or feature == adas_evidence.FEATURE_UNKNOWN:
+            continue
+        snippet = _rsa_guidance_for(feature)
+        if not snippet:
+            continue
+        seen.add(feature)
+        if total + len(snippet) + (2 if parts else 0) > REFERENCE_BLOCK_MAX_CHARS:
+            break
+        parts.append(snippet)
+        total += len(snippet) + (2 if len(parts) > 1 else 0)
+    return "\n\n".join(parts)
+
+
+def build_system_instructions(reference_block: str = "") -> str:
+    """Baseline m2 instructions, optionally with RSA reference notes.
+
+    Empty block returns the baseline verbatim so default behavior is
+    byte-identical to PR #2.
+    """
+    if not reference_block:
+        return SYSTEM_INSTRUCTIONS
+    return (
+        SYSTEM_INSTRUCTIONS
+        + "\n\nReference notes for the claimed features "
+        + f"(RSA ADAS guide, {RSA_REFERENCE_VERSION}; general knowledge only, "
+        + "never proof of equipment):\n"
+        + reference_block
+    )
 
 
 @dataclass
@@ -403,11 +453,13 @@ def get_catalog() -> adas_evidence.Catalog:
     return _CATALOG
 
 
-def _control_extra(item: dict) -> dict:
+def control_extra(item: dict) -> dict:
     """Carry Layer B control identification into the observation row.
 
     Only keys the validator accepted are copied (all already capped);
     absent optionals stay absent so legacy-shaped items are unchanged.
+
+    Public so offline evaluation builds production-identical extras.
     """
     return {key: item[key] for key in _CONTROL_EXTRA_KEYS if key in item}
 
@@ -470,6 +522,7 @@ def run_muse(
     worker_id: str,
     screened: ScreenedJob,
     adapter: BasetenMuseAdapter | None = None,
+    reference_mode: bool = False,
 ) -> int:
     """Batched Muse observation: one photo and up to six claims per call.
 
@@ -478,6 +531,10 @@ def run_muse(
     completeness against its expected pairs: unknown IDs, missing pairs,
     or empty responses fail the job with an exact code instead of
     silently producing partial evidence. Returns observations stored.
+
+    With ``reference_mode`` each chunk carries short RSA guidance for
+    its claimed features (prompt m3); chunks without mapped features
+    fall back to the baseline m2 prompt, recorded per call.
     """
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
@@ -502,9 +559,16 @@ def run_muse(
                 continue
             if not services.heartbeat(job_id, worker_id):
                 raise services.JobNotRunningError(f"job {job_id} stopped during muse")
+            reference_block = (
+                build_reference_block([entry["text"] for entry in chunk])
+                if reference_mode
+                else ""
+            )
             request = MuseRequest(
-                prompt_version=PROMPT_VERSION,
-                system_instructions=SYSTEM_INSTRUCTIONS,
+                prompt_version=(
+                    REFERENCE_PROMPT_VERSION if reference_block else PROMPT_VERSION
+                ),
+                system_instructions=build_system_instructions(reference_block),
                 user_text=build_user_text(chunk, [str(photo.pk)]),
                 photo_ids=(str(photo.pk),),
                 images=tuple(photo_attachments),
@@ -533,6 +597,11 @@ def run_muse(
                 latency_ms=usage.latency_ms,
                 usage={
                     "prompt_version": usage.prompt_version,
+                    "reference_version": (
+                        RSA_REFERENCE_VERSION
+                        if usage.prompt_version == REFERENCE_PROMPT_VERSION
+                        else None
+                    ),
                     "input_tokens": usage.input_tokens,
                     "output_tokens": usage.output_tokens,
                     "pricing_version": usage.pricing_version,
@@ -564,7 +633,7 @@ def run_muse(
                                 ),
                                 "needs_crop": bool(item.get("needs_crop")),
                                 "needs_other_view": bool(item.get("needs_other_view")),
-                                **_control_extra(item),
+                                **control_extra(item),
                             },
                             "execution": execution,
                         },
@@ -596,7 +665,7 @@ def sanitize_concept(text: str) -> str:
     return " ".join(cleaned.split()[:10])
 
 
-def _sam_target_for(
+def sam_target_for(
     target: Observation, claim_text: str, vehicle: dict | None = None
 ) -> tuple[str, str, int | None]:
     """Build the SAM prompt from the observed physical object (Layer C).
@@ -612,6 +681,7 @@ def _sam_target_for(
     identification fall back to the claim text; when no item yields a
     concept phrase the caller records UNCLEAR without spending.
     Returns (concept, target_source, control_index).
+    Public so offline evaluation reuses production target selection.
     """
     extra = target.extra or {}
     if "visible_object" not in extra:
@@ -708,7 +778,7 @@ def run_sam(
             detail = f"Muse observation references unknown claim {target.claim_key!r}"
             services.fail_job(job_id, worker_id, "unknown_claim", detail)
             raise services.JobNotRunningError(f"job {job_id} has unknown claim")
-        concept, target_source, control_index = _sam_target_for(
+        concept, target_source, control_index = sam_target_for(
             target, text, snapshot_vehicle
         )
         photo = target.photo
@@ -1079,7 +1149,7 @@ def run_recheck(
                         "extra": {
                             "crop_ref": crop.storage_ref,
                             "changed": prior is not None and prior != verdict,
-                            **_control_extra(item),
+                            **control_extra(item),
                         },
                         "execution": execution,
                     },

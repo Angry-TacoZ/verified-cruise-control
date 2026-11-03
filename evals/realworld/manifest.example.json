@@ -1,0 +1,30 @@
+{
+  "manifest_version": "realworld-v1",
+  "dataset": "local-pilot-TEMPLATE",
+  "split": "dev",
+  "notes": "TEMPLATE ONLY. Copy to manifest.<name>.json, fill in independently established ground truth, and place verified local photos under photos/. The sha256 below is a placeholder and will fail validation until replaced with the real digest. Never commit real photos.",
+  "cases": [
+    {
+      "id": "EXAMPLE-case-001",
+      "vehicle": {"year": 2021, "make": "Kia", "model": "Forte", "trim": "GT-Line", "market": "US"},
+      "claim": {
+        "advertised": "Lane Keeping Assist",
+        "normalized_feature": "lane_keeping_assist",
+        "claim_id": "lka"
+      },
+      "photo": {
+        "path": "photos/EXAMPLE-DO-NOT-COMMIT.jpg",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "provenance": "evaluator photograph, <date>, <location context>"
+      },
+      "ground_truth": {
+        "equipment": "equipped",
+        "visible_object": "vehicle-between-lanes button on left dashboard panel",
+        "interpretation": "supports",
+        "expected_state": "visually_supported",
+        "verification_method": "original window sticker on file",
+        "ambiguity": "night photo; button backlight glare present"
+      }
+    }
+  ]
+}

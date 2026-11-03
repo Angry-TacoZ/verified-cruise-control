@@ -63,7 +63,9 @@ Budget fields (exact names):
   `spend_cap`, `unknown_cost`, provider error names, `worker_crash`).
 - Execution rows in `/evidence` carry `attempts` (external requests
   fired, retries included) and `cost_usd` (string, or `null` when
-  billing is unknown — never silently zero).
+  billing is unknown — never silently zero). Muse rows also carry
+  `prompt_version` (`m2` baseline, `m3` reference-assisted) and
+  `reference_version` (RSA reference version, or `null`).
 - Observations carry `sam_target` (+ `target_source`: `observed_object`
   or `claim_fallback`, and `control_index`: which control item in the
   source observation was localized, and `source_observation_id`: the

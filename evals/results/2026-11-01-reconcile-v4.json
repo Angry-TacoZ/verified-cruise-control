@@ -9,14 +9,14 @@
       "id": "kia-acc-supported",
       "expected": "visually_supported",
       "got": "visually_supported",
-      "summary": "observed 'vehicle with distance bars' (Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance) is diagnostic evidence for adaptive_cruise_control per Smart Cruise Control (SCC) [diagnostic; confirmed by SAM localization; catalog 2026-11-01/v1/kia-forte-2021-scc-distance; control #0 (photo fd0716da); photo evidence only, not capability or condition proof]",
+      "summary": "observed 'vehicle with distance bars' (Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance) is diagnostic evidence for adaptive_cruise_control per Smart Cruise Control (SCC) [diagnostic; confirmed by SAM localization; catalog 2026-11-01/v1/kia-forte-2021-scc-distance; control #0 (photo 082883c4); photo evidence only, not capability or condition proof]",
       "pass": true
     },
     {
       "id": "kia-lka-supported",
       "expected": "visually_supported",
       "got": "visually_supported",
-      "summary": "observed 'vehicle between lane lines' (Dedicated LKA button on the instrument panel on the lower left-hand side of the driver; cluster lane indicator white (standby) / green (steering)) is diagnostic evidence for lane_keeping_assist per Lane Keeping Assist (LKA) [diagnostic; confirmed by SAM localization; catalog 2026-11-01/v1/kia-forte-2019-2024-lka-button; control #0 (photo fd0716da); photo evidence only, not capability or condition proof]",
+      "summary": "observed 'vehicle between lane lines' (Dedicated LKA button on the instrument panel on the lower left-hand side of the driver; cluster lane indicator white (standby) / green (steering)) is diagnostic evidence for lane_keeping_assist per Lane Keeping Assist (LKA) [diagnostic; confirmed by SAM localization; catalog 2026-11-01/v1/kia-forte-2019-2024-lka-button; control #0 (photo 082883c4); photo evidence only, not capability or condition proof]",
       "pass": true
     },
     {
@@ -51,14 +51,14 @@
       "id": "nested-lka-supports",
       "expected": "visually_supported",
       "got": "visually_supported",
-      "summary": "observed 'vehicle between lane lines' (Dedicated LKA button on the instrument panel on the lower left-hand side of the driver; cluster lane indicator white (standby) / green (steering)) is diagnostic evidence for lane_keeping_assist per Lane Keeping Assist (LKA) [diagnostic; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-forte-2019-2024-lka-button; control #1 (photo fd0716da); photo evidence only, not capability or condition proof]",
+      "summary": "observed 'vehicle between lane lines' (Dedicated LKA button on the instrument panel on the lower left-hand side of the driver; cluster lane indicator white (standby) / green (steering)) is diagnostic evidence for lane_keeping_assist per Lane Keeping Assist (LKA) [diagnostic; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-forte-2019-2024-lka-button; control #1 (photo 082883c4); photo evidence only, not capability or condition proof]",
       "pass": true
     },
     {
       "id": "multi-control-acc-supported",
       "expected": "visually_supported",
       "got": "visually_supported",
-      "summary": "observed 'vehicle with distance bars' (Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance) is diagnostic evidence for adaptive_cruise_control per Smart Cruise Control (SCC) [diagnostic; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-forte-2021-scc-distance; control #0 (photo fd0716da); photo evidence only, not capability or condition proof]",
+      "summary": "observed 'vehicle with distance bars' (Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance) is diagnostic evidence for adaptive_cruise_control per Smart Cruise Control (SCC) [diagnostic; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-forte-2021-scc-distance; control #0 (photo 082883c4); photo evidence only, not capability or condition proof]",
       "pass": true
     },
     {
@@ -86,7 +86,7 @@
       "id": "context-conflict-listing-governs",
       "expected": "visually_supported",
       "got": "visually_supported",
-      "summary": "observed 'vehicle with distance bars' (Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance) is diagnostic evidence for adaptive_cruise_control per Smart Cruise Control (SCC) [diagnostic; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-forte-2021-scc-distance; control #0 (photo fd0716da); photo evidence only, not capability or condition proof]",
+      "summary": "observed 'vehicle with distance bars' (Vehicle Distance button on the steering wheel; sets the vehicle-to-vehicle follow distance) is diagnostic evidence for adaptive_cruise_control per Smart Cruise Control (SCC) [diagnostic; SAM localization unavailable; mapping stands on the identified control alone; catalog 2026-11-01/v1/kia-forte-2021-scc-distance; control #0 (photo 082883c4); photo evidence only, not capability or condition proof]",
       "pass": true
     },
     {

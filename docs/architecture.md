@@ -133,6 +133,31 @@ Key mechanics (all covered by `backend/tests/test_audits*.py`):
   offer no idempotency keys here. The ledger records what the app can
   prove (attempts, usage, cost or explicit unknown).
 
+## Real-world evaluation (PR #3)
+
+Offline-first paired harness for baseline (m2) vs reference-assisted
+(m3) recognition, in `backend/audits/realworld.py` + `evals/run.py`
+(`realworld-dryrun` / `realworld-live`) — see
+`docs/realworld-evaluation.md` and `evals/realworld/README.md`:
+
+- Versioned `realworld-v1` manifests describe local-only photographs
+  (path + SHA-256 + provenance + independent ground truth); bytes are
+  never committed and validation rejects VINs, personal data, and
+  embedded images.
+- Scoring is deterministic and separate from prediction: per-stage
+  correctness plus `hallucinated_positive` (claimed support where
+  truth says not-equipped) and `unsupported_equipped` (positive the
+  visible evidence cannot carry) flags; reports carry denominators,
+  paired-case overlap, and a "not measured" state instead of zeros.
+- `realworld-dryrun` is zero-inference (validate + verify + score
+  recorded outputs + spend preflight). `realworld-live` reuses the
+  production prompt builders, Muse validator shape, and deterministic
+  reconciler through the provider adapters directly; it is gated by
+  `VCC_LIVE_SMOKE=1`, configured keys, and a worst-case bound (cases x
+  modes x per-job `spend_cap_usd`) under `--max-spend`, with unknown
+  cost failing closed. SAM needs `VCC_LIVE_SAM=1` or the stage is
+  reported not measured. CI never runs live paths.
+
 ## Trust boundaries
 
 1. **Dealership content is untrusted**: page DOM, URLs, filenames, MIME

@@ -1,0 +1,3 @@
+# Local real-world photos are NEVER committed.
+*
+!.gitignore

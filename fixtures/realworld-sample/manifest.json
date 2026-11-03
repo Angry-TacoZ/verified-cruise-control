@@ -1,0 +1,52 @@
+{
+  "manifest_version": "realworld-v1",
+  "dataset": "realworld-sample",
+  "split": "dev",
+  "notes": "Public synthetic stand-ins so CI and dry-run exercise the manifest/scoring path without real photographs. Photos are generated; equipment labels are fictional and independent of any vehicle.",
+  "cases": [
+    {
+      "id": "synth-acc-001",
+      "vehicle": {"year": 2021, "make": "Synth", "model": "Testcar", "trim": "EX", "market": "US"},
+      "claim": {
+        "advertised": "Adaptive Cruise Control",
+        "normalized_feature": "adaptive_cruise_control",
+        "claim_id": "acc"
+      },
+      "photo": {
+        "path": "photos/synth-acc-001.png",
+        "sha256": "e4f081b7623b6e3789a7ab41e34e335bd25d705332fe8d18fd5ff963da7d6441",
+        "provenance": "synthetic fixture generated for CI"
+      },
+      "ground_truth": {
+        "equipment": "unknown",
+        "visible_object": "synthetic dashboard-style rectangle labeled ACC BTN",
+        "interpretation": "insufficient",
+        "expected_state": "insufficient_evidence",
+        "verification_method": "fixture by construction; no equipment claim",
+        "ambiguity": "synthetic image; not evidence of any real equipment"
+      }
+    },
+    {
+      "id": "synth-cruise-001",
+      "vehicle": {"year": 2020, "make": "Synth", "model": "Testcar", "trim": "LX", "market": "US"},
+      "claim": {
+        "advertised": "Cruise Control",
+        "normalized_feature": "cruise_control",
+        "claim_id": "cc"
+      },
+      "photo": {
+        "path": "photos/synth-cruise-001.png",
+        "sha256": "c61502a824164793c256ecf631c857f5fc18f7890e444962cb4a4ef74b80fb99",
+        "provenance": "synthetic fixture generated for CI"
+      },
+      "ground_truth": {
+        "equipment": "unknown",
+        "visible_object": "synthetic dashboard-style rectangle labeled CRUISE",
+        "interpretation": "generic",
+        "expected_state": "insufficient_evidence",
+        "verification_method": "fixture by construction; no equipment claim",
+        "ambiguity": "generic label cannot establish ACC capability"
+      }
+    }
+  ]
+}
