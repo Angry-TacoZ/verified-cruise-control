@@ -203,6 +203,105 @@ def _validate_entry(entry: dict, seen: set) -> None:
             raise IntakeError(f"entry {entry_id}: {field} must be a non-empty string")
 
 
+# Source groups tie photographs/claims from one physical vehicle or
+# listing together. Optional in the public realworld-v1 schema
+# (synthetic fixtures stay valid) but REQUIRED by the admission
+# validator for every real case: a missing group fails, otherwise the
+# leakage check would pass vacuously.
+def require_source_group(case: dict, where: str) -> str:
+    """Return the case's source_group or fail admission without one."""
+    group = case.get("source_group")
+    if not group or not isinstance(group, str):
+        raise IntakeError(
+            f"{where}: case {case.get('id')!r} has no source_group; "
+            "admission requires one opaque group per physical vehicle"
+        )
+    return group
+
+
+def check_cross_split(dev_cases: list, holdout_cases: list) -> list:
+    """Fail when any source_group appears in both splits. Returns []."""
+    dev_groups = {c.get("source_group") for c in dev_cases} - {None, ""}
+    hold_groups = {c.get("source_group") for c in holdout_cases} - {None, ""}
+    overlap = sorted(dev_groups & hold_groups)
+    if overlap:
+        raise IntakeError(
+            f"cross-split leakage: source_group(s) {overlap} present in "
+            "both dev and holdout; reallocate by physical vehicle"
+        )
+    return []
+
+
+def check_exact_duplicates(cases: list, *, strict: bool = False) -> dict:
+    """Map each repeated photo SHA-256 to its sorted case ids.
+
+    With strict=True any repetition raises; otherwise the mapping is
+    returned for the quality report and holdout-freeze gate.
+    """
+    by_hash: dict = {}
+    for case in cases:
+        digest = (case.get("photo") or {}).get("sha256")
+        by_hash.setdefault(digest, []).append(case.get("id"))
+    dupes = {h: sorted(ids) for h, ids in by_hash.items() if len(ids) > 1}
+    if strict and dupes:
+        raise IntakeError(f"exact duplicate photo bytes: {dupes}")
+    return dupes
+
+
+# Hamming-distance ceiling for the perceptual near-duplicate signal.
+# A one-pixel tweak on a 64px test image hashes at distance 0; a
+# solid red vs solid blue image differs in ~half the bits. The signal
+# is a review prompt, never proof: flat, gradient-free images of
+# different colors hash identically, so human judgment stays
+# required. Unresolved probable near-duplicates across splits block
+# the holdout freeze until a human disposition is recorded in the
+# private register.
+NEAR_DUP_THRESHOLD = 6
+
+
+def _dhash(path) -> int:
+    """8x8 difference hash of an image file (grayscale, Pillow only)."""
+    from PIL import Image
+
+    with Image.open(path) as img:
+        small = img.convert("L").resize((9, 8))
+        pixels = list(small.getdata())
+    bits = 0
+    for row in range(8):
+        for col in range(8):
+            bits = (bits << 1) | (
+                1 if pixels[row * 9 + col] > pixels[row * 9 + col + 1] else 0
+            )
+    return bits
+
+
+def find_near_duplicates(
+    labeled_paths: list, *, threshold: int = NEAR_DUP_THRESHOLD
+) -> list:
+    """Flag probable near-duplicate photos as (id_a, id_b, distance).
+
+    Pairs at or under the threshold are returned sorted by distance.
+    Unreadable files fail closed: intake cannot judge what it cannot
+    decode.
+    """
+    hashes = []
+    for label, path in labeled_paths:
+        try:
+            digest = _dhash(path)
+        except OSError as exc:
+            raise IntakeError(
+                f"near-duplicate check cannot decode {label}: {exc}"
+            ) from exc
+        hashes.append((label, digest))
+    hits = []
+    for i in range(len(hashes)):
+        for j in range(i + 1, len(hashes)):
+            distance = bin(hashes[i][1] ^ hashes[j][1]).count("1")
+            if distance <= threshold:
+                hits.append((hashes[i][0], hashes[j][0], distance))
+    return sorted(hits, key=lambda hit: hit[2])
+
+
 def load_register() -> dict:
     """Load and validate the private register (fails when absent)."""
     path = register_path()

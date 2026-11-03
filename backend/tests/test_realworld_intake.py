@@ -225,6 +225,74 @@ def test_validate_manifest_rejects_value_level_personal_data():
         validate_manifest(_manifest([case]))
 
 
+def test_source_group_optional_in_public_schema():
+    """realworld-v1 stays backward compatible: no group required."""
+    from audits.realworld import validate_manifest
+
+    cases = validate_manifest(_manifest([_manifest_case()]))
+    assert cases[0].get("source_group") is None
+
+
+def test_admission_requires_source_group():
+    """A missing group on an accepted case is an admission failure."""
+    from audits.realworld_intake import IntakeError, require_source_group
+
+    with pytest.raises(IntakeError):
+        require_source_group(_manifest_case(), "dev")
+    require_source_group({**_manifest_case(), "source_group": "group-a1"}, "dev")
+
+
+def test_cross_split_group_overlap_blocks():
+    """Any source_group in both splits fails the cross-split check."""
+    from audits.realworld_intake import IntakeError, check_cross_split
+
+    dev = [{**_manifest_case(id="d1"), "source_group": "g1"}]
+    holdout = [{**_manifest_case(id="h1"), "source_group": "g1"}]
+    with pytest.raises(IntakeError):
+        check_cross_split(dev, holdout)
+    holdout_ok = [{**_manifest_case(id="h1"), "source_group": "g2"}]
+    assert check_cross_split(dev, holdout_ok) == []
+
+
+def test_exact_duplicate_hash_detected():
+    """Identical SHA-256 across cases is reported with both case ids."""
+    from audits.realworld_intake import check_exact_duplicates, IntakeError
+
+    a = _manifest_case(id="a")
+    b = _manifest_case(id="b")
+    assert check_exact_duplicates([a, b]) == {"d" * 64: ["a", "b"]}
+    with pytest.raises(IntakeError):
+        check_exact_duplicates([a, b], strict=True)
+    c = _manifest_case(id="c", photo={**_manifest_case()["photo"], "sha256": "e" * 64})
+    assert check_exact_duplicates([a, c]) == {}
+
+
+def test_near_duplicate_detection(tmp_path):
+    """Near-identical images flag; distinct images do not."""
+    from PIL import Image
+
+    from audits.realworld_intake import NEAR_DUP_THRESHOLD, find_near_duplicates
+
+    base = Image.new("RGB", (64, 64), (200, 30, 30))
+    p1 = tmp_path / "p1.png"
+    p2 = tmp_path / "p2.png"
+    p3 = tmp_path / "p3.png"
+    base.save(p1)
+    slightly = base.copy()
+    slightly.putpixel((0, 0), (201, 30, 30))
+    slightly.save(p2)
+    split = Image.new("RGB", (64, 64), (30, 30, 200))
+    for x in range(32, 64):
+        for y in range(64):
+            split.putpixel((x, y), (230, 220, 40))
+    split.save(p3)
+    hits = find_near_duplicates([("p1", p1), ("p2", p2), ("p3", p3)])
+    pairs = {(h[0], h[1]) for h in hits}
+    assert ("p1", "p2") in pairs
+    assert all("p3" not in pair for pair in pairs)
+    assert all(h[2] <= NEAR_DUP_THRESHOLD for h in hits)
+
+
 def test_existing_fixtures_pass_value_scan():
     """Synthetic fixtures and the example manifest validate unchanged."""
     from audits.realworld import validate_manifest
