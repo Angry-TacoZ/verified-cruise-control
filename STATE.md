@@ -150,3 +150,8 @@ Work on `feat/003-real-world-adas-evaluation`; no paid inference; no catalog/RSA
 
 Branch: feat/005-realworld-intake. Zero inference, zero spend. Phase A complete with zero genuine photographs: private register (intake-v1, gitignored, VCC_REALWORLD_PRIVATE_DIR override), value-level privacy scan wired into validate_manifest, source groups + cross-split/duplicate gates, EXIF-aware evaluation copies, photo-only admission semantics, holdout freeze + manual log, private/public quality reports, realworld-validate command. Phase C not started: no rights-cleared photos supplied yet. PR #5 open as draft, unmerged.
 
+
+## PR #5 Phase B — candidate-source research (2026-11-04)
+
+8 Commons candidates in evals/realworld/private/candidate-sources.json (gitignored, metadata only, zero bytes downloaded). All license-verified (CC BY 2.0/4.0, CC BY-SA 4.0, 1x public domain), all pending: equipment proof and privacy review outstanding for every one; no accepted cases. Claims are researcher-authored. Coverage: LKA, cruise x3, ACC, assistance menu, lane-centering, LDW cluster. Gaps: ACC Stop & Go, ambiguous-symbol, stalk-specific. Nothing supplied yet; Phase C blocked on James's rights-cleared photos + equipment evidence.
+
