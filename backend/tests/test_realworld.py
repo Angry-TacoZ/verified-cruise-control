@@ -4,6 +4,7 @@ Covers manifest validation, deterministic scoring, and spend estimation.
 All tests are offline; no provider calls are made.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -2078,3 +2079,85 @@ def test_accounting_history_immutable(tmp_path, monkeypatch):
     budget.settle(token, attempts=1, cost_usd="0.01", provider="fake-muse")
     handle.close()
     assert crashed.read_bytes() == before
+
+
+# --- Item 5a: opt-in pattern (m4) harness mode ---------------------------
+
+
+def _live_report(monkeypatch, tmp_path, pattern_mode, max_spend):
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    manifest = _harness_manifest(tmp_path)
+    kwargs = {
+        "muse_adapter": fake_muse,
+        "sam_adapter": _HarnessSamAdapter(),
+        "results_dir": tmp_path / "results",
+        "ledger_path": tmp_path / "ledgers" / "probe.jsonl",
+    }
+    # The default-mode test relies on the real default: only pass the
+    # flag when explicitly enabling the pattern mode.
+    if pattern_mode:
+        kwargs["pattern_mode"] = True
+    report = runner.run_realworld_live(
+        manifest,
+        tmp_path,
+        max_spend,
+        False,
+        **kwargs,
+    )
+    return report, fake_muse
+
+
+def test_live_default_modes_are_baseline_and_reference(tmp_path, monkeypatch):
+    report, fake_muse = _live_report(monkeypatch, tmp_path, False, 100.0)
+    modes = {row["mode"] for row in report["rows"]}
+    assert modes == {"baseline", "reference"}
+    versions = {request.prompt_version for request in fake_muse.calls}
+    assert versions == {"m2", "m3"}
+    assert report["spend_preflight_usd"]["worst_case_usd"] == "8.00"
+
+
+def test_live_pattern_mode_adds_m4(tmp_path, monkeypatch):
+    report, fake_muse = _live_report(monkeypatch, tmp_path, True, 100.0)
+    modes = {row["mode"] for row in report["rows"]}
+    assert modes == {"baseline", "reference", "pattern"}
+    versions = {request.prompt_version for request in fake_muse.calls}
+    assert "m4" in versions
+    assert report["spend_preflight_usd"]["worst_case_usd"] == "12.00"
+    pattern = report["pattern_mode"]
+    assert pattern["prompt_version"] == "m4"
+    assert pattern["paired_overlap_vs_baseline"] == pattern["n_scored"]
+    assert pattern["sam_localization_accuracy"] is None
+
+
+def test_live_over_bound_refuses_before_any_call(tmp_path, monkeypatch):
+    monkeypatch.setenv("VCC_LIVE_SMOKE", "1")
+    runner = _load_eval_runner()
+    fake_muse = _HarnessMuseAdapter()
+    manifest = _harness_manifest(tmp_path)
+    with pytest.raises(SystemExit, match="exceeds --max-spend"):
+        runner.run_realworld_live(
+            manifest,
+            tmp_path,
+            1.0,
+            False,
+            muse_adapter=fake_muse,
+            sam_adapter=_HarnessSamAdapter(),
+            results_dir=tmp_path / "results",
+            ledger_path=tmp_path / "ledgers" / "probe.jsonl",
+            pattern_mode=True,
+        )
+    assert fake_muse.calls == []
+
+
+def test_dryrun_pattern_mode_reports_not_measured(tmp_path):
+    runner = _load_eval_runner()
+    manifest = _harness_manifest(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    default = runner.run_realworld_dryrun(manifest_path, tmp_path)
+    flagged = runner.run_realworld_dryrun(manifest_path, tmp_path, pattern_mode=True)
+    assert flagged["rows"] == default["rows"]
+    assert flagged["summary"] == default["summary"]
+    assert flagged["pattern_mode"]["status"] == "not measured"

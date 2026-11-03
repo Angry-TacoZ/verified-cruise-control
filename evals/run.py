@@ -44,6 +44,7 @@ django.setup()
 from audits.models import Observation
 from audits.pipeline import (
     MUSE_MAX_OUTPUT_TOKENS,
+    PATTERN_PROMPT_VERSION,
     PROMPT_VERSION,
     REFERENCE_PROMPT_VERSION,
     SYSTEM_INSTRUCTIONS,
@@ -209,9 +210,17 @@ def _resolve_photos_root(manifest_path: Path, explicit: str | None) -> Path:
 
 
 def run_realworld_dryrun(
-    manifest_path: Path, photos_root: Path, recorded_path=None
+    manifest_path: Path,
+    photos_root: Path,
+    recorded_path=None,
+    pattern_mode: bool = False,
 ) -> dict:
-    """Zero-inference paired-eval rehearsal: validate, verify, score, bound."""
+    """Zero-inference paired-eval rehearsal: validate, verify, score, bound.
+
+    With ``pattern_mode`` the report additionally states the m4 pattern
+    mode as "not measured" (the dry-run path has no recorded m4 vectors
+    and never fabricates rows); the default run is unchanged.
+    """
     cases = validate_manifest(manifest_path, photos_root=photos_root)
     rows = []
     if recorded_path is not None:
@@ -232,7 +241,7 @@ def run_realworld_dryrun(
         sam_calls_per_case=1,
         spend_cap_usd=str(settings.AUDIT_SPEND_CAP_USD),
     )
-    return {
+    report = {
         "eval": "realworld-dryrun",
         "manifest": manifest_path.name,
         "manifest_version": "realworld-v1",
@@ -245,10 +254,41 @@ def run_realworld_dryrun(
         "live_inference": False,
         "cost_usd": 0,
     }
+    if pattern_mode:
+        report["pattern_mode"] = {
+            "status": "not measured",
+            "reason": "no recorded m4 vectors",
+            "prompt_version": PATTERN_PROMPT_VERSION,
+        }
+    return report
 
 
 def _refuse(message: str) -> None:
     raise SystemExit(f"refusing: {message}")
+
+
+def _pattern_block(rows: list) -> dict:
+    """Per-mode denominators for the opt-in pattern (m4) mode.
+
+    Reported with its own denominators and paired overlap vs baseline;
+    SAM localization stays "not measured" without independent labels.
+    """
+    pattern_rows = [r for r in rows if r.get("mode") == "pattern"]
+    scored = [r for r in pattern_rows if r.get("status") == "scored"]
+    base_ids = {
+        r["case_id"]
+        for r in rows
+        if r.get("mode") == "baseline" and r.get("status") == "scored"
+    }
+    pattern_ids = {r["case_id"] for r in scored}
+    return {
+        "prompt_version": PATTERN_PROMPT_VERSION,
+        "n": len(pattern_rows),
+        "n_scored": len(scored),
+        "support_correct": sum(1 for r in scored if r.get("support_correct")),
+        "paired_overlap_vs_baseline": len(pattern_ids & base_ids),
+        "sam_localization_accuracy": None,
+    }
 
 
 def run_realworld_live(
@@ -261,6 +301,7 @@ def run_realworld_live(
     sam_adapter=None,
     results_dir=None,
     ledger_path=None,
+    pattern_mode: bool = False,
 ) -> dict:
     """Paired baseline (m2) vs reference-assisted (m3) live evaluation.
 
@@ -268,6 +309,9 @@ def run_realworld_live(
     (fake adapters, tmp dirs); production calls construct the real Baseten
     and Meta adapters. No paid inference happens without VCC_LIVE_SMOKE=1
     (plus VCC_LIVE_SAM=1 for the SAM stage) and configured provider keys.
+
+    With ``pattern_mode`` an opt-in third "pattern" mode (prompt m4)
+    joins the loop; the default two-mode run is byte-identical without it.
     """
     from providers.base import ImageAttachment
     from providers.baseten import BasetenMuseAdapter, MuseRequest
@@ -291,9 +335,14 @@ def run_realworld_live(
         sam_adapter = MetaSamAdapter()
     if sam_adapter is not None:
         sam_adapter.require_configured()
+    modes = (
+        ("baseline", "reference", "pattern")
+        if pattern_mode
+        else ("baseline", "reference")
+    )
     preflight = estimate_spend(
         len(cases),
-        modes=2,
+        modes=len(modes),
         muse_calls_per_case=1,
         sam_calls_per_case=1 if include_sam else 0,
         spend_cap_usd=str(settings.AUDIT_SPEND_CAP_USD),
@@ -384,7 +433,7 @@ def run_realworld_live(
                     mime_type=MIME[Path(photo_rel).suffix.lower()],
                     data=data,
                 )
-                for mode in ("baseline", "reference"):
+                for mode in modes:
                     if mode == "reference":
                         block = build_reference_block([claim["advertised"]])
                         if block:
@@ -395,6 +444,9 @@ def run_realworld_live(
                             # degrades to the baseline prompt; record the fallback.
                             system = SYSTEM_INSTRUCTIONS
                             prompt_version = PROMPT_VERSION
+                    elif mode == "pattern":
+                        system = build_system_instructions("", pattern_guidance=True)
+                        prompt_version = PATTERN_PROMPT_VERSION
                     else:
                         system = SYSTEM_INSTRUCTIONS
                         prompt_version = PROMPT_VERSION
@@ -554,7 +606,7 @@ def run_realworld_live(
         else:
             dataset_lock.release()
     summary = summarize(manifest_id, rows)
-    return {
+    report = {
         "eval": "realworld-live",
         "manifest": manifest_name,
         "manifest_version": "realworld-v1",
@@ -571,6 +623,10 @@ def run_realworld_live(
         "dataset_id": dataset_id,
         "markdown": render_markdown(manifest_id, summary, rows),
     }
+    if pattern_mode:
+        report["pattern_prompt"] = PATTERN_PROMPT_VERSION
+        report["pattern_mode"] = _pattern_block(rows)
+    return report
 
 
 def main() -> None:
@@ -583,6 +639,13 @@ def main() -> None:
     parser.add_argument("--photos-root", type=str, default=None)
     parser.add_argument("--recorded", type=str, default=None)
     parser.add_argument("--skip-sam", action="store_true")
+    parser.add_argument(
+        "--pattern-mode",
+        action="store_true",
+        help="Opt-in third evaluation mode using prompt m4 (cross-brand "
+        "pattern guidance). Default runs keep exactly baseline (m2) and "
+        "reference (m3).",
+    )
     parser.add_argument(
         "--ledger",
         type=str,
@@ -605,6 +668,7 @@ def main() -> None:
             manifest_path,
             _resolve_photos_root(manifest_path, args.photos_root),
             recorded_path=args.recorded,
+            pattern_mode=args.pattern_mode,
         )
         print(report["markdown"])
         name = f"{date.today().isoformat()}-realworld-dryrun.json"
@@ -618,6 +682,7 @@ def main() -> None:
             args.max_spend,
             include_sam=not args.skip_sam,
             ledger_path=args.ledger,
+            pattern_mode=args.pattern_mode,
         )
         print(report["markdown"])
         name = f"{date.today().isoformat()}-realworld-live.json"

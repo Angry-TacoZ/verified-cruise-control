@@ -125,7 +125,10 @@ Key mechanics (all covered by `backend/tests/test_audits*.py`):
   superseded worker are recorded financially and discarded as evidence.
 - **Four-layer ADAS recognition** (`docs/adas-catalog.md`): advertised
   capability → observed physical object → SAM object localization →
-  deterministic catalog mapping. Crop rechecks are scoped to the
+  deterministic catalog mapping (catalog v2 default: manufacturer-specific
+  entries win on precedence; general cross-manufacturer patterns apply to
+  any vehicle, capped at `visually_supported`, labeled for reviewer
+  confirmation). Crop rechecks are scoped to the
   originating claim, dedupe is crop-aware, and each crop records
   whether it changed the observation and the final classification.
 - **No exactly-once billing claim**: a provider call that finished
@@ -139,6 +142,8 @@ Offline-first paired harness for baseline (m2) vs reference-assisted
 (m3) recognition, in `backend/audits/realworld.py` + `evals/run.py`
 (`realworld-dryrun` / `realworld-live`) — see
 `docs/realworld-evaluation.md` and `evals/realworld/README.md`:
+
+- Prompt m4 (cross-brand pattern guidance, `PATTERN_PROMPT_VERSION`) ships default OFF and unvalidated: m2 stays byte-identical when the gate is off and m3 is unaffected. The paired harness can compare m2/m3/m4 later; no live comparison has run.
 
 - Versioned `realworld-v1` manifests describe local-only photographs
   (path + SHA-256 + provenance + independent ground truth); bytes are

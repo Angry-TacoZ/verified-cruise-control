@@ -2790,9 +2790,15 @@ def test_run_reconcile_rejects_borrowed_catalog_entry(listing, photos):
     )
     assert pipeline.run_reconcile(job.pk, "w1") == 2
     finding = job.findings.get(claim_key="c1")
-    assert finding.state == "insufficient_evidence"
-    assert "not verified for" in finding.summary
-    assert finding.evidence["interpretation"]["supports_claim"] is False
+    # Cross-brand generalization: the borrowed manufacturer-specific
+    # entry still cannot support the claim, but the capped general
+    # following-distance pattern now recognizes the control at
+    # visually_supported (never verified) with reviewer confirmation.
+    assert finding.state == "visually_supported"
+    assert "general-acc-distance-control" in finding.summary
+    assert "general cross-manufacturer pattern" in finding.summary
+    assert finding.evidence["interpretation"]["supports_claim"] is True
+    assert finding.evidence["interpretation"]["scope"] == "general_pattern"
 
 
 def test_run_reconcile_unknown_vehicle_rejects_specific_entry(listing, photos):
@@ -2809,8 +2815,13 @@ def test_run_reconcile_unknown_vehicle_rejects_specific_entry(listing, photos):
     )
     pipeline.run_reconcile(job.pk, "w1")
     finding = job.findings.get(claim_key="c1")
-    assert finding.state == "insufficient_evidence"
-    assert "identity" in finding.summary
+    # Unknown vehicle identity no longer blocks recognition: the
+    # general pattern applies to any vehicle, capped at
+    # visually_supported. The model's brand guess still never governs
+    # applicability.
+    assert finding.state == "visually_supported"
+    assert "general-acc-distance-control" in finding.summary
+    assert "reviewer should confirm" in finding.summary
 
 
 def test_reconcile_nested_control_supports_claim(listing, photos):
@@ -3378,6 +3389,109 @@ def test_reference_mode_appends_guidance(listing, photos, enabled):
         assert row.usage["reference_version"] == "2026-09-rsa-v1"
 
 
+# --- Prompt m4: cross-brand pattern guidance (Part B, default OFF) --------
+
+# Exact expected m4 paragraph, written from the task language before the
+# implementation: two named examples explicitly marked as non-exhaustive,
+# describe-what-is-visible instruction, unchanged location enum + schema.
+EXPECTED_PATTERN_PARAGRAPH = (
+    "Cross-manufacturer pattern guidance (general knowledge only, never "
+    "proof of equipment): equivalent ADAS controls sit in different "
+    "places across brands. For example, the Kia Forte lane-keeping "
+    "assist button sits on the left dashboard (lower left), while "
+    "Jetta/GLI assistance functions sit behind a stalk-end button that "
+    "opens an assistance menu. These are TWO EXAMPLES, not a complete "
+    "list of brands or locations. Describe exactly what is visible -- "
+    "symbol, control type, and location -- even when the brand or "
+    "location is not listed here. Location must be one of: "
+    "steering_wheel, left_dashboard, stalk, instrument_cluster, "
+    "infotainment, center_console, exterior_sensor, windshield_camera, "
+    "unknown. The JSON observation schema is unchanged."
+)
+
+
+def test_pattern_guidance_off_by_default(listing, photos, enabled):
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    scripts = [
+        [_batch_obs(str(photo.id), "c1"), _batch_obs(str(photo.id), "c2")]
+        for photo in photos
+    ]
+    adapter = ScriptedMuseAdapter(scripts)
+    assert pipeline.run_muse(job.pk, "w1", screened, adapter) == 4
+    for request in adapter.requests:
+        assert request.prompt_version == "m2"
+        assert request.system_instructions == pipeline.SYSTEM_INSTRUCTIONS
+    rows = AuditExecution.objects.filter(job=job, stage=Stage.Muse)
+    for row in rows:
+        assert row.usage["prompt_version"] == "m2"
+
+
+def test_pattern_guidance_on_sends_m4(listing, photos, enabled):
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    scripts = [
+        [_batch_obs(str(photo.id), "c1"), _batch_obs(str(photo.id), "c2")]
+        for photo in photos
+    ]
+    adapter = ScriptedMuseAdapter(scripts)
+    assert (
+        pipeline.run_muse(job.pk, "w1", screened, adapter, pattern_guidance=True) == 4
+    )
+    expected = pipeline.SYSTEM_INSTRUCTIONS + "\n\n" + EXPECTED_PATTERN_PARAGRAPH
+    for request in adapter.requests:
+        assert request.prompt_version == "m4"
+        assert request.prompt_version == pipeline.PATTERN_PROMPT_VERSION
+        assert request.system_instructions == expected
+    rows = AuditExecution.objects.filter(job=job, stage=Stage.Muse)
+    assert rows.count() == 2
+    for row in rows:
+        assert row.usage["prompt_version"] == "m4"
+        assert row.usage["reference_version"] is None
+
+
+def test_pattern_guidance_text_exact():
+    text = pipeline.build_system_instructions("", pattern_guidance=True)
+    assert text == pipeline.SYSTEM_INSTRUCTIONS + "\n\n" + (EXPECTED_PATTERN_PARAGRAPH)
+    lowered = text.lower()
+    assert "kia forte" in lowered
+    assert "stalk" in lowered
+    assert "two examples" in lowered
+    assert "not a complete list" in lowered
+    # Location enum and JSON schema pass through unchanged.
+    assert "steering_wheel, left_dashboard, stalk" in text
+    assert "'observations' array" in text
+
+
+def test_reference_mode_unaffected_by_pattern_gate(listing, photos, enabled):
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    scripts = [
+        [_batch_obs(str(photo.id), "c1"), _batch_obs(str(photo.id), "c2")]
+        for photo in photos
+    ]
+    adapter = ScriptedMuseAdapter(scripts)
+    assert (
+        pipeline.run_muse(
+            job.pk,
+            "w1",
+            screened,
+            adapter,
+            reference_mode=True,
+            pattern_guidance=False,
+        )
+        == 4
+    )
+    for request in adapter.requests:
+        assert request.prompt_version == "m3"
+        assert request.system_instructions.startswith(pipeline.SYSTEM_INSTRUCTIONS)
+    rows = AuditExecution.objects.filter(job=job, stage=Stage.Muse)
+    assert rows.count() == 2
+    for row in rows:
+        assert row.usage["prompt_version"] == "m3"
+        assert row.usage["reference_version"] is not None
+
+
 def test_reference_mode_falls_back_without_mapping(listing, photos, enabled):
     listing.advertised_claims = ["sunroof"]
     listing.save(update_fields=["advertised_claims"])
@@ -3389,3 +3503,26 @@ def test_reference_mode_falls_back_without_mapping(listing, photos, enabled):
     for request in adapter.requests:
         assert request.prompt_version == "m2"
         assert request.system_instructions == pipeline.SYSTEM_INSTRUCTIONS
+
+
+# --- Item 5b: reference + pattern combination is unsupported ------------
+
+
+def test_run_muse_rejects_combined_reference_and_pattern(listing, photos, enabled):
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    scripts = [
+        [_batch_obs(str(photo.id), "c1"), _batch_obs(str(photo.id), "c2")]
+        for photo in photos
+    ]
+    adapter = ScriptedMuseAdapter(scripts)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        pipeline.run_muse(
+            job.pk,
+            "w1",
+            screened,
+            adapter,
+            reference_mode=True,
+            pattern_guidance=True,
+        )
+    assert adapter.calls == 0
