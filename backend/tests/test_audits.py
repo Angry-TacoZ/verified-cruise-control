@@ -3503,3 +3503,26 @@ def test_reference_mode_falls_back_without_mapping(listing, photos, enabled):
     for request in adapter.requests:
         assert request.prompt_version == "m2"
         assert request.system_instructions == pipeline.SYSTEM_INSTRUCTIONS
+
+
+# --- Item 5b: reference + pattern combination is unsupported ------------
+
+
+def test_run_muse_rejects_combined_reference_and_pattern(listing, photos, enabled):
+    job = _running_job(listing)
+    screened = pipeline.run_screening(job.pk, "w1")
+    scripts = [
+        [_batch_obs(str(photo.id), "c1"), _batch_obs(str(photo.id), "c2")]
+        for photo in photos
+    ]
+    adapter = ScriptedMuseAdapter(scripts)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        pipeline.run_muse(
+            job.pk,
+            "w1",
+            screened,
+            adapter,
+            reference_mode=True,
+            pattern_guidance=True,
+        )
+    assert adapter.calls == 0

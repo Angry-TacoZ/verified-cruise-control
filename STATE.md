@@ -33,9 +33,27 @@ Step-0g inspection findings (verified in code, recorded here + PR body):
   loop untouched per scope). No live inference run.
 
 Status: Part A + Part B implemented, goldens v5 (14 cases) green, full
-suite green, mutations a–h fail-as-required, docs updated. Draft PR pending;
-DO NOT MERGE without James Lane approval. Recognition accuracy on real
-photos is STILL UNMEASURED; m4 ships OFF.
+suite green, mutations a–h fail-as-required, docs updated. Draft PR #4
+open (head 23ad9d3, base feat/003 at branch time); PR #3 MERGED to main
+(cc3ad6f); PR #4 rebased onto main and re-verified green, base retargeted
+to main. DO NOT MERGE without James Lane approval. Recognition accuracy
+on real photos is STILL UNMEASURED; m4 ships OFF.
+
+Review follow-ups (5 minor items, no verdict-behavior change):
+- Item 1 (ceiling load-bearing): interpretation carries `verdict_ceiling`;
+  `reconcile_claim` clamps Layer D support to the highest supporter
+  ceiling. Goldens unchanged.
+- Item 2 (`applicable_only`): phase 1 filters inapplicable specifics
+  before ranking; unfiltered top match kept as the documented-unknown
+  referent so v1-pinned explanations are untouched.
+- Item 3: v5 goldens reformatted to v4 style (indent 2); content proven
+  identical (json.loads equal).
+- Item 4: stale `CATALOG_VERSION` constant deleted (unused); consistency
+  test pins its absence.
+- Item 5a: `--pattern-mode` opt-in third live mode (m4); default two-mode
+  runs identical. Item 5b: reference+pattern combination raises
+  ValueError before any provider call (row could not distinguish it
+  from m4 alone).
 
 Branch: `feat/003-real-world-adas-evaluation` (from `main` @ `97dafb3`, PR #2 merged).
 Reference: RSA "Advanced Driver Assistance Systems (ADAS)", September 2026 (22 pp).

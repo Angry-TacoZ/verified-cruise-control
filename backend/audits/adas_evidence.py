@@ -24,11 +24,45 @@ from .models import Verdict
 
 CATALOG_PATH = Path(__file__).resolve().parent / "adas_catalog_v2.json"
 CATALOG_V1_PATH = Path(__file__).resolve().parent / "adas_catalog_v1.json"
-CATALOG_VERSION = "2026-11-01/v1"
 
 FEATURE_UNKNOWN = "unknown"
 
 STRENGTH_RANK = {"diagnostic": 3, "supportive": 2, "ambiguous": 1, "non_diagnostic": 0}
+
+# Verdict-ceiling ordering for Item 1: higher means a stronger claim.
+# Photo-only Layer D support maps to VISUALLY_SUPPORTED at most, so a
+# supporting entry with no ceiling (or a ceiling at/above the mapped
+# state) leaves the verdict untouched.
+STATE_CEILING_RANK = {
+    "not_visually_verifiable": 0,
+    "insufficient_evidence": 1,
+    "contradicted": 2,
+    "visually_supported": 3,
+    "verified": 4,
+}
+
+
+def apply_verdict_ceiling(state: str, ceilings: list[str | None]) -> str:
+    """Clamp a mapped evidence state to supporting entries' ceilings.
+
+    Uses the highest ceiling among the supporters (entries with no
+    ceiling are unaffected); unknown ceiling strings fail closed.
+    """
+    ranked = []
+    for ceiling in ceilings:
+        if ceiling is None:
+            continue
+        if ceiling not in STATE_CEILING_RANK:
+            raise ValueError(f"bad verdict ceiling {ceiling!r}")
+        ranked.append(STATE_CEILING_RANK[ceiling])
+    if not ranked:
+        return state
+    cap = max(ranked)
+    if STATE_CEILING_RANK.get(state, cap) <= cap:
+        return state
+    return next(name for name, rank in STATE_CEILING_RANK.items() if rank == cap)
+
+
 ENTRY_CERTAINTIES = frozenset({"confirmed", "provisional", "definitional"})
 
 LOCATION_CATEGORIES = frozenset(
@@ -161,6 +195,7 @@ class Interpretation:
     reference: str = ""
     location_note: str = ""
     scope: str = ""
+    verdict_ceiling: str | None = None
 
 
 @dataclass(frozen=True)
@@ -403,23 +438,31 @@ def match_entry(
     control_type: str = "",
     vehicle: dict | None = None,
     scopes: tuple[str, ...] | None = None,
+    applicable_only: bool = False,
 ) -> CatalogEntry | None:
     """Find the catalog entry for an observed control, if exactly one fits.
 
     Naming-only entries never match physical controls. Candidates rank
-    by identifier specificity (phrase hits, then matched characters),
-    then by manufacturer-specific scope (the documented entry for the
-    vehicle wins exact-specificity ties over a general pattern), then
-    by verified vehicle applicability, then by raw keyword count — so
-    a documented multi-word control identifier beats a generic
-    overlapping word. Full-key ties and zero-score controls resolve to ``None``
-    (documented unknown) rather than a guessed association. Only
-    observed-control text is matched; claim wording never enters
-    selection.
+    by identifier specificity (phrase hits, then matched characters)
+    first — lexical fit outranks everything — then by
+    manufacturer-specific scope (the documented entry for the vehicle
+    wins exact-specificity ties over a general pattern), then by
+    verified vehicle applicability, then by raw keyword count. So a
+    documented multi-word control identifier beats a generic overlapping
+    word, but an inapplicable specific entry can still outrank an
+    applicable one lexically; that is why :func:`interpret_control`
+    phase 1 passes ``applicable_only=True`` (a filter, applied before
+    ranking) instead of relying on the sort key. Full-key ties and
+    zero-score controls resolve to ``None`` (documented unknown) rather
+    than a guessed association. Only observed-control text is matched;
+    claim wording never enters selection.
 
     ``scopes`` optionally restricts candidates to the given entry
     scopes (used by the two-phase specific-then-general lookup in
     :func:`interpret_control`); ``None`` matches any scope.
+    ``applicable_only`` drops candidates that are not applicable to the
+    vehicle before ranking; default ``False`` preserves the legacy
+    rank-then-check behavior byte-identically.
     """
     haystack = f"{visible_object} {control_symbol} {control_type}".lower()
     scored = []
@@ -432,6 +475,8 @@ def match_entry(
         if score <= 0:
             continue
         eligible, _ = entry_applicable(entry, vehicle)
+        if applicable_only and not eligible:
+            continue
         scored.append(
             (
                 entry.scope == "manufacturer_specific",
@@ -443,9 +488,6 @@ def match_entry(
         )
     if not scored:
         return None
-    # Applicability beats lexical specificity (specific-first precedence):
-    # a documented manufacturer-specific entry that fits this vehicle
-    # wins even when its keyword match is weaker than a general one.
     scored.sort(
         key=lambda candidate: (candidate[1], candidate[0], candidate[2], candidate[3]),
         reverse=True,
@@ -588,36 +630,37 @@ def interpret_control(
     evidence), as does a model-observed shared/menu control matching a
     dedicated entry. The catalog wins disagreements about menu-ness: a
     documented menu never upgrades. Lookup is two-phase: an applicable
-    manufacturer-specific entry always wins over a general pattern, while
-    an inapplicable specific entry falls through to the general scopes
-    (general or general_pattern) instead of closing the case as unknown.
-    A general-pattern match is structurally capped at supportive strength
-    and labeled as cross-manufacturer evidence for reviewer confirmation.
+    manufacturer-specific entry always wins over a general pattern
+    (phase 1 filters inapplicable entries before ranking, so a
+    lexically stronger but inapplicable entry cannot hide an applicable
+    one), while no applicable specific entry falls through to the
+    general scopes (general or general_pattern) instead of closing the
+    case as unknown. A general-pattern match is structurally capped at
+    supportive strength and labeled as cross-manufacturer evidence for
+    reviewer confirmation.
     Controls with no entry, tied entries, menu/non-diagnostic entries,
     and feature mismatches never support the claim. The model's visual
     manufacturer guess never overrides listing metadata for
     applicability, but a conflict is recorded explicitly.
     """
     # Two-phase precedence: an applicable manufacturer-specific entry
-    # always wins over a general pattern; an inapplicable specific entry
-    # falls through to the general scopes instead of closing the case as
-    # unknown. A documented menu/non-diagnostic specific entry is used as
-    # matched and is never upgraded by a general pattern (it stays
-    # non-supporting below).
+    # always wins over a general pattern (phase 1 filters out
+    # inapplicable entries before ranking, so a lexically stronger but
+    # inapplicable entry can no longer hide an applicable one). An
+    # applicable match is used directly; otherwise the general scopes
+    # apply instead of closing the case as unknown. A documented
+    # menu/non-diagnostic specific entry is used as matched and is never
+    # upgraded by a general pattern (it stays non-supporting below).
     observed = control_symbol or visible_object
-    specific = match_entry(
+    entry = match_entry(
         catalog,
         visible_object=visible_object,
         control_symbol=control_symbol,
         control_type=control_type,
         vehicle=vehicle,
         scopes=("manufacturer_specific",),
+        applicable_only=True,
     )
-    entry = None
-    if specific is not None:
-        eligible, _ = entry_applicable(specific, vehicle)
-        if eligible:
-            entry = specific
     if entry is None:
         entry = match_entry(
             catalog,
@@ -628,23 +671,36 @@ def interpret_control(
             scopes=("general", "general_pattern"),
         )
     if entry is None:
-        if specific is not None:
-            _, applicability = entry_applicable(specific, vehicle)
+        # No applicable entry of any scope: name the top unfiltered
+        # specific match (if any) as the documented-unknown referent so
+        # the explanation still says what was seen and why it cannot be
+        # used. The referent never supports the claim.
+        dropped = match_entry(
+            catalog,
+            visible_object=visible_object,
+            control_symbol=control_symbol,
+            control_type=control_type,
+            vehicle=vehicle,
+            scopes=("manufacturer_specific",),
+        )
+        if dropped is not None:
+            _, applicability = entry_applicable(dropped, vehicle)
             return Interpretation(
-                entry_id=specific.id,
-                feature=specific.feature,
+                entry_id=dropped.id,
+                feature=dropped.feature,
                 strength="unknown",
                 supports_claim=False,
-                cannot_infer=specific.cannot_infer,
+                cannot_infer=dropped.cannot_infer,
                 explanation=(
-                    f"observed {observed!r} matches catalog entry {specific.id}, "
+                    f"observed {observed!r} matches catalog entry {dropped.id}, "
                     f"but {applicability}"
                 ),
                 reference="; ".join(
-                    f"{source.get('doc', '')} [{specific.certainty}]".strip()
-                    for source in specific.sources
+                    f"{source.get('doc', '')} [{dropped.certainty}]".strip()
+                    for source in dropped.sources
                 ),
-                scope=specific.scope,
+                scope=dropped.scope,
+                verdict_ceiling=dropped.verdict_ceiling,
             )
         return Interpretation(
             entry_id=None,
@@ -731,6 +787,7 @@ def interpret_control(
             reference=reference,
             location_note=location_note,
             scope=entry.scope,
+            verdict_ceiling=entry.verdict_ceiling,
         )
     if entry.feature != claimed_feature:
         return Interpretation(
@@ -747,6 +804,7 @@ def interpret_control(
             reference=reference,
             location_note=location_note,
             scope=entry.scope,
+            verdict_ceiling=entry.verdict_ceiling,
         )
     supports = strength in ("diagnostic", "supportive")
     explanation = (
@@ -773,6 +831,7 @@ def interpret_control(
         reference=reference,
         location_note=location_note,
         scope=entry.scope,
+        verdict_ceiling=entry.verdict_ceiling,
     )
 
 

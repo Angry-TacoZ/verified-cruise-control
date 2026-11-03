@@ -26,6 +26,7 @@ from audits.adas_evidence import (
     match_entry,
     normalize_feature,
 )
+from audits.models import Observation
 
 
 @pytest.fixture()
@@ -1487,3 +1488,262 @@ def test_v2_preserves_v1_entries_byte_semantics():
     assert v2["feature_ids"] == v1["feature_ids"]
     assert v2["entries"][: len(v1["entries"])] == v1["entries"]
     assert len(v2["entries"]) > len(v1["entries"])
+
+
+# --- Item 1: verdict ceiling is load-bearing ---------------------------
+
+
+def test_apply_verdict_ceiling_clamps_general_pattern():
+    # Stubbed path: Layer D support that WOULD map to verified is
+    # clamped to the supporter's ceiling; a specific supporter (or no
+    # ceiling) keeps its behavior.
+    clamp = adas_evidence.apply_verdict_ceiling
+    assert clamp("verified", ["visually_supported"]) == "visually_supported"
+    assert clamp("visually_supported", ["visually_supported"]) == ("visually_supported")
+    assert clamp("verified", [None]) == "verified"
+    assert clamp("verified", []) == "verified"
+    # Highest ceiling among supporters wins.
+    assert clamp("verified", ["insufficient_evidence", "visually_supported"]) == (
+        "visually_supported"
+    )
+    assert clamp("verified", ["verified"]) == "verified"
+
+
+# --- Item 2: applicable_only filtering ----------------------------------
+
+
+def _outrank_catalog():
+    # Specific-A lexically outranks specific-B for "zzwidget control"
+    # (phrase hit vs word hits) but is inapplicable to the audit
+    # vehicle; specific-B applies. A general pattern also matches.
+    raw = {
+        "catalog_version": "test-outrank",
+        "feature_ids": ["lane_keeping_assist"],
+        "entries": [
+            {
+                "id": "test-specific-inapplicable",
+                "scope": "manufacturer_specific",
+                "manufacturer": "Kia",
+                "models": ["Forte"],
+                "model_years": [2021],
+                "trim": None,
+                "official_feature_name": "Test inapplicable",
+                "feature": "lane_keeping_assist",
+                "control_category": "button",
+                "control_description": "test",
+                "symbol": "test",
+                "locations": ["steering_wheel"],
+                "dedicated": True,
+                "strength": "diagnostic",
+                "match_keywords": ["zzwidget control"],
+                "distinctions": "test",
+                "cannot_infer": [],
+                "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+                "certainty": "definitional",
+                "certainty_note": "test",
+            },
+            {
+                "id": "test-specific-applicable",
+                "scope": "manufacturer_specific",
+                "manufacturer": "Toyota",
+                "models": ["Camry"],
+                "model_years": [2020],
+                "trim": None,
+                "official_feature_name": "Test applicable",
+                "feature": "lane_keeping_assist",
+                "control_category": "button",
+                "control_description": "test",
+                "symbol": "test",
+                "locations": ["steering_wheel"],
+                "dedicated": True,
+                "strength": "diagnostic",
+                "match_keywords": ["zzwidget", "control"],
+                "distinctions": "test",
+                "cannot_infer": [],
+                "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+                "certainty": "definitional",
+                "certainty_note": "test",
+            },
+            {
+                "id": "test-pattern-zzwidget",
+                "scope": "general_pattern",
+                "manufacturer": None,
+                "models": [],
+                "model_years": [],
+                "trim": None,
+                "official_feature_name": "Test pattern",
+                "feature": "lane_keeping_assist",
+                "control_category": "button",
+                "control_description": "test",
+                "symbol": "test",
+                "locations": ["steering_wheel"],
+                "dedicated": True,
+                "strength": "supportive",
+                "verdict_ceiling": "visually_supported",
+                "match_keywords": ["zzwidget"],
+                "distinctions": "test",
+                "cannot_infer": [],
+                "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+                "certainty": "provisional",
+                "certainty_note": "test",
+            },
+        ],
+    }
+    import os
+    import tempfile
+
+    fd, name = tempfile.mkstemp(suffix=".json")
+    path = Path(name)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(raw, handle)
+    return load_catalog(path)
+
+
+def test_match_applicable_only_selects_eligible_outranked_entry():
+    catalog = _outrank_catalog()
+    # Unfiltered lookup still prefers the lexically stronger but
+    # inapplicable entry (documents the latent behavior).
+    top = match_entry(catalog, visible_object="zzwidget control")
+    assert top is not None
+    assert top.id == "test-specific-inapplicable"
+    # Filtered lookup drops it before ranking: the applicable entry wins.
+    winner = match_entry(
+        catalog,
+        visible_object="zzwidget control",
+        vehicle=CAMRY_2020,
+        applicable_only=True,
+    )
+    assert winner is not None
+    assert winner.id == "test-specific-applicable"
+
+
+def test_phase_one_applicable_only_resolution():
+    catalog = _outrank_catalog()
+    result = interpret_control(
+        catalog,
+        "lane_keeping_assist",
+        visible_object="zzwidget control",
+        location="steering_wheel",
+        dedicated=True,
+        vehicle=CAMRY_2020,
+    )
+    assert result.entry_id == "test-specific-applicable"
+    assert result.supports_claim is True
+    assert result.strength == "diagnostic"
+
+
+def test_match_applicable_only_ties_stay_unknown(tmp_path):
+    raw = {
+        "catalog_version": "test",
+        "feature_ids": ["lane_keeping_assist"],
+        "entries": [
+            {
+                "id": f"tie-{i}",
+                "scope": "manufacturer_specific",
+                "manufacturer": "Toyota",
+                "models": ["Camry"],
+                "model_years": [2020],
+                "trim": None,
+                "official_feature_name": "Tie",
+                "feature": "lane_keeping_assist",
+                "control_category": "button",
+                "control_description": "tie",
+                "symbol": "tie",
+                "locations": [],
+                "dedicated": True,
+                "strength": "supportive",
+                "match_keywords": ["zztie"],
+                "distinctions": "",
+                "cannot_infer": [],
+                "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+                "certainty": "definitional",
+                "certainty_note": "",
+            }
+            for i in range(2)
+        ],
+    }
+    path = tmp_path / "ties.json"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    catalog = load_catalog(path)
+    assert (
+        match_entry(
+            catalog,
+            visible_object="zztie",
+            vehicle=CAMRY_2020,
+            applicable_only=True,
+        )
+        is None
+    )
+
+
+# --- Item 4: no stale module-level version constant ---------------------
+
+
+def test_reconcile_clamp_applies_supporter_ceiling_below_mapped_state():
+    # Stubbed path: a supporting specific entry whose ceiling sits BELOW
+    # the mapped state. Layer D support would map to visually_supported,
+    # but the highest supporter ceiling is insufficient_evidence, so the
+    # clamp holds at insufficient_evidence. Removing the clamp in
+    # reconcile_claim flips this to visually_supported.
+    import os
+    import tempfile
+
+    raw = {
+        "catalog_version": "test-clamp",
+        "feature_ids": ["lane_keeping_assist"],
+        "entries": [
+            {
+                "id": "test-specific-low-ceiling",
+                "scope": "manufacturer_specific",
+                "manufacturer": "Toyota",
+                "models": ["Camry"],
+                "model_years": [2020],
+                "trim": None,
+                "official_feature_name": "Test low ceiling",
+                "feature": "lane_keeping_assist",
+                "control_category": "button",
+                "control_description": "test",
+                "symbol": "test",
+                "locations": ["steering_wheel"],
+                "dedicated": True,
+                "strength": "diagnostic",
+                "verdict_ceiling": "insufficient_evidence",
+                "match_keywords": ["zzclamp"],
+                "distinctions": "test",
+                "cannot_infer": [],
+                "sources": [{"doc": "t", "url": "", "section": "", "accessed": ""}],
+                "certainty": "provisional",
+                "certainty_note": "test",
+            }
+        ],
+    }
+    fd, name = tempfile.mkstemp(suffix=".json")
+    path = Path(name)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump(raw, handle)
+    catalog = load_catalog(path)
+    rows = [
+        Observation(
+            source="muse",
+            verdict="present",
+            photo_id=uuid.uuid4(),
+            extra={
+                "claim_id": "c1",
+                "visible_object": "zzclamp button",
+                "control_symbol": "",
+                "control_type": "button",
+                "location": "steering_wheel",
+                "dedicated": True,
+                "manufacturer_context": "",
+            },
+        )
+    ]
+    from audits.pipeline import reconcile_claim
+
+    state, _ = reconcile_claim(rows, "lane keeping assist", CAMRY_2020, catalog=catalog)
+    assert state == "insufficient_evidence"
+
+
+def test_no_stale_module_version_constant():
+    assert not hasattr(adas_evidence, "CATALOG_VERSION")
+    assert load_catalog().version == "2026-11-03/v2"

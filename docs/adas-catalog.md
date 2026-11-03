@@ -37,9 +37,14 @@ finding summary and `finding.evidence.interpretation`.
    matches either does the case resolve to documented unknown (naming
    the inapplicable specific entry where one matched lexically).
 6. General-pattern matches are structurally capped at `supportive`
-   strength in code (in addition to the loader rejecting higher
-   ceilings/strengths), so photo evidence built on them can only ever
-   reach `visually_supported` — never `verified`, never `contradicted`.
+   strength in `interpret_control` (in addition to the loader rejecting
+   higher ceilings/strengths), and the ceiling is load-bearing: each
+   supporting interpretation carries its entry's `verdict_ceiling`, and
+   `reconcile_claim` clamps the resulting evidence state to the highest
+   ceiling among the supporters (entries without a ceiling are
+   unaffected). Shipped photo evidence therefore reaches at most
+   `visually_supported` on general patterns — never `verified`,
+   never `contradicted`.
    A documented menu/non-diagnostic entry is never upgraded by a
    general pattern.
 6. Feature mismatch (entry maps to X, claim is Y) → does not support,

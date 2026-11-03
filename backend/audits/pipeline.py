@@ -568,8 +568,19 @@ def run_muse(
     fall back to the baseline m2 prompt, recorded per call. With
     ``pattern_guidance`` (default OFF) each call carries the m4
     cross-brand paragraph instead; m4 is shipped unvalidated for later
-    paired comparison and never enabled implicitly.
+    paired comparison and never enabled implicitly. The two flags are
+    mutually exclusive: reference_mode=True with pattern_guidance=True
+    would produce m2 + m4 paragraph + RSA notes labeled only "m4" (the
+    execution row records reference_version=None), so the combination
+    cannot be told apart from m4 alone — it raises ValueError before
+    any provider call.
     """
+    if reference_mode and pattern_guidance:
+        raise ValueError(
+            "reference_mode and pattern_guidance are mutually exclusive: "
+            "their combination is labeled m4 without a reference version, "
+            "indistinguishable from pattern guidance alone"
+        )
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
     own_adapter = adapter or BasetenMuseAdapter(
@@ -1355,6 +1366,18 @@ def reconcile_claim(
                 supporters,
                 key=lambda c: adas_evidence.STRENGTH_RANK[c[0].strength],
             )
+            # Item 1: the single point where Layer D support becomes an
+            # evidence state. Each supporter's entry ceiling caps the
+            # outcome (highest ceiling among supporters; entries without
+            # a ceiling are unaffected). No shipped verdict changes:
+            # general patterns cap at visually_supported and every other
+            # shipped entry carries no ceiling.
+            state = EvidenceState(
+                adas_evidence.apply_verdict_ceiling(
+                    EvidenceState.VISUALLY_SUPPORTED.value,
+                    [c[0].verdict_ceiling for c in supporters],
+                )
+            )
             corroborated, sam_elsewhere = _sam_corroborates(
                 observations, best_obs, best_index
             )
@@ -1374,7 +1397,7 @@ def reconcile_claim(
                 str(best_obs.photo_id)[:8] if best_obs.photo_id is not None else "?"
             )
             return (
-                EvidenceState.VISUALLY_SUPPORTED,
+                state,
                 (
                     f"{best.explanation} [{best.strength}; {sam_note}; "
                     f"catalog {catalog.version}/{best.entry_id}; "
