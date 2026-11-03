@@ -296,7 +296,7 @@ def find_near_duplicates(
     hits = []
     for i in range(len(hashes)):
         for j in range(i + 1, len(hashes)):
-            distance = bin(hashes[i][1] ^ hashes[j][1]).count("1")
+            distance = (hashes[i][1] ^ hashes[j][1]).bit_count()
             if distance <= threshold:
                 hits.append((hashes[i][0], hashes[j][0], distance))
     return sorted(hits, key=lambda hit: hit[2])

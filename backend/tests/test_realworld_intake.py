@@ -256,7 +256,7 @@ def test_cross_split_group_overlap_blocks():
 
 def test_exact_duplicate_hash_detected():
     """Identical SHA-256 across cases is reported with both case ids."""
-    from audits.realworld_intake import check_exact_duplicates, IntakeError
+    from audits.realworld_intake import IntakeError, check_exact_duplicates
 
     a = _manifest_case(id="a")
     b = _manifest_case(id="b")
