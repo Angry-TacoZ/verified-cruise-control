@@ -603,6 +603,71 @@ def test_holdout_evaluation_log_is_manual(tmp_path, monkeypatch):
     assert read_evaluation_log("pilot") == [entry]
 
 
+def _quality_inputs():
+    entries = [
+        _register_entry(id="case-zz-1", candidate_status="accepted"),
+        _register_entry(
+            id="case-zz-2", candidate_status="pending", license_status="pending"
+        ),
+        _register_entry(
+            id="case-zz-3", candidate_status="rejected", privacy_review="failed"
+        ),
+    ]
+    dev = [_photo_manifest(["case-zz-1"])["cases"][0]]
+    holdout = [_photo_manifest(["case-zz-2"])["cases"][0]]
+    return entries, dev, holdout
+
+
+def test_private_report_counts_and_lists():
+    """Private report carries counts plus configuration and finding detail."""
+    from audits.realworld_intake import build_quality_report
+
+    entries, dev, holdout = _quality_inputs()
+    report = build_quality_report(entries=entries, dev_cases=dev, holdout_cases=holdout)
+    assert report["counts"] == {"accepted": 1, "pending": 1, "rejected": 1}
+    assert report["pending_counted_as_accepted"] is False
+    assert len(report["configurations"]) == 1
+    assert report["configurations"][0]["model"] == "Forte"
+    assert report["freeze_status"] == "missing"
+
+
+def test_public_report_is_counts_only():
+    """Public aggregate exposes no makes, models, years, trims, or ids."""
+    import json
+
+    from audits.realworld_intake import build_quality_report, public_report
+
+    entries, dev, holdout = _quality_inputs()
+    private = build_quality_report(
+        entries=entries, dev_cases=dev, holdout_cases=holdout
+    )
+    public = public_report(private)
+    assert public["counts"] == {"accepted": 1, "pending": 1, "rejected": 1}
+    blob = json.dumps(public)
+    for secret in (
+        "Forte",
+        "Kia",
+        "2021",
+        "GT-Line",
+        "case-zz-1",
+        "case-zz-2",
+        "group-",
+    ):
+        assert secret not in blob, secret
+    assert public["freeze_status"] == "missing"
+
+
+def test_public_report_uses_not_measured():
+    """Empty splits and unknown freeze state report as not measured."""
+    from audits.realworld_intake import build_quality_report, public_report
+
+    entries, _, _ = _quality_inputs()
+    private = build_quality_report(entries=entries, dev_cases=[], holdout_cases=[])
+    public = public_report(private)
+    assert public["dev"]["n"] == "not measured"
+    assert public["claim_origin"]["seller"] == 3
+
+
 def test_intake_never_derives_labels_from_reconciliation():
     """Admission code must not call the production reconciler."""
     source = (REPO_ROOT / "backend" / "audits" / "realworld_intake.py").read_text(

@@ -604,6 +604,102 @@ def read_evaluation_log(dataset: str) -> list:
     return entries
 
 
+# Quality reports. The PRIVATE report is detailed (configuration
+# lists, group/case identifiers, findings) and never leaves the
+# private directory. The PUBLIC aggregate is counts only: no makes,
+# models, years, trims, groups, or case identifiers — a make/model/
+# year/trim combination can identify one owner's vehicle. Anything
+# unmeasured reports as "not measured", never zero. A manifest that
+# passes schema validation but lacks verified rights or independent
+# equipment evidence is NOT a completed dataset, and pending
+# candidates are never counted as accepted.
+
+
+def _count_by(items: list, key) -> dict:
+    counts: dict = {}
+    for item in items:
+        counts[item.get(key)] = counts.get(item.get(key), 0) + 1
+    return counts
+
+
+def build_quality_report(
+    *,
+    entries: list,
+    dev_cases: list,
+    holdout_cases: list,
+    freeze=None,
+    leakage=None,
+) -> dict:
+    """Assemble the private detailed quality report."""
+    counts = {
+        status: sum(1 for e in entries if e.get("candidate_status") == status)
+        for status in ("accepted", "pending", "rejected")
+    }
+    configurations = sorted(
+        {
+            (
+                (entry.get("vehicle") or {}).get("make"),
+                (entry.get("vehicle") or {}).get("model"),
+                (entry.get("vehicle") or {}).get("year"),
+                (entry.get("vehicle") or {}).get("trim"),
+                (entry.get("vehicle") or {}).get("market"),
+            )
+            for entry in entries
+        }
+    )
+    all_cases = list(dev_cases) + list(holdout_cases)
+    return {
+        "counts": counts,
+        "pending_counted_as_accepted": False,
+        "configurations": [
+            {"make": make, "model": model, "year": year, "trim": trim, "market": market}
+            for make, model, year, trim, market in configurations
+        ],
+        "feature_coverage": _count_by(
+            [(c.get("claim") or {}) for c in all_cases], "normalized_feature"
+        ),
+        "equipment_coverage": _count_by(
+            [(c.get("ground_truth") or {}) for c in all_cases], "equipment"
+        ),
+        "dev_n": len(dev_cases),
+        "holdout_n": len(holdout_cases),
+        "claim_origin": _count_by(entries, "claim_origin"),
+        "permission": _count_by(entries, "license_status"),
+        "privacy": _count_by(entries, "privacy_review"),
+        "missing_equipment_evidence": sorted(
+            entry.get("id")
+            for entry in entries
+            if not entry.get("equipment_method") or not entry.get("equipment_evidence")
+        ),
+        "leakage_findings": leakage if leakage is not None else "not measured",
+        "freeze_status": freeze if freeze is not None else "missing",
+    }
+
+
+def public_report(private: dict) -> dict:
+    """Reduce a private report to the public counts-only aggregate."""
+    dev_n = private.get("dev_n")
+    holdout_n = private.get("holdout_n")
+    leakage = private.get("leakage_findings")
+    return {
+        "counts": dict(private.get("counts", {})),
+        "dev": {"n": dev_n if dev_n else "not measured"},
+        "holdout": {"n": holdout_n if holdout_n else "not measured"},
+        "feature_coverage": dict(private.get("feature_coverage", {})),
+        "equipment_coverage": dict(private.get("equipment_coverage", {})),
+        "claim_origin": dict(private.get("claim_origin", {})),
+        "permission": dict(private.get("permission", {})),
+        "privacy": dict(private.get("privacy", {})),
+        "missing_equipment_evidence": len(
+            private.get("missing_equipment_evidence", [])
+        ),
+        "leakage_findings": (
+            leakage if isinstance(leakage, str) else {"findings": len(leakage or [])}
+        ),
+        "freeze_status": private.get("freeze_status"),
+    }
+
+
 def load_register() -> dict:
     """Load and validate the private register (fails when absent)."""
     path = register_path()
