@@ -460,7 +460,7 @@ def test_not_equipped_positive_prediction_scores_hallucinated():
     """A visually_supported prediction on a not-equipped case is penalized."""
     from audits.realworld import score_case
 
-    entry, case = _admission_pair()
+    _entry, case = _admission_pair()
     case["ground_truth"]["equipment"] = "not-equipped"
     case["ground_truth"]["interpretation"] = "generic"
     case["ground_truth"]["expected_state"] = "insufficient_evidence"
@@ -475,7 +475,7 @@ def test_correct_insufficient_prediction_scores_clean():
     """insufficient_evidence predicted on a not-equipped case is correct."""
     from audits.realworld import score_case
 
-    entry, case = _admission_pair()
+    _entry, case = _admission_pair()
     case["ground_truth"]["equipment"] = "not-equipped"
     case["ground_truth"]["expected_state"] = "insufficient_evidence"
     row = score_case(
