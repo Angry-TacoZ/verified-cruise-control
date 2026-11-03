@@ -293,6 +293,100 @@ def test_near_duplicate_detection(tmp_path):
     assert all(h[2] <= NEAR_DUP_THRESHOLD for h in hits)
 
 
+def _exif_jpeg(path, *, orientation=None, gps=False):
+    from PIL import Image
+
+    img = Image.new("RGB", (64, 32), (200, 30, 30))
+    exif = Image.Exif()
+    if orientation is not None:
+        exif[274] = orientation
+    if gps:
+        exif[34853] = {
+            0: (2, 3, 0, 0),
+            1: "N",
+            2: (51, 1, 30, 1),
+            3: "W",
+            4: (0, 1, 0, 1),
+        }
+    img.save(path, "JPEG", exif=exif)
+
+
+def test_evaluation_copy_preserves_png_pixels_and_strips_metadata(tmp_path):
+    """A plain PNG yields pixel-identical output with no EXIF."""
+    from PIL import Image, ImageChops
+
+    from audits.realworld_intake import inspect_image, prepare_evaluation_copy
+
+    src = tmp_path / "orig.png"
+    Image.new("RGB", (64, 32), (200, 30, 30)).save(src)
+    dest = tmp_path / "eval.png"
+    report = prepare_evaluation_copy(src, dest)
+    assert report["orientation"] is None
+    assert report["transform"] == "none"
+    assert report["gps_present"] is False
+    assert ImageChops.difference(Image.open(src), Image.open(dest)).getbbox() is None
+    assert inspect_image(dest)["orientation"] is None
+
+
+def test_evaluation_copy_bakes_exif_rotation_and_records_it(tmp_path):
+    """EXIF orientation is recorded first, then baked in as pixels."""
+    from PIL import Image
+
+    from audits.realworld_intake import inspect_image, prepare_evaluation_copy
+
+    src = tmp_path / "rot.jpg"
+    _exif_jpeg(src, orientation=6)
+    assert inspect_image(src)["orientation"] == 6
+    dest = tmp_path / "eval.jpg"
+    report = prepare_evaluation_copy(src, dest)
+    assert report["orientation"] == 6
+    assert report["transform"] == "exif-transpose"
+    out = Image.open(dest)
+    assert out.size == (32, 64)
+    assert inspect_image(dest)["orientation"] is None
+
+
+def test_gps_metadata_quarantines_photo(tmp_path):
+    """Images carrying GPS metadata are refused, not silently stripped."""
+
+    from audits.realworld_intake import IntakeError, prepare_evaluation_copy
+
+    src = tmp_path / "gps.jpg"
+    _exif_jpeg(src, gps=True)
+    with pytest.raises(IntakeError):
+        prepare_evaluation_copy(src, tmp_path / "eval.jpg")
+
+
+def test_evaluation_copy_refuses_in_place_and_missing(tmp_path):
+    """Never modify an admitted copy in place; missing files fail."""
+    from PIL import Image
+
+    from audits.realworld_intake import IntakeError, prepare_evaluation_copy
+
+    src = tmp_path / "orig.png"
+    Image.new("RGB", (16, 16), (10, 10, 10)).save(src)
+    with pytest.raises(IntakeError):
+        prepare_evaluation_copy(src, src)
+    with pytest.raises(IntakeError):
+        prepare_evaluation_copy(tmp_path / "absent.png", tmp_path / "eval.png")
+
+
+def test_evaluation_sha_computed_after_final(tmp_path):
+    """Manifest digest matches the exact bytes of the final copy."""
+    import hashlib
+
+    from PIL import Image
+
+    from audits.realworld_intake import prepare_evaluation_copy
+
+    src = tmp_path / "orig.png"
+    Image.new("RGB", (16, 16), (10, 200, 10)).save(src)
+    dest = tmp_path / "eval.png"
+    report = prepare_evaluation_copy(src, dest)
+    assert report["evaluation_sha256"] == hashlib.sha256(dest.read_bytes()).hexdigest()
+    assert report["original_sha256"] == hashlib.sha256(src.read_bytes()).hexdigest()
+
+
 def test_existing_fixtures_pass_value_scan():
     """Synthetic fixtures and the example manifest validate unchanged."""
     from audits.realworld import validate_manifest

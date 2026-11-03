@@ -302,6 +302,108 @@ def find_near_duplicates(
     return sorted(hits, key=lambda hit: hit[2])
 
 
+# Original photographs are immutable evidence: the authorized
+# original stays in restricted local storage and the evaluation copy
+# is derived once, never modified in place. Pillow guarantees no
+# lossless metadata removal for every format, so the transform is
+# explicit and documented per copy:
+# - "none": PNG (or metadata-free input) resaved without metadata;
+#   pixels verified identical.
+# - "exif-transpose": EXIF orientation baked in with
+#   ImageOps.exif_transpose as the documented pixel transform.
+# - "re-encode": JPEG resaved (quality 95) to drop APP markers Pillow
+#   cannot strip without re-encoding; pixels change slightly and the
+#   ADAS-relevant region must be visually verified by the operator.
+EXIF_ORIENTATION_TAG = 274
+EXIF_GPS_TAG = 34853
+JPEG_RECOMPRESSION_QUALITY = 95
+
+
+def inspect_image(path) -> dict:
+    """Report EXIF orientation, GPS presence, and format for one file.
+
+    The orientation value is recorded BEFORE any stripping, because
+    dropping the tag from a rotated phone photo changes how a decoder
+    displays it.
+    """
+    from PIL import Image
+
+    path = Path(path)
+    try:
+        with Image.open(path) as img:
+            exif = img.getexif()
+            orientation = exif.get(EXIF_ORIENTATION_TAG)
+            gps_present = EXIF_GPS_TAG in exif
+            return {
+                "format": img.format,
+                "size": list(img.size),
+                "orientation": orientation,
+                "gps_present": gps_present,
+            }
+    except OSError as exc:
+        raise IntakeError(f"cannot inspect image {path}: {exc}") from exc
+
+
+def prepare_evaluation_copy(src, dest) -> dict:
+    """Derive a privacy-safe evaluation copy; never modifies in place.
+
+    Returns a provenance report with both digests (SHA-256 computed
+    only AFTER the copy is final), the recorded orientation, the
+    transform applied, and the GPS finding. GPS-carrying originals
+    are quarantined, never silently stripped.
+    """
+    import hashlib
+
+    from PIL import Image, ImageOps
+
+    src = Path(src)
+    dest = Path(dest)
+    if src.resolve() == dest.resolve():
+        raise IntakeError("refusing to modify an evaluation copy in place")
+    try:
+        original_bytes = src.read_bytes()
+    except OSError as exc:
+        raise IntakeError(f"original photo {src} unreadable: {exc}") from exc
+    original_sha256 = hashlib.sha256(original_bytes).hexdigest()
+    try:
+        with Image.open(src) as img:
+            fmt = (img.format or "").upper()
+            exif = img.getexif()
+            orientation = exif.get(EXIF_ORIENTATION_TAG)
+            gps_present = EXIF_GPS_TAG in exif
+            if gps_present:
+                raise IntakeError(
+                    f"photo {src} carries GPS metadata: quarantined for "
+                    "operator review, never silently stripped"
+                )
+            if orientation not in (None, 1):
+                img = ImageOps.exif_transpose(img)
+                transform = "exif-transpose"
+            elif fmt == "JPEG":
+                transform = "re-encode"
+            else:
+                transform = "none"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            save_kwargs: dict = {}
+            if fmt == "JPEG":
+                save_kwargs = {"format": "JPEG", "quality": JPEG_RECOMPRESSION_QUALITY}
+            img.save(dest, **save_kwargs)
+    except OSError as exc:
+        raise IntakeError(f"cannot derive evaluation copy for {src}: {exc}") from exc
+    evaluation_sha256 = hashlib.sha256(dest.read_bytes()).hexdigest()
+    final = inspect_image(dest)
+    if final["orientation"] not in (None, 1):
+        raise IntakeError(f"evaluation copy {dest} still carries orientation metadata")
+    return {
+        "original_sha256": original_sha256,
+        "evaluation_sha256": evaluation_sha256,
+        "orientation": orientation,
+        "transform": transform,
+        "gps_present": gps_present,
+        "format": fmt,
+    }
+
+
 def load_register() -> dict:
     """Load and validate the private register (fails when absent)."""
     path = register_path()
