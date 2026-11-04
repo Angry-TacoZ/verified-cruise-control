@@ -29,7 +29,14 @@ export default defineConfig({
       cwd: repoRoot,
       timeout: 120_000,
       reuseExistingServer: !process.env.CI,
-      env: { VCC_RUNTIME_DIR: path.join(repoRoot, 'backend', 'runtime-data-e2e') },
+      env: {
+        VCC_RUNTIME_DIR:
+          process.env.VCC_E2E_RUNTIME_DIR ?? path.join(repoRoot, 'backend', 'runtime-data-e2e'),
+        // Queueing must be exercisable in E2E. No provider keys are set,
+        // so no paid call can happen; the ACC spec settles with scripted
+        // adapters ($0) and live-model runs stay opt-in.
+        VCC_INFERENCE_ENABLED: '1',
+      },
     },
     {
       command: `npx vite --host 127.0.0.1 --port ${webPort} --strictPort`,

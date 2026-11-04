@@ -210,4 +210,66 @@ describe('AuditPanel', () => {
     expect(await screen.findByText('running — muse')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
   });
+
+  it('shows a PASS banner for seller-advertised ACC with visual support', async () => {
+    stubFetch({
+      [`/api/listings/${LISTING}/audits`]: [baseJob],
+      [`/api/audits/${JOB}/findings`]: findings,
+      [`/api/audits/${JOB}/evidence`]: evidence,
+    });
+    render(AuditPanel, {
+      props: { listingId: LISTING, advertisedClaims: ['Adaptive Cruise Control'] },
+    });
+    expect(await screen.findByText(/PASS — Visual evidence supports ACC/)).toBeInTheDocument();
+    expect(screen.getByText(/Seller-advertised ACC/)).toBeInTheDocument();
+    // The ACC finding leads the list.
+    const items = screen.getAllByText('adaptive cruise control');
+    expect(items.length).toBeGreaterThan(0);
+  });
+
+  it('shows operator-requested INCONCLUSIVE when no ACC finding exists', async () => {
+    const laneOnly = findings.filter((f) => f.claim_text !== 'adaptive cruise control');
+    stubFetch({
+      [`/api/listings/${LISTING}/audits`]: [baseJob],
+      [`/api/audits/${JOB}/findings`]: laneOnly,
+      [`/api/audits/${JOB}/evidence`]: evidence,
+    });
+    render(AuditPanel, {
+      props: {
+        listingId: LISTING,
+        advertisedClaims: ['leather seats'],
+        requestedChecks: ['adaptive_cruise_control'],
+      },
+    });
+    expect(await screen.findByText(/INCONCLUSIVE — ACC cannot be established/)).toBeInTheDocument();
+    expect(screen.getByText(/Operator-requested check \(not a seller claim\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/^FAIL/)).not.toBeInTheDocument();
+  });
+
+  it('shows a failed audit as a non-evidence outcome, never INCONCLUSIVE', async () => {
+    const failed = {
+      ...baseJob,
+      status: 'failed',
+      error_code: 'provider_error',
+      error_detail: 'upstream 502',
+    };
+    stubFetch({
+      [`/api/listings/${LISTING}/audits`]: [failed],
+      [`/api/audits/${JOB}/evidence`]: { observations: [], crops: [], executions: [] },
+    });
+    render(AuditPanel, {
+      props: { listingId: LISTING, requestedChecks: ['adaptive_cruise_control'] },
+    });
+    expect(await screen.findByText(/not an ACC evidence result/)).toBeInTheDocument();
+    expect(screen.queryByText(/INCONCLUSIVE — ACC/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/PASS — Visual/)).not.toBeInTheDocument();
+  });
+
+  it('offers Run ACC Audit when the check is pending', async () => {
+    stubFetch({ [`/api/listings/${LISTING}/audits`]: [] });
+    render(AuditPanel, {
+      props: { listingId: LISTING, requestedChecks: ['adaptive_cruise_control'] },
+    });
+    expect(await screen.findByRole('button', { name: 'Run ACC Audit' })).toBeInTheDocument();
+  });
 });

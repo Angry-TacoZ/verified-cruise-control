@@ -1,5 +1,16 @@
 /** Typed client for the mother-app API boundary (session + CSRF). */
 
+export interface LatestAudit {
+  job_id: string;
+  status: string;
+  current_stage: string;
+  /** Five-state ACC finding in the latest job, or null when none exists. */
+  acc_state: string | null;
+  spend_usd: string;
+  model_calls_made: number;
+  updated_at: string;
+}
+
 export interface Listing {
   id: string;
   source_url: string;
@@ -12,10 +23,13 @@ export interface Listing {
   title: string;
   description: string;
   advertised_claims: string[];
+  /** Operator-requested checks; never seller claims. */
+  requested_checks: string[];
   expected_photo_count: number | null;
   failed_upload_count: number;
   photo_count: number;
   import_status: string;
+  latest_audit: LatestAudit | null;
   created_at: string;
 }
 

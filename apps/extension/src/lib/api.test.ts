@@ -216,6 +216,7 @@ describe('localhost API client', () => {
         title: 't',
         description: '',
         advertised_claims: [],
+        requested_checks: [],
         expected_photo_count: 1,
       },
       fetchMock as unknown as typeof fetch,

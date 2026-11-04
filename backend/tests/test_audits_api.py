@@ -45,6 +45,23 @@ def listing():
 
 
 @pytest.fixture()
+def listing_with_photo(listing):
+    """Listing with one stored photograph: queueing requires evidence."""
+    from evidence import images
+
+    from .conftest import make_image_bytes
+
+    images.store_listing_photo(
+        listing,
+        data=make_image_bytes("PNG", "Q1"),
+        filename="q1.png",
+        source_url=None,
+        provenance="extension",
+    )
+    return listing
+
+
+@pytest.fixture()
 def no_spawn():
     """Queue endpoints must not launch worker threads: the standalone
     ``run_audit_worker`` process owns all inference."""
@@ -59,22 +76,24 @@ def _queue(operator_client, listing_id):
     return post_json(operator_client, f"/api/listings/{listing_id}/audits", {})
 
 
-def test_queue_persists_without_spawning(operator_client, listing, enabled, no_spawn):
-    response = _queue(operator_client, listing.pk)
+def test_queue_persists_without_spawning(
+    operator_client, listing_with_photo, enabled, no_spawn
+):
+    response = _queue(operator_client, listing_with_photo.pk)
     assert response.status_code == 202, response.content
     body = response.json()
     assert body["created"] is True
     assert body["job"]["status"] == "queued"
     assert body["job"]["worker_id"] == ""
-    assert body["job"]["listing_id"] == str(listing.pk)
+    assert body["job"]["listing_id"] == str(listing_with_photo.pk)
     assert Decimal(body["job"]["spend_cap_usd"]) == Decimal("2.00")
 
 
 def test_queue_reuses_in_flight_without_respawn(
-    operator_client, listing, enabled, no_spawn
+    operator_client, listing_with_photo, enabled, no_spawn
 ):
-    first = _queue(operator_client, listing.pk).json()
-    second = _queue(operator_client, listing.pk)
+    first = _queue(operator_client, listing_with_photo.pk).json()
+    second = _queue(operator_client, listing_with_photo.pk)
     assert second.status_code == 202
     body = second.json()
     assert body["created"] is False
@@ -87,6 +106,13 @@ def test_queue_refuses_when_disabled(operator_client, listing, settings, no_spaw
     settings.AUDIT_INFERENCE_ENABLED = False
     response = _queue(operator_client, listing.pk)
     assert response.status_code == 403
+
+
+def test_queue_refuses_without_photos(operator_client, listing, enabled):
+    """No usable photographs: the queue refuses before provider spending."""
+    response = _queue(operator_client, listing.pk)
+    assert response.status_code == 422, response.content
+    assert AuditJob.objects.filter(listing=listing).count() == 0
 
 
 def test_queue_unknown_listing(operator_client, enabled, no_spawn):
@@ -109,32 +135,34 @@ def test_queue_requires_csrf(operator_client, listing, enabled):
     assert response.status_code == 403
 
 
-def test_list_audits_history(operator_client, listing, enabled, no_spawn):
-    _queue(operator_client, listing.pk)
+def test_list_audits_history(operator_client, listing_with_photo, enabled, no_spawn):
+    _queue(operator_client, listing_with_photo.pk)
     job = AuditJob.objects.get()
     job.status = JobStatus.COMPLETE
     job.save()
-    _queue(operator_client, listing.pk)
-    response = operator_client.get(f"/api/listings/{listing.pk}/audits")
+    _queue(operator_client, listing_with_photo.pk)
+    response = operator_client.get(f"/api/listings/{listing_with_photo.pk}/audits")
     assert response.status_code == 200
     body = response.json()
     assert len(body) == 2
     assert body[0]["status"] == "queued"
 
 
-def test_get_audit_detail_counts(operator_client, listing, enabled, no_spawn):
+def test_get_audit_detail_counts(
+    operator_client, listing_with_photo, enabled, no_spawn
+):
     from evidence import images
 
     from .conftest import make_image_bytes
 
     photo, _ = images.store_listing_photo(
-        listing,
+        listing_with_photo,
         data=make_image_bytes("PNG", "D1"),
         filename="d1.png",
         source_url=None,
         provenance="extension",
     )
-    job_id = _queue(operator_client, listing.pk).json()["job"]["id"]
+    job_id = _queue(operator_client, listing_with_photo.pk).json()["job"]["id"]
     job = AuditJob.objects.get(pk=job_id)
     Observation.objects.create(
         job=job,
@@ -154,8 +182,8 @@ def test_get_audit_unknown(operator_client):
     assert operator_client.get(f"/api/audits/{uuid.uuid4()}").status_code == 404
 
 
-def test_findings_list(operator_client, listing, enabled, no_spawn):
-    job_id = _queue(operator_client, listing.pk).json()["job"]["id"]
+def test_findings_list(operator_client, listing_with_photo, enabled, no_spawn):
+    job_id = _queue(operator_client, listing_with_photo.pk).json()["job"]["id"]
     job = AuditJob.objects.get(pk=job_id)
     assert operator_client.get(f"/api/audits/{job_id}/findings").json() == []
     AuditFinding.objects.create(
@@ -169,19 +197,19 @@ def test_findings_list(operator_client, listing, enabled, no_spawn):
     assert body[0]["state"] == "contradicted"
 
 
-def test_evidence_bundle(operator_client, listing, enabled, no_spawn):
+def test_evidence_bundle(operator_client, listing_with_photo, enabled, no_spawn):
     from evidence import images
 
     from .conftest import make_image_bytes
 
     photo, _ = images.store_listing_photo(
-        listing,
+        listing_with_photo,
         data=make_image_bytes("PNG", "E1"),
         filename="e1.png",
         source_url=None,
         provenance="extension",
     )
-    job_id = _queue(operator_client, listing.pk).json()["job"]["id"]
+    job_id = _queue(operator_client, listing_with_photo.pk).json()["job"]["id"]
     job = AuditJob.objects.get(pk=job_id)
     Observation.objects.create(
         job=job,
@@ -222,19 +250,21 @@ def test_evidence_bundle(operator_client, listing, enabled, no_spawn):
     assert body["executions"][0]["cost_usd"] is None
 
 
-def test_download_crop_roundtrip(operator_client, listing, enabled, no_spawn):
+def test_download_crop_roundtrip(
+    operator_client, listing_with_photo, enabled, no_spawn
+):
     from evidence import images
 
     from .conftest import make_image_bytes
 
     photo, _ = images.store_listing_photo(
-        listing,
+        listing_with_photo,
         data=make_image_bytes("PNG", "C1"),
         filename="c1.png",
         source_url=None,
         provenance="extension",
     )
-    job_id = _queue(operator_client, listing.pk).json()["job"]["id"]
+    job_id = _queue(operator_client, listing_with_photo.pk).json()["job"]["id"]
     job = AuditJob.objects.get(pk=job_id)
     from PIL import Image
 
@@ -273,8 +303,10 @@ def test_download_crop_roundtrip(operator_client, listing, enabled, no_spawn):
     )
 
 
-def test_download_mask_roundtrip(operator_client, listing, enabled, no_spawn):
-    job_id = _queue(operator_client, listing.pk).json()["job"]["id"]
+def test_download_mask_roundtrip(
+    operator_client, listing_with_photo, enabled, no_spawn
+):
+    job_id = _queue(operator_client, listing_with_photo.pk).json()["job"]["id"]
     job = AuditJob.objects.get(pk=job_id)
     from audits import pipeline
 
@@ -290,22 +322,26 @@ def test_download_mask_roundtrip(operator_client, listing, enabled, no_spawn):
     )
 
 
-def test_cancel_queued_job(operator_client, listing, enabled, no_spawn):
-    job_id = _queue(operator_client, listing.pk).json()["job"]["id"]
+def test_cancel_queued_job(operator_client, listing_with_photo, enabled, no_spawn):
+    job_id = _queue(operator_client, listing_with_photo.pk).json()["job"]["id"]
     response = post_json(operator_client, f"/api/audits/{job_id}/cancel", {})
     assert response.status_code == 200
     assert response.json()["status"] == "cancelled"
 
 
-def test_cancel_terminal_is_conflict(operator_client, listing, enabled, no_spawn):
-    job_id = _queue(operator_client, listing.pk).json()["job"]["id"]
+def test_cancel_terminal_is_conflict(
+    operator_client, listing_with_photo, enabled, no_spawn
+):
+    job_id = _queue(operator_client, listing_with_photo.pk).json()["job"]["id"]
     post_json(operator_client, f"/api/audits/{job_id}/cancel", {})
     response = post_json(operator_client, f"/api/audits/{job_id}/cancel", {})
     assert response.status_code == 409
 
 
-def test_retry_terminal_starts_fresh(operator_client, listing, enabled, no_spawn):
-    job_id = _queue(operator_client, listing.pk).json()["job"]["id"]
+def test_retry_terminal_starts_fresh(
+    operator_client, listing_with_photo, enabled, no_spawn
+):
+    job_id = _queue(operator_client, listing_with_photo.pk).json()["job"]["id"]
     post_json(operator_client, f"/api/audits/{job_id}/cancel", {})
     response = post_json(operator_client, f"/api/audits/{job_id}/retry", {})
     assert response.status_code == 202, response.content
@@ -314,14 +350,18 @@ def test_retry_terminal_starts_fresh(operator_client, listing, enabled, no_spawn
     assert body["job"]["id"] != job_id
 
 
-def test_retry_in_flight_is_conflict(operator_client, listing, enabled, no_spawn):
-    job_id = _queue(operator_client, listing.pk).json()["job"]["id"]
+def test_retry_in_flight_is_conflict(
+    operator_client, listing_with_photo, enabled, no_spawn
+):
+    job_id = _queue(operator_client, listing_with_photo.pk).json()["job"]["id"]
     response = post_json(operator_client, f"/api/audits/{job_id}/retry", {})
     assert response.status_code == 409
 
 
-def test_retry_paused_starts_fresh(operator_client, listing, enabled, no_spawn):
-    job_id = _queue(operator_client, listing.pk).json()["job"]["id"]
+def test_retry_paused_starts_fresh(
+    operator_client, listing_with_photo, enabled, no_spawn
+):
+    job_id = _queue(operator_client, listing_with_photo.pk).json()["job"]["id"]
     AuditJob.objects.filter(pk=job_id).update(
         status=JobStatus.PAUSED,
         error_code="spend_cap",
@@ -334,10 +374,12 @@ def test_retry_paused_starts_fresh(operator_client, listing, enabled, no_spawn):
     assert body["job"]["id"] != job_id
 
 
-def test_queue_after_paused_starts_fresh(operator_client, listing, enabled, no_spawn):
-    job_id = _queue(operator_client, listing.pk).json()["job"]["id"]
+def test_queue_after_paused_starts_fresh(
+    operator_client, listing_with_photo, enabled, no_spawn
+):
+    job_id = _queue(operator_client, listing_with_photo.pk).json()["job"]["id"]
     AuditJob.objects.filter(pk=job_id).update(status=JobStatus.PAUSED)
-    body = _queue(operator_client, listing.pk).json()
+    body = _queue(operator_client, listing_with_photo.pk).json()
     assert body["created"] is True
     assert body["job"]["id"] != job_id
 

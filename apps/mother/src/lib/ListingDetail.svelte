@@ -1,5 +1,6 @@
 <script lang="ts">
   import { ApiError, backend, type Listing, type Photo, type PhotoFailure } from './api';
+  import { isAccAdvertised, isAccRequested } from './accVerdict';
   import AuditPanel from './AuditPanel.svelte';
 
   let { id }: { id: string } = $props();
@@ -143,6 +144,25 @@
       </ul>
     {/if}
 
+    <h2 class="mt-6 text-lg font-semibold">ACC evaluation target</h2>
+    {#if isAccAdvertised(listing.advertised_claims) && isAccRequested(listing.requested_checks)}
+      <p class="mt-2 text-sm text-slate-700">
+        Seller-advertised <span class="font-medium">and</span> operator-requested: the audit evaluates
+        the seller's ACC claim.
+      </p>
+    {:else if isAccAdvertised(listing.advertised_claims)}
+      <p class="mt-2 text-sm text-slate-700">
+        Seller-advertised: the listing text claims adaptive cruise control.
+      </p>
+    {:else if isAccRequested(listing.requested_checks)}
+      <p class="mt-2 text-sm text-slate-700">
+        Operator-requested: the seller did not advertise ACC. This check was selected in the
+        extension and is <span class="font-medium">not</span> a seller claim.
+      </p>
+    {:else}
+      <p class="mt-2 text-sm text-slate-500">No ACC check recorded for this listing.</p>
+    {/if}
+
     <h2 class="mt-6 text-lg font-semibold">Original description</h2>
     <p class="mt-2 whitespace-pre-wrap rounded-md border border-slate-200 bg-white p-4 text-sm">
       {listing.description || '—'}
@@ -173,6 +193,10 @@
       </ul>
     {/if}
 
-    <AuditPanel listingId={listing.id} />
+    <AuditPanel
+      listingId={listing.id}
+      advertisedClaims={listing.advertised_claims}
+      requestedChecks={listing.requested_checks ?? []}
+    />
   {/if}
 </section>

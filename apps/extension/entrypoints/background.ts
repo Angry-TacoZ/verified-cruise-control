@@ -153,7 +153,14 @@ export default defineBackground(() => {
         cancelFlag = false;
         await setImportCancelled(false);
         try {
-          const progress = await runImport(token, response.listing, importDeps(token));
+          // Operator-requested check only (allowlisted in protocol
+          // validation): never inferred from the page, never a seller claim.
+          const progress = await runImport(
+            token,
+            response.listing,
+            importDeps(token),
+            message.requestedCheck ?? null,
+          );
           return { ok: true, progress };
         } catch (err) {
           return { ok: false, error: err instanceof Error ? err.message : 'import failed' };

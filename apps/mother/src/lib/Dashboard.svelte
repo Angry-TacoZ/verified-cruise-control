@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { accLabelForState, isAccAdvertised, isAccRequested, isAuditInFlight } from './accVerdict';
   import { ApiError, backend, type Listing } from './api';
 
   let { gateSetup }: { gateSetup: boolean } = $props();
@@ -26,14 +27,55 @@
     }
   }
 
-  onMount(() => void load());
+  /** User-facing ACC badge for a listing row. Operational audit states take
+   * precedence over evidence labels; a failed model request is never shown
+   * as an ACC evidence result. */
+  function accBadge(listing: Listing): { text: string; tone: string } {
+    const audit = listing.latest_audit ?? null;
+    const wantsAcc =
+      isAccRequested(listing.requested_checks) || isAccAdvertised(listing.advertised_claims);
+    if (!audit) {
+      return wantsAcc
+        ? { text: 'ACC requested — no audit yet', tone: 'bg-amber-100 text-amber-800' }
+        : { text: 'no audit', tone: 'bg-slate-100 text-slate-600' };
+    }
+    if (isAuditInFlight(audit.status)) {
+      return { text: `Audit ${audit.status}…`, tone: 'bg-slate-200 text-slate-800' };
+    }
+    if (audit.status === 'paused')
+      return { text: 'Audit paused', tone: 'bg-amber-100 text-amber-800' };
+    if (audit.status === 'failed' || audit.status === 'cancelled') {
+      return { text: 'Audit failed', tone: 'bg-red-100 text-red-800' };
+    }
+    if (!wantsAcc) return { text: 'audited', tone: 'bg-slate-100 text-slate-600' };
+    const label = accLabelForState(audit.acc_state);
+    if (label === 'PASS') return { text: 'ACC: PASS', tone: 'bg-emerald-100 text-emerald-800' };
+    if (label === 'FAIL') return { text: 'ACC: FAIL', tone: 'bg-red-100 text-red-800' };
+    return { text: 'ACC: INCONCLUSIVE', tone: 'bg-amber-100 text-amber-800' };
+  }
+
+  const auditedCount = $derived(listings.filter((l) => l.latest_audit !== null).length);
+
+  onMount(() => {
+    void load();
+    // Refresh while any audit is in flight so the dashboard settles on the
+    // finished ACC result without a manual reload.
+    const timer = setInterval(() => {
+      if (listings.some((listing) => isAuditInFlight(listing.latest_audit?.status))) {
+        void load();
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  });
 </script>
 
 <section aria-labelledby="dash-title">
   <h1 id="dash-title" class="text-2xl font-semibold">Listings</h1>
   <p class="mt-1 text-sm text-slate-600">
-    {listings.length} stored listing{listings.length === 1 ? '' : 's'} · imported evidence only, no AI
-    audit yet
+    {listings.length} stored listing{listings.length === 1 ? '' : 's'} · imported evidence; audits run
+    only when you start one{auditedCount > 0
+      ? ` · ${auditedCount} with an audit`
+      : ', none audited yet'}
   </p>
 
   {#if gateSetup}
@@ -60,6 +102,7 @@
   {:else}
     <ul class="mt-4 divide-y divide-slate-200 rounded-md border border-slate-200 bg-white">
       {#each listings as listing (listing.id)}
+        {@const badge = accBadge(listing)}
         <li>
           <a
             class="flex items-center gap-4 px-4 py-3 hover:bg-slate-50"
@@ -77,6 +120,7 @@
             <span class="text-sm text-slate-500">
               {listing.photo_count} photo{listing.photo_count === 1 ? '' : 's'}
             </span>
+            <span class={`rounded-full px-2 py-0.5 text-xs ${badge.tone}`}>{badge.text}</span>
             <span
               class="rounded-full px-2 py-0.5 text-xs"
               class:bg-emerald-100={listing.import_status === 'complete'}

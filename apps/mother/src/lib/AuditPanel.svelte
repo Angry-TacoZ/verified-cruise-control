@@ -1,7 +1,19 @@
 <script lang="ts">
   import { ApiError, backend, type AuditEvidence, type AuditFinding, type AuditJob } from './api';
+  import {
+    assessAcc,
+    isAccAdvertised,
+    isAccRequested,
+    isAuditInFlight,
+    operationalAccMessage,
+    type AccAssessment,
+  } from './accVerdict';
 
-  let { listingId }: { listingId: string } = $props();
+  let {
+    listingId,
+    advertisedClaims = [],
+    requestedChecks = [],
+  }: { listingId: string; advertisedClaims?: string[]; requestedChecks?: string[] } = $props();
 
   let jobs = $state<AuditJob[]>([]);
   let findings = $state<AuditFinding[]>([]);
@@ -12,9 +24,41 @@
   let actionError = $state('');
 
   const latest = $derived(jobs.length > 0 ? jobs[0] : null);
-  const inFlight = $derived(
-    latest !== null && (latest.status === 'queued' || latest.status === 'running'),
+  const inFlight = $derived(latest !== null && isAuditInFlight(latest.status));
+
+  /** Whether ACC is in scope: seller-advertised, operator-requested, or both. */
+  const wantsAcc = $derived(isAccAdvertised(advertisedClaims) || isAccRequested(requestedChecks));
+
+  function isAccFinding(finding: AuditFinding): boolean {
+    return (
+      /user-requested check/i.test(finding.claim_text) || isAccAdvertised([finding.claim_text])
+    );
+  }
+
+  const accFinding = $derived(findings.find(isAccFinding) ?? null);
+  const orderedFindings = $derived(
+    accFinding ? [accFinding, ...findings.filter((f) => f.id !== accFinding.id)] : findings,
   );
+  const orderedObservations = $derived.by(() => {
+    if (!evidence || !accFinding) return (evidence?.observations ?? []).slice();
+    const keys = new Set([accFinding.claim_key, accFinding.claim_text]);
+    const accObs = evidence.observations.filter(
+      (o) => keys.has(o.claim_key) || /user-requested check/i.test(o.claim_key),
+    );
+    const rest = evidence.observations.filter((o) => !accObs.includes(o));
+    return [...accObs, ...rest];
+  });
+
+  const accAssessment = $derived.by((): AccAssessment | null => {
+    if (!wantsAcc || !latest || latest.status !== 'complete') return null;
+    return assessAcc({
+      advertisedClaims,
+      requestedChecks,
+      accState: accFinding?.state ?? null,
+    });
+  });
+
+  const operationalMessage = $derived(latest ? operationalAccMessage(latest.status) : null);
 
   function stateLabel(state: string): string {
     switch (state) {
@@ -173,17 +217,34 @@
       {error}
     </div>
   {:else if !latest}
-    <p class="mt-2 text-sm text-slate-500">
-      No audits yet. Audits run Meta-only inference with server-side spend caps, and only when you
-      start one.
-    </p>
+    {#if wantsAcc}
+      <p class="mt-2 text-sm text-slate-700">
+        ACC check pending — {isAccRequested(requestedChecks) && !isAccAdvertised(advertisedClaims)
+          ? 'operator-requested (not a seller claim)'
+          : 'seller-advertised'}. Audits run Meta-only inference with server-side spend caps, and
+        only when you start one.
+      </p>
+    {:else}
+      <p class="mt-2 text-sm text-slate-500">
+        No audits yet. Audits run Meta-only inference with server-side spend caps, and only when you
+        start one.
+      </p>
+    {/if}
     <button
       class="mt-2 rounded-md bg-slate-900 px-4 py-2 text-sm text-white disabled:opacity-50"
       disabled={acting}
       onclick={runAudit}
     >
-      {acting ? 'Starting…' : 'Run audit'}
+      {acting ? 'Starting…' : wantsAcc ? 'Run ACC Audit' : 'Run audit'}
     </button>
+    {#if actionError}
+      <div
+        class="mt-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800"
+        role="alert"
+      >
+        {actionError}
+      </div>
+    {/if}
   {:else}
     <div class="mt-2 rounded-md border border-slate-200 bg-white p-4 text-sm">
       <div class="flex flex-wrap items-center gap-2">
@@ -213,7 +274,7 @@
             disabled={acting}
             onclick={runAudit}
           >
-            {acting ? 'Starting…' : 'Run audit'}
+            {acting ? 'Starting…' : wantsAcc ? 'Run ACC Audit' : 'Run audit'}
           </button>
         {/if}
       </div>
@@ -239,6 +300,48 @@
       {/if}
     </div>
 
+    {#if operationalMessage}
+      <div
+        class="mt-2 rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-800"
+        role="status"
+      >
+        {operationalMessage}
+      </div>
+    {/if}
+
+    {#if accAssessment}
+      {@const assessment = accAssessment}
+      <div
+        class="mt-2 rounded-md border p-3 text-sm"
+        class:border-emerald-200={assessment.label === 'PASS'}
+        class:bg-emerald-50={assessment.label === 'PASS'}
+        class:text-emerald-900={assessment.label === 'PASS'}
+        class:border-red-200={assessment.label === 'FAIL'}
+        class:bg-red-50={assessment.label === 'FAIL'}
+        class:text-red-900={assessment.label === 'FAIL'}
+        class:border-amber-200={assessment.label === 'INCONCLUSIVE'}
+        class:bg-amber-50={assessment.label === 'INCONCLUSIVE'}
+        class:text-amber-900={assessment.label === 'INCONCLUSIVE'}
+        role="status"
+      >
+        <div class="font-semibold">{assessment.headline}</div>
+        <div class="mt-1">
+          Underlying finding: {assessment.state ?? 'none'} ·
+          {assessment.provenance === 'seller-advertised'
+            ? 'Seller-advertised ACC'
+            : assessment.provenance === 'operator-requested'
+              ? 'Operator-requested check (not a seller claim)'
+              : assessment.provenance === 'both'
+                ? 'Seller-advertised and operator-requested'
+                : 'No ACC claim recorded'}
+        </div>
+        <div class="mt-1">{assessment.limitation}</div>
+        {#if assessment.label === 'INCONCLUSIVE'}
+          <div class="mt-1">Full evidence is below — a badge alone is never the whole result.</div>
+        {/if}
+      </div>
+    {/if}
+
     {#if actionError}
       <div
         class="mt-2 rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800"
@@ -248,10 +351,10 @@
       </div>
     {/if}
 
-    {#if findings.length > 0}
-      <h3 class="mt-4 text-base font-semibold">Findings ({findings.length})</h3>
+    {#if orderedFindings.length > 0}
+      <h3 class="mt-4 text-base font-semibold">Findings ({orderedFindings.length})</h3>
       <ul class="mt-2 space-y-2 text-sm">
-        {#each findings as finding (finding.id)}
+        {#each orderedFindings as finding (finding.id)}
           <li class={`rounded-md border p-3 ${stateTone(finding.state)}`}>
             <div class="font-medium">{finding.claim_text || finding.claim_key}</div>
             <div class="mt-1">
@@ -267,12 +370,12 @@
 
     {#if evidence && (evidence.observations.length > 0 || evidence.crops.length > 0 || evidence.executions.length > 0)}
       <h3 class="mt-4 text-base font-semibold">Evidence</h3>
-      {#if evidence.observations.length > 0}
+      {#if orderedObservations.length > 0}
         <h4 class="mt-2 text-sm font-semibold">
-          Observations ({evidence.observations.length})
+          Observations ({orderedObservations.length})
         </h4>
         <ul class="mt-1 space-y-2 text-sm">
-          {#each evidence.observations as obs (obs.id)}
+          {#each orderedObservations as obs (obs.id)}
             <li class="rounded-md border border-slate-200 bg-white p-3">
               <div>
                 <span class="font-medium">{obs.claim_key}</span>

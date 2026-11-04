@@ -100,7 +100,13 @@
   }
 
   async function runRemote(
-    message: { type: 'vcc:start-import'; tabId: number } | { type: 'vcc:retry-failed' },
+    message:
+      | {
+          type: 'vcc:start-import';
+          tabId: number;
+          requestedCheck?: 'adaptive_cruise_control' | null;
+        }
+      | { type: 'vcc:retry-failed' },
     failureLabel: string,
   ) {
     error = '';
@@ -123,12 +129,12 @@
     }
   }
 
-  async function startImport() {
+  async function startImport(requestedCheck?: 'adaptive_cruise_control' | null) {
     if (tabId === null) {
       error = 'No active tab.';
       return;
     }
-    await runRemote({ type: 'vcc:start-import', tabId }, 'Import failed.');
+    await runRemote({ type: 'vcc:start-import', tabId, requestedCheck }, 'Import failed.');
   }
 
   async function retryFailed() {
@@ -251,9 +257,19 @@
       class="mt-3 w-full rounded-md bg-blue-600 px-3 py-1.5 text-white disabled:opacity-50"
       type="button"
       disabled={busy || !supported}
-      onclick={() => void startImport()}
+      onclick={() => void startImport('adaptive_cruise_control')}
+      title="Import this listing and mark adaptive cruise control as the operator-requested evaluation target"
     >
-      {busy ? 'Importing…' : 'Import this listing'}
+      {busy ? 'Importing…' : 'Verify Adaptive Cruise Control'}
+    </button>
+    <button
+      class="mt-2 w-full rounded-md border border-slate-300 px-3 py-1.5 text-slate-700 disabled:opacity-50"
+      type="button"
+      disabled={busy || !supported}
+      onclick={() => void startImport()}
+      title="Import this listing without a requested check"
+    >
+      Import this listing
     </button>
 
     {#if progress && progress.status === 'active'}

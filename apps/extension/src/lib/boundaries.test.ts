@@ -24,6 +24,9 @@ describe('security boundaries (static guards)', () => {
     expect(config).not.toMatch(/['"]scripting['"]/);
     expect(config).toContain('http://127.0.0.1:8000/*');
     expect(config).toContain('http://127.0.0.1:8901/*');
+    // First real listing host is narrowly scoped (ADR 002).
+    expect(config).toContain('https://www.autotrader.com/*');
+    expect(config).toContain('https://autotrader.com/*');
   });
 
   it('background restricts storage.local before handling messages', () => {

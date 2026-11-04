@@ -7,6 +7,7 @@ import {
   normalizeProgress,
   retryFailedPhotos,
   runImport,
+  toListingPayload,
   type FailureReport,
   type ImportDeps,
   type ImportProgress,
@@ -741,6 +742,21 @@ describe('retryFailedPhotos', () => {
     expect(retried.listingId).toBe('L1');
     expect(creates.count).toBe(1);
     expect(retried.status).toBe('partial');
+  });
+});
+
+describe('toListingPayload', () => {
+  it('sends no requested check by default', () => {
+    expect(toListingPayload(listingWithPhotos([])).requested_checks).toEqual([]);
+  });
+
+  it('keeps the operator-requested ACC check separate from seller claims', () => {
+    const listing = listingWithPhotos([]);
+    listing.advertisedClaims = ['leather seats'];
+    const payload = toListingPayload(listing, 'adaptive_cruise_control');
+    expect(payload.requested_checks).toEqual(['adaptive_cruise_control']);
+    // Never merged into the seller's advertised claims.
+    expect(payload.advertised_claims).toEqual(['leather seats']);
   });
 });
 

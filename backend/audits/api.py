@@ -153,6 +153,9 @@ def app_queue_audit(request, listing_id: uuid.UUID):
         job, created = services.queue_audit(listing_id, requested_by="operator")
     except services.InferenceDisabledError as exc:
         raise HttpError(403, str(exc)) from exc
+    except services.NoEvidenceError as exc:
+        # No usable photographs: refuse before any provider spending.
+        raise HttpError(422, str(exc)) from exc
     return Status(202, {"job": _serialize_job(job), "created": created})
 
 

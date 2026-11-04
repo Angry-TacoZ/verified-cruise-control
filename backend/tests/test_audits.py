@@ -89,7 +89,7 @@ def test_queue_refuses_when_disabled(listing, settings):
         services.queue_audit(listing.pk)
 
 
-def test_queue_reuses_in_flight_job(listing, enabled):
+def test_queue_reuses_in_flight_job(listing, photos, enabled):
     job, created = services.queue_audit(listing.pk, requested_by="op")
     assert created is True
     assert job.max_calls == enabled.AUDIT_MAX_CALLS_PER_JOB
@@ -99,7 +99,7 @@ def test_queue_reuses_in_flight_job(listing, enabled):
     assert AuditJob.objects.filter(listing=listing).count() == 1
 
 
-def test_queue_new_job_after_terminal(listing, enabled):
+def test_queue_new_job_after_terminal(listing, photos, enabled):
     job, _ = services.queue_audit(listing.pk)
     job.status = JobStatus.COMPLETE
     job.save()
@@ -109,7 +109,7 @@ def test_queue_new_job_after_terminal(listing, enabled):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_concurrent_queue_single_job(listing, enabled):
+def test_concurrent_queue_single_job(listing, photos, enabled):
     """Simultaneous submissions converge on one active audit: losers get
     the winner instead of creating duplicate paid work."""
     import threading
@@ -147,7 +147,7 @@ def test_concurrent_queue_single_job(listing, enabled):
 
 
 @pytest.mark.django_db(transaction=True)
-def test_concurrent_claim_single_winner(listing, enabled):
+def test_concurrent_claim_single_winner(listing, photos, enabled):
     job, _ = services.queue_audit(listing.pk)
     winners: list = []
     errors: list[Exception] = []
@@ -1874,7 +1874,7 @@ def test_worker_restart_reclaims_and_resumes(listing, photos, enabled):
     assert settled.findings.count() == 2
 
 
-def test_worker_refuses_while_inference_disabled(listing, enabled, settings):
+def test_worker_refuses_while_inference_disabled(listing, photos, enabled, settings):
     from audits import worker
 
     job, _ = services.queue_audit(listing.pk, requested_by="operator")
@@ -1911,7 +1911,7 @@ def test_completed_job_never_reexecutes(listing, photos, enabled):
     )
 
 
-def test_cancelled_queued_job_never_claimed(listing, enabled):
+def test_cancelled_queued_job_never_claimed(listing, photos, enabled):
     from audits import worker
 
     job, _ = services.queue_audit(listing.pk, requested_by="operator")

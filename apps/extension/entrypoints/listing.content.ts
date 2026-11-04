@@ -3,9 +3,10 @@ import { defineContentScript } from 'wxt/utils/define-content-script';
 import { extractorForUrl } from '../src/lib/extractors';
 
 export default defineContentScript({
-  // Synthetic fixture server first; dealership hosts join as optional
-  // permissions with dedicated extractor rules in later PRs.
-  matches: ['http://127.0.0.1:8901/*'],
+  // Synthetic fixture server first; Autotrader (ADR 002) is the first real
+  // listing host. CDN image origins stay unlisted on purpose: unpermitted
+  // hosts surface as permission failures in the mother app, never silent drops.
+  matches: ['http://127.0.0.1:8901/*', 'https://www.autotrader.com/*', 'https://autotrader.com/*'],
   main() {
     browser.runtime.onMessage.addListener((message) => {
       if (typeof message !== 'object' || message === null) return undefined;

@@ -24,10 +24,23 @@ export interface ExtractedListing {
   extractorId: string;
 }
 
+/**
+ * Operator-requested verification checks. Selected in the popup (e.g.
+ * "Verify ACC"), never inferred from the page: a search-filter selection
+ * must not become a seller claim. Single-value allowlist for the
+ * real-listing milestone.
+ */
+export const REQUESTED_CHECKS = ['adaptive_cruise_control'] as const;
+export type RequestedCheck = (typeof REQUESTED_CHECKS)[number];
+
+export function isRequestedCheck(value: unknown): value is RequestedCheck {
+  return typeof value === 'string' && (REQUESTED_CHECKS as readonly string[]).includes(value);
+}
+
 export type BackgroundRequest =
   | { type: 'vcc:extract-request' }
   | { type: 'vcc:get-state' }
-  | { type: 'vcc:start-import'; tabId: number }
+  | { type: 'vcc:start-import'; tabId: number; requestedCheck?: RequestedCheck | null }
   | { type: 'vcc:retry-failed' }
   | { type: 'vcc:abandon-import' }
   | { type: 'vcc:cancel-import' };
@@ -54,8 +67,13 @@ export function isBackgroundRequest(value: unknown): value is BackgroundRequest 
     case 'vcc:abandon-import':
     case 'vcc:cancel-import':
       return true;
-    case 'vcc:start-import':
-      return typeof value.tabId === 'number' && Number.isInteger(value.tabId);
+    case 'vcc:start-import': {
+      if (typeof value.tabId !== 'number' || !Number.isInteger(value.tabId)) {
+        return false;
+      }
+      const check = (value as { requestedCheck?: unknown }).requestedCheck;
+      return check === undefined || check === null || isRequestedCheck(check);
+    }
     default:
       return false;
   }

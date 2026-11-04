@@ -45,6 +45,14 @@ class JobNotRunningError(AuditError):
     """Raised when writing to a job that is no longer running."""
 
 
+class NoEvidenceError(AuditError):
+    """Raised when queueing an audit with no usable photographs.
+
+    A failed or empty import must never trigger provider spending: the
+    queue refuses the job before any model call can happen.
+    """
+
+
 def build_snapshot(listing_id) -> dict:
     """Freeze the audit inputs: vehicle identity, claim IDs + texts,
     photo IDs + SHA-256.
@@ -59,6 +67,21 @@ def build_snapshot(listing_id) -> dict:
 
     listing = Listing.objects.get(pk=listing_id)
     claims = [str(c) for c in (listing.advertised_claims or []) if str(c)]
+    # Operator-requested checks (e.g. adaptive cruise control selected via
+    # "Verify ACC" in the extension) become audited claims even when the
+    # seller did not advertise them. They are labelled as user-requested so
+    # they are never mistaken for seller claims downstream.
+    # normalize_feature is total on str input (unknown -> "unknown"), so no
+    # failure handling is needed here.
+    from audits.adas_evidence import normalize_feature
+    from listings.services import REQUESTED_CHECK_LABELS
+
+    requested = list(getattr(listing, "requested_checks", None) or [])
+    have = {normalize_feature(text) for text in claims}
+    for check in requested:
+        label = REQUESTED_CHECK_LABELS.get(str(check), str(check))
+        if normalize_feature(label) not in have:
+            claims.append(label)
     photos = Photograph.objects.filter(listing=listing).order_by("created_at")
     return {
         "taken_at": timezone.now().isoformat(),
@@ -94,6 +117,17 @@ def queue_audit(listing_id, requested_by: str = "") -> tuple[AuditJob, bool]:
     if not settings.AUDIT_INFERENCE_ENABLED:
         raise InferenceDisabledError(
             "Inference is disabled; set VCC_INFERENCE_ENABLED=1 to queue audits."
+        )
+    # Fail closed on empty evidence: a listing with no stored photographs
+    # (failed or empty import) must never enter the queue, so no provider
+    # spending can happen without usable evidence. Checked before the
+    # reuse lookup so even a retry cannot queue a photo-less listing.
+    from evidence.models import Photograph
+
+    if not Photograph.objects.filter(listing_id=listing_id).exists():
+        raise NoEvidenceError(
+            "No usable photographs stored for this listing; "
+            "import photos before running an audit."
         )
     import random
     import time

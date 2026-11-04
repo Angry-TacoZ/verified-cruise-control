@@ -39,6 +39,28 @@ describe('protocol validation', () => {
     expect(isBackgroundRequest({ type: 'vcc:drop-database' })).toBe(false);
   });
 
+  it('allow-lists the operator-requested ACC check on start-import', () => {
+    expect(
+      isBackgroundRequest({
+        type: 'vcc:start-import',
+        tabId: 7,
+        requestedCheck: 'adaptive_cruise_control',
+      }),
+    ).toBe(true);
+    expect(isBackgroundRequest({ type: 'vcc:start-import', tabId: 7 })).toBe(true);
+    expect(isBackgroundRequest({ type: 'vcc:start-import', tabId: 7, requestedCheck: null })).toBe(
+      true,
+    );
+    // Anything else is rejected: the check is operator-selected, never
+    // inferred, so arbitrary values must not pass validation.
+    expect(
+      isBackgroundRequest({ type: 'vcc:start-import', tabId: 7, requestedCheck: 'self_driving' }),
+    ).toBe(false);
+    expect(isBackgroundRequest({ type: 'vcc:start-import', tabId: 7, requestedCheck: 42 })).toBe(
+      false,
+    );
+  });
+
   it('accepts well-formed content responses', () => {
     expect(isContentResponse({ type: 'vcc:extract-result', listing })).toBe(true);
     expect(isContentResponse({ type: 'vcc:extract-result', listing: null })).toBe(true);

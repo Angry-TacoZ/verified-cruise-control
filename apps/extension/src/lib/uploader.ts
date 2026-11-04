@@ -21,7 +21,7 @@ import {
   uploadPhoto,
   type ListingPayload,
 } from './api';
-import type { ExtractedListing } from './protocol';
+import type { ExtractedListing, RequestedCheck } from './protocol';
 
 export interface PhotoProgress {
   url: string;
@@ -80,7 +80,10 @@ export interface ImportDeps {
   reportFailure?: (listingId: string, report: FailureReport) => Promise<void>;
 }
 
-export function toListingPayload(listing: ExtractedListing): ListingPayload {
+export function toListingPayload(
+  listing: ExtractedListing,
+  requestedCheck?: RequestedCheck | null,
+): ListingPayload {
   return {
     source_url: listing.sourceUrl,
     source_site: listing.sourceSite,
@@ -92,6 +95,9 @@ export function toListingPayload(listing: ExtractedListing): ListingPayload {
     title: listing.title,
     description: listing.description,
     advertised_claims: listing.advertisedClaims,
+    // Operator-requested check only: never inferred from the page, never
+    // merged into advertised claims.
+    requested_checks: requestedCheck ? [requestedCheck] : [],
     expected_photo_count: listing.photos.length,
   };
 }
@@ -277,6 +283,7 @@ export async function runImport(
   token: string,
   listing: ExtractedListing,
   deps: ImportDeps,
+  requestedCheck?: RequestedCheck | null,
 ): Promise<ImportProgress> {
   const fetchImpl = deps.fetchImpl;
   const maxAttempts = deps.maxAttempts ?? 2;
@@ -292,7 +299,11 @@ export async function runImport(
     }
     active = stored;
   } else {
-    const created = await createListing(token, toListingPayload(listing), fetchImpl);
+    const created = await createListing(
+      token,
+      toListingPayload(listing, requestedCheck),
+      fetchImpl,
+    );
     active = {
       runId: `${Date.now()}`,
       listingId: created.id,

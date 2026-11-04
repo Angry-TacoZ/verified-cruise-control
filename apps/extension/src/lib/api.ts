@@ -145,6 +145,7 @@ export interface ListingPayload {
   title: string;
   description: string;
   advertised_claims: string[];
+  requested_checks: string[];
   expected_photo_count: number | null;
 }
 

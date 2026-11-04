@@ -147,6 +147,18 @@ describe('background single-active-operation guard', () => {
     expect(runImportMock).toHaveBeenCalledTimes(2);
   });
 
+  it('forwards the operator-requested ACC check to runImport', async () => {
+    runImportMock.mockResolvedValueOnce({ status: 'complete' });
+    await expect(
+      listener(
+        { type: 'vcc:start-import', tabId: 7, requestedCheck: 'adaptive_cruise_control' },
+        {},
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    expect(runImportMock).toHaveBeenCalledTimes(1);
+    expect(runImportMock.mock.calls[0][3]).toBe('adaptive_cruise_control');
+  });
+
   it('rejects a retry while an import runs', async () => {
     let release!: (value: unknown) => void;
     const gate = new Promise((resolve) => {
