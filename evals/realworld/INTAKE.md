@@ -50,12 +50,50 @@ equipment cases. Prioritize the checklist over category quotas and
 report actual coverage. If evidence is insufficient, report the exact
 shortfall — do not mark Phase C complete.
 
+## Accepted formats and conversion
+
+Intake accepts JPEG, PNG, and WEBP only (the app's photo format
+allowlist). Anything else is refused before any metadata handling:
+convert it first with a trusted tool outside the repo, then re-run.
+Conversion must not leave GPS or identifying metadata behind — verify
+the converted file carries no EXIF GPS, owner, or location tags before
+submitting it. HEIC/phone originals always need this step.
+
+## If an original is quarantined for GPS
+
+Do not strip it inside the repo and do not commit it. Strip GPS and
+identifying metadata with a trusted tool outside the repo (keeping a
+private note of what was removed), confirm the ADAS-relevant region is
+visually intact, then re-run intake on the cleaned file. If the
+original cannot be cleaned without changing evidence-relevant pixels,
+say so and keep the candidate pending.
+
 ## Running validation (zero inference, always safe)
 
 ```sh
 python evals/run.py realworld-validate --manifest evals/realworld/manifest.pilot.json
 python evals/run.py realworld-validate --manifest <holdout>.json --other-manifest <dev>.json --enforce-freeze --public-report
 ```
+
+## Freezing the holdout (before any model evaluation)
+
+The freeze locks the holdout manifest hash and case inventory after
+all cross-split gates pass. Run it once the dev/holdout split is
+final and BEFORE any model evaluation touches the holdout:
+
+```sh
+python evals/run.py realworld-freeze --manifest <holdout>.json \
+  --other-manifest <dev>.json --reviewer-role <your-role>
+```
+
+The freeze refuses without a dev manifest, full photo-path coverage,
+matching SHA-256 digests, a holdout split, and resolved (or
+dispositioned) duplicates. Re-running the freeze refuses to overwrite:
+to replace a record you must pass `--replace-reason "<why>"`, which
+archives the prior record as
+`holdout-freeze-<dataset>.superseded-<n>.json` instead of silently
+overwriting it. Never evaluate on the holdout before it is frozen, and
+never tune prompts against holdout results.
 
 Link the private register with `--register <register.json>` to run
 admission. The public branch of the report is counts only; detailed

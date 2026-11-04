@@ -71,6 +71,10 @@ python evals/run.py realworld-validate --manifest fixtures/realworld-sample/mani
 python evals/run.py realworld-validate --manifest evals/realworld/manifest.pilot.json \
   --other-manifest evals/realworld/manifest.dev.json --register <private>/register.json \
   --enforce-freeze --public-report
+
+# Freezing a holdout (refuses fail-open freezes; needs dev + photos):
+python evals/run.py realworld-freeze --manifest <holdout>.json \
+  --other-manifest <dev>.json --reviewer-role dataset-reviewer
 ```
 
 # Live (needs explicit James Lane approval + VCC_LIVE_SMOKE=1):

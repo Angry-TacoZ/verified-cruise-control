@@ -102,9 +102,18 @@ def _suspicious_value(text: str) -> str | None:
 def scan_values(obj, where: str) -> None:
     """Reject string values carrying likely personal/identifying content.
 
-    The error names the field and category but NEVER repeats the
-    value, so the secret does not leak into logs or reports.
+    Inspects strings at any depth: direct dict members, list items,
+    and arbitrarily nested combinations. The error names the field
+    (or position) and category but NEVER repeats the value, so the
+    secret does not leak into logs or reports.
     """
+    if isinstance(obj, str):
+        category = _suspicious_value(obj)
+        if category is not None:
+            raise ValueError(
+                f"{where}: suspicious {category} (quarantined for privacy review)"
+            )
+        return
     if isinstance(obj, dict):
         for key, value in obj.items():
             if key in SCAN_EXCLUDED_FIELDS:
@@ -312,16 +321,22 @@ def find_near_duplicates(
 
 # Original photographs are immutable evidence: the authorized
 # original stays in restricted local storage and the evaluation copy
-# is derived once, never modified in place. Pillow guarantees no
-# lossless metadata removal for every format, so the transform is
-# explicit and documented per copy:
-# - "none": PNG (or metadata-free input) resaved without metadata;
-#   pixels verified identical.
+# is derived once, never modified in place. The transform is explicit
+# and documented per copy:
+# - "none": PNG (or metadata-free input) resaved. Pixels are verified
+#   identical after the save (both reopened, RGB, zero difference);
+#   a mismatch raises and the derived file is removed.
 # - "exif-transpose": EXIF orientation baked in with
-#   ImageOps.exif_transpose as the documented pixel transform.
+#   ImageOps.exif_transpose as the documented pixel transform. Pixels
+#   change by design here; the operator must verify visually that the
+#   ADAS-relevant region is intact.
 # - "re-encode": JPEG resaved (quality 95) to drop APP markers Pillow
-#   cannot strip without re-encoding; pixels change slightly and the
-#   ADAS-relevant region must be visually verified by the operator.
+#   cannot strip without re-encoding. Pixels change slightly; the
+#   operator must verify visually that the ADAS-relevant region is
+#   intact. Pillow guarantees no lossless metadata removal for every
+#   format, which is why re-encoding stays explicit and documented.
+# Only the app's photo format allowlist (JPEG, PNG, WEBP) is
+# accepted; anything else is refused before any metadata handling.
 EXIF_ORIENTATION_TAG = 274
 EXIF_GPS_TAG = 34853
 JPEG_RECOMPRESSION_QUALITY = 95
@@ -360,7 +375,9 @@ def prepare_evaluation_copy(src, dest) -> dict:
     transform applied, and the GPS finding. GPS-carrying originals
     are quarantined, never silently stripped.
     """
-    from PIL import Image, ImageOps
+    from PIL import Image, ImageChops, ImageOps
+
+    from config import limits
 
     src = Path(src)
     dest = Path(dest)
@@ -374,6 +391,13 @@ def prepare_evaluation_copy(src, dest) -> dict:
     try:
         with Image.open(src) as img:
             fmt = (img.format or "").upper()
+            if fmt not in limits.ALLOWED_IMAGE_FORMATS:
+                raise IntakeError(
+                    f"photo {src} is {fmt or 'an unknown'} format; intake "
+                    "accepts JPEG, PNG, or WEBP only — convert it first "
+                    "with a trusted tool (stripping GPS and identifying "
+                    "metadata), then re-run"
+                )
             exif = img.getexif()
             orientation = exif.get(EXIF_ORIENTATION_TAG)
             gps_present = EXIF_GPS_TAG in exif
@@ -385,7 +409,9 @@ def prepare_evaluation_copy(src, dest) -> dict:
             if orientation not in (None, 1):
                 img = ImageOps.exif_transpose(img)
                 transform = "exif-transpose"
-            elif fmt == "JPEG":
+            elif fmt in ("JPEG", "WEBP"):
+                # Lossy re-encode: pixels may change, so no identity
+                # check; the operator verifies the region visually.
                 transform = "re-encode"
             else:
                 transform = "none"
@@ -394,6 +420,24 @@ def prepare_evaluation_copy(src, dest) -> dict:
             if fmt == "JPEG":
                 save_kwargs = {"format": "JPEG", "quality": JPEG_RECOMPRESSION_QUALITY}
             img.save(dest, **save_kwargs)
+            if transform == "none":
+                # NB: compare in RGB, never RGBA. difference()
+                # zeroes alpha (255-255) and getbbox() ignores
+                # zero-alpha pixels, so an RGBA comparison always
+                # reports identical even when RGB differs.
+                with Image.open(src) as original, Image.open(dest) as copy:
+                    identical = original.size == copy.size and (
+                        ImageChops.difference(
+                            original.convert("RGB"), copy.convert("RGB")
+                        ).getbbox()
+                        is None
+                    )
+                if not identical:
+                    dest.unlink(missing_ok=True)
+                    raise IntakeError(
+                        f"evaluation copy {dest} failed pixel identity: "
+                        "derived bytes differ from the original"
+                    )
     except OSError as exc:
         raise IntakeError(f"cannot derive evaluation copy for {src}: {exc}") from exc
     evaluation_sha256 = hashlib.sha256(dest.read_bytes()).hexdigest()
@@ -421,6 +465,26 @@ def prepare_evaluation_copy(src, dest) -> dict:
 PHOTO_ONLY_FORBIDDEN_STATES = frozenset({"verified", "contradicted"})
 
 
+def _match_vehicle(entry_vehicle, case_vehicle, case_id) -> None:
+    """Fail unless the register vehicle matches the case vehicle.
+
+    Make, model, trim, and market compare after strip and casefold;
+    year compares as a string. Messages name the FIELD, never values.
+    """
+    entry_vehicle = entry_vehicle or {}
+    case_vehicle = case_vehicle or {}
+    for field in ("make", "model", "trim", "market"):
+        left = str(entry_vehicle.get(field) or "").strip().casefold()
+        right = str(case_vehicle.get(field) or "").strip().casefold()
+        if left != right:
+            raise IntakeError(f"case {case_id}: register vehicle.{field} mismatch")
+    if (
+        str(entry_vehicle.get("year") or "").strip()
+        != str(case_vehicle.get("year") or "").strip()
+    ):
+        raise IntakeError(f"case {case_id}: register vehicle.year mismatch")
+
+
 def validate_admission(entry: dict, case: dict) -> str:
     """Admit one register entry + manifest case pair. Returns "accepted".
 
@@ -428,18 +492,32 @@ def validate_admission(entry: dict, case: dict) -> str:
     accepted, independent equipment evidence present, reviewer
     attestation recorded, source group assigned, register claim text
     identical to the manifest's seller wording, and expected_state
-    within photo-only reach. Labels must come from independently
-    reviewed evidence — this module never calls the reconciler.
+    within photo-only reach. The register is LINKED to the manifest
+    case: evaluation hash, source group, and vehicle must all match —
+    a pair describing different evidence never admits. Labels must
+    come from independently reviewed evidence — this module never
+    calls the reconciler.
     """
     _validate_entry(entry, set())
     case_id = case.get("id")
+    require_source_group(case, "admission")
+    photo = case.get("photo") or {}
+    if entry.get("evaluation_sha256") != photo.get("sha256"):
+        raise IntakeError(
+            f"case {case_id}: register evaluation_sha256 does not match "
+            "the case photo sha256"
+        )
+    if entry.get("source_group") != case.get("source_group"):
+        raise IntakeError(
+            f"case {case_id}: register source_group does not match the case"
+        )
+    _match_vehicle(entry.get("vehicle"), case.get("vehicle"), case_id)
     if entry.get("candidate_status") != "accepted":
         raise IntakeError(f"case {case_id}: register status is not accepted")
     if entry.get("license_status") != "verified":
         raise IntakeError(f"case {case_id}: usage rights are not verified")
     if entry.get("privacy_review") != "passed":
         raise IntakeError(f"case {case_id}: manual privacy review has not passed")
-    require_source_group(case, "admission")
     advertised = (case.get("claim") or {}).get("advertised")
     if entry.get("claim_text") != advertised:
         raise IntakeError(
@@ -478,65 +556,130 @@ def _evaluations_path(dataset: str) -> Path:
     return private_dir() / f"holdout-evaluations-{dataset}.jsonl"
 
 
+def cross_split_near_duplicates(
+    dev_cases: list,
+    holdout_cases: list,
+    photo_paths: dict,
+    *,
+    dispositions: dict | None = None,
+) -> tuple:
+    """Shared cross-split near-duplicate gate (freeze AND validation).
+
+    Compares dev cases against holdout cases only; within-split pairs
+    stay a review signal elsewhere. Returns (unresolved, resolved);
+    a hit with a recorded human disposition resolves instead of
+    blocking. One helper so the two callers cannot diverge.
+    """
+    dev_ids = {case.get("id") for case in dev_cases}
+    holdout_ids = {case.get("id") for case in holdout_cases}
+    labeled = [
+        (cid, photo_paths[cid])
+        for cid in sorted(holdout_ids) + sorted(dev_ids)
+        if cid in photo_paths
+    ]
+    unresolved = []
+    resolved = []
+    for first, second, distance in find_near_duplicates(labeled):
+        if (first in dev_ids) == (second in dev_ids):
+            continue
+        key = "|".join(sorted((first, second)))
+        disposition = (dispositions or {}).get(key)
+        if disposition:
+            resolved.append(
+                {
+                    "pair": [first, second],
+                    "distance": distance,
+                    "disposition": disposition,
+                }
+            )
+        else:
+            unresolved.append({"pair": [first, second], "distance": distance})
+    return unresolved, resolved
+
+
+def _verify_manifest_bytes(cases: list, photo_paths: dict, *, where: str) -> None:
+    """Refuse unless every case's file exists and matches its digest."""
+    for case in cases:
+        cid = case.get("id")
+        path = photo_paths.get(cid)
+        if path is None:
+            raise IntakeError(f"{where}: no photo path for case {cid!r}")
+        try:
+            digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError as exc:
+            raise IntakeError(
+                f"{where}: photo file for case {cid!r} unreadable ({exc})"
+            ) from exc
+        if digest != (case.get("photo") or {}).get("sha256"):
+            raise IntakeError(f"{where}: sha256 mismatch for case {cid!r}")
+
+
 def freeze_holdout(
     *,
     dataset: str,
     manifest: dict,
+    dev_manifest: dict,
+    photo_paths: dict,
     reviewer_role: str,
     run_date=None,
-    dev_manifest: dict | None = None,
-    photo_paths: dict | None = None,
     dispositions: dict | None = None,
+    replace_reason: str | None = None,
 ) -> dict:
     """Freeze a holdout manifest after all cross-split gates pass.
 
-    Blocks on: source_group overlap, exact duplicate bytes across
-    splits, and probable near-duplicates across splits without a
-    recorded human disposition. Returns and persists the record.
+    Fail-closed: dev_manifest and photo_paths are required, the
+    manifest must be split holdout (dev split dev), every photo is
+    SHA-256-verified against its file, and an existing freeze record
+    refuses overwrite unless a replace_reason archives it first.
+    Returns and persists the record.
     """
     from datetime import date as _date
 
-    cases = manifest.get("cases", [])
+    from audits.realworld import validate_manifest
+
+    if dev_manifest is None:
+        raise IntakeError("holdout freeze refused: a dev manifest is required")
+    if photo_paths is None:
+        raise IntakeError("holdout freeze refused: photo paths are required")
+    if manifest.get("split") != "holdout":
+        raise IntakeError(
+            "holdout freeze refused: manifest split is "
+            f"{manifest.get('split')!r}, not 'holdout'"
+        )
+    if dev_manifest.get("split") != "dev":
+        raise IntakeError(
+            "holdout freeze refused: dev manifest split is "
+            f"{dev_manifest.get('split')!r}, not 'dev'"
+        )
+    cases = validate_manifest(manifest)
+    dev_cases = validate_manifest(dev_manifest)
     case_ids = sorted(case.get("id") for case in cases)
-    dev_ids: set = set()
-    if dev_manifest is not None:
-        dev_cases = dev_manifest.get("cases", [])
-        dev_ids = {case.get("id") for case in dev_cases}
-        check_cross_split(dev_cases, cases)
-        dupes = check_exact_duplicates(dev_cases + cases)
-        cross_exact = {
-            digest: ids
-            for digest, ids in dupes.items()
-            if any(cid in dev_ids for cid in ids)
-            and any(cid not in dev_ids for cid in ids)
-        }
-        if cross_exact:
-            raise IntakeError(
-                f"holdout freeze refused: exact duplicate bytes across splits {cross_exact}"
-            )
-    near_hits = []
-    if photo_paths:
-        labeled = [
-            (cid, photo_paths[cid])
-            for cid in case_ids + sorted(dev_ids)
-            if cid in photo_paths
-        ]
-        for first, second, distance in find_near_duplicates(labeled):
-            if (first in dev_ids) == (second in dev_ids):
-                continue
-            key = "|".join(sorted((first, second)))
-            if not (dispositions or {}).get(key):
-                raise IntakeError(
-                    f"holdout freeze refused: probable near-duplicate {first}/{second} "
-                    f"(distance {distance}) unresolved; record a human disposition"
-                )
-            near_hits.append(
-                {
-                    "pair": [first, second],
-                    "distance": distance,
-                    "disposition": dispositions[key],
-                }
-            )
+    dev_ids = {case.get("id") for case in dev_cases}
+    for cid in case_ids + sorted(dev_ids):
+        if cid not in photo_paths:
+            raise IntakeError(f"holdout freeze refused: no photo path for case {cid!r}")
+    _verify_manifest_bytes(cases, photo_paths, where="holdout")
+    _verify_manifest_bytes(dev_cases, photo_paths, where="dev")
+    check_cross_split(dev_cases, cases)
+    dupes = check_exact_duplicates(dev_cases + cases)
+    cross_exact = {
+        digest: ids
+        for digest, ids in dupes.items()
+        if any(cid in dev_ids for cid in ids) and any(cid not in dev_ids for cid in ids)
+    }
+    if cross_exact:
+        raise IntakeError(
+            f"holdout freeze refused: exact duplicate bytes across splits {cross_exact}"
+        )
+    unresolved, resolved = cross_split_near_duplicates(
+        dev_cases, cases, photo_paths, dispositions=dispositions
+    )
+    if unresolved:
+        first, second = unresolved[0]["pair"]
+        raise IntakeError(
+            f"holdout freeze refused: probable near-duplicate {first}/{second} "
+            "unresolved; record a human disposition"
+        )
     record = {
         "dataset": dataset,
         "split": manifest.get("split"),
@@ -545,12 +688,68 @@ def freeze_holdout(
         "date": run_date or _date.today().isoformat(),
         "reviewer_role": reviewer_role,
         "dispositions": dispositions or {},
-        "resolved_near_duplicates": near_hits,
+        "resolved_near_duplicates": resolved,
     }
     target = _freeze_path(dataset)
     target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and replace_reason is None:
+        raise IntakeError(
+            f"holdout freeze refused: {target} already exists; re-freeze only "
+            "with a recorded replace_reason"
+        )
+    if target.exists():
+        for n in range(1, 1000):
+            archived = target.parent / f"{target.stem}.superseded-{n}.json"
+            if not archived.exists():
+                break
+        else:  # pragma: no cover - exhaustion guard
+            raise IntakeError("holdout freeze refused: no free superseded slot")
+        archived.write_text(target.read_text(encoding="utf-8"), encoding="utf-8")
+        record["supersedes"] = json.loads(archived.read_text(encoding="utf-8")).get(
+            "manifest_sha256"
+        )
+        record["replace_reason"] = replace_reason
     target.write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
     return record
+
+
+def freeze_from_paths(
+    *,
+    manifest_path,
+    dev_manifest_path,
+    photos_root,
+    other_photos_root=None,
+    reviewer_role: str,
+    dispositions: dict | None = None,
+    replace_reason: str | None = None,
+) -> dict:
+    """Freeze from manifest files, deriving photo paths from photos roots.
+
+    Paths resolve under photos_root (holdout) and other_photos_root
+    (dev, defaulting to the dev manifest's own directory). Zero
+    inference; thin wrapper for the realworld-freeze command.
+    """
+    holdout = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    dev = json.loads(Path(dev_manifest_path).read_text(encoding="utf-8"))
+    photo_paths = {}
+    for case in holdout.get("cases", []):
+        photo_paths[case.get("id")] = Path(photos_root) / (case.get("photo") or {}).get(
+            "path", ""
+        )
+    dev_root = other_photos_root or Path(dev_manifest_path).parent
+    for case in dev.get("cases", []):
+        photo_paths[case.get("id")] = Path(dev_root) / (case.get("photo") or {}).get(
+            "path", ""
+        )
+    return freeze_holdout(
+        dataset=holdout.get("dataset", "unknown"),
+        manifest=holdout,
+        dev_manifest=dev,
+        photo_paths=photo_paths,
+        reviewer_role=reviewer_role,
+        dispositions=dispositions,
+        replace_reason=replace_reason,
+    )
 
 
 def check_holdout_freeze(dataset: str, manifest: dict) -> dict:
@@ -720,9 +919,11 @@ def validate_intake(
     manifest,
     photos_root=None,
     other_manifest=None,
+    other_photos_root=None,
     entries: dict | None = None,
     enforce_freeze: bool = False,
     photo_paths: dict | None = None,
+    dispositions: dict | None = None,
 ) -> dict:
     """Run the full offline intake validation; never raises on findings.
 
@@ -731,6 +932,9 @@ def validate_intake(
     reports, and the freeze status. Without a linked register,
     rights/privacy/equipment admission is reported as not measured;
     the photo-only state rule still applies to every manifest.
+    Cross-split near-duplicates (via the shared helper also used by
+    the freeze) fail unless a disposition is supplied; within-split
+    pairs stay a review signal in the report.
     """
     from audits.realworld import validate_manifest
 
@@ -763,6 +967,7 @@ def validate_intake(
             except IntakeError as exc:
                 failures.append(f"case {case.get('id')}: {exc}")
     admission_measured = bool(entries)
+    other_cases = []
     if other_manifest is not None:
         if isinstance(other_manifest, (str, Path)):
             other_manifest = json.loads(
@@ -797,6 +1002,12 @@ def validate_intake(
             candidate = root / (case.get("photo") or {}).get("path", "")
             if candidate.is_file():
                 auto_paths[case.get("id")] = candidate
+    if other_cases and other_photos_root is not None:
+        other_root = Path(other_photos_root)
+        for case in other_cases:
+            candidate = other_root / (case.get("photo") or {}).get("path", "")
+            if candidate.is_file():
+                auto_paths[case.get("id")] = candidate
     merged_paths = {**auto_paths, **(photo_paths or {})}
     if merged_paths:
         labeled = [
@@ -811,6 +1022,26 @@ def validate_intake(
             ]
         except IntakeError as exc:
             failures.append(str(exc))
+    if other_cases:
+        if manifest.get("split") == "holdout":
+            gate_dev, gate_holdout = other_cases, cases
+        else:
+            gate_dev, gate_holdout = cases, other_cases
+        try:
+            unresolved, resolved = cross_split_near_duplicates(
+                gate_dev, gate_holdout, merged_paths, dispositions=dispositions
+            )
+        except IntakeError as exc:
+            failures.append(str(exc))
+        else:
+            for hit in resolved:
+                near_pairs.append({**hit, "resolved": True})
+            for hit in unresolved:
+                first, second = hit["pair"]
+                failures.append(
+                    f"cross-split near-duplicate {first}/{second} unresolved; "
+                    "record a human disposition"
+                )
     freeze: dict = {"status": "not applicable"}
     if manifest.get("split") == "holdout":
         dataset = manifest.get("dataset", "unknown")
@@ -1025,6 +1256,29 @@ def audit_phase_c_readiness(doc: dict) -> dict:
             "total": len(doc["sources"]),
         },
     }
+
+
+def format_validate_output(report: dict, *, public_only: bool = False) -> str:
+    """Render validate_intake output; the ``passed`` key stays unchanged.
+
+    The printed header always states whether admission was measured.
+    Without a linked register this is NOT a completed dataset, said
+    plainly alongside the unverified evidence classes.
+    """
+    measured = "measured" if report["admission_measured"] else "not measured"
+    lines = [f"passed={report['passed']} cases={report['cases']} admission={measured}"]
+    if public_only:
+        lines.append(json.dumps(report["public_report"], indent=2))
+        return "\n".join(lines)
+    if not report["admission_measured"]:
+        lines.append(
+            "NOT a completed dataset: rights, privacy, and equipment "
+            "evidence are unverified (no register linked)."
+        )
+    for failure in report["failures"]:
+        lines.append(f"- {failure}")
+    lines.append(json.dumps(report["public_report"], indent=2))
+    return "\n".join(lines)
 
 
 def load_register() -> dict:

@@ -71,7 +71,7 @@ def _register_entry(**overrides):
         "candidate_status": "accepted",
         "status_reason": "rights verified; equipment confirmed",
         "original_sha256": "b" * 64,
-        "evaluation_sha256": "c" * 64,
+        "evaluation_sha256": "d" * 64,
         "reviewer_role": "dataset-reviewer",
         "review_attestation": ("labels reviewed without access to any model output"),
     }
@@ -203,6 +203,46 @@ def test_value_scan_ignores_sha256_and_ordinary_prose():
         },
         "case",
     )
+
+
+def test_value_scan_flags_strings_inside_lists():
+    """VINs, emails, and phones in list items are flagged at any depth."""
+    from audits.realworld_intake import scan_values
+
+    with pytest.raises(ValueError):
+        scan_values({"notes": ["see 1HGCM82633A004352 here"]}, "case")
+    with pytest.raises(ValueError):
+        scan_values({"contacts": [["jane.doe@example.com"]]}, "case")
+    with pytest.raises(ValueError):
+        scan_values({"history": [{"phone": "+1-555-014-2288"}]}, "case")
+    with pytest.raises(ValueError):
+        scan_values([["1hgcm82633a004352"]], "case")
+
+
+def test_value_scan_passes_benign_lists_and_digests():
+    """Ordinary list items and digest lists are not flagged."""
+    from audits.realworld_intake import scan_values
+
+    scan_values({"tags": ["steering", "wheel", "button", "2021 model"]}, "case")
+    scan_values({"notes": []}, "case")
+    scan_values(
+        {
+            "photo": {
+                "sha256": "e4f081b7623b6e3789a7ab41e34e335bd25d705332fe8d18fd5ff963da7d6441"
+            }
+        },
+        "case",
+    )
+
+
+def test_value_scan_list_error_hides_value():
+    """List-item rejections name the position, never the value."""
+    from audits.realworld_intake import scan_values
+
+    secret = "1HGCM82633A004352"
+    with pytest.raises(ValueError) as excinfo:
+        scan_values({"notes": [f"vin {secret} here"]}, "case")
+    assert secret not in str(excinfo.value)
 
 
 def test_value_scan_never_repeats_the_value():
@@ -346,6 +386,56 @@ def test_evaluation_copy_bakes_exif_rotation_and_records_it(tmp_path):
     assert inspect_image(dest)["orientation"] is None
 
 
+def test_none_transform_verifies_pixel_identity(tmp_path, monkeypatch):
+    """A corrupted 'none' copy is caught and the derived file removed."""
+    from PIL import Image
+
+    from audits import realworld_intake as intake
+    from audits.realworld_intake import IntakeError
+
+    src = tmp_path / "orig.png"
+    Image.new("RGB", (16, 16), (10, 10, 10)).save(src)
+    real_save = Image.Image.save
+
+    def corrupting_save(self, fp, **kwargs):
+        real_save(self, fp, **kwargs)
+        if str(fp).endswith("eval.png"):
+            altered = Image.open(fp)
+            altered.putpixel((0, 0), (0, 0, 0))
+            real_save(altered, fp)
+
+    monkeypatch.setattr(Image.Image, "save", corrupting_save)
+    with pytest.raises(IntakeError, match="pixel identity"):
+        intake.prepare_evaluation_copy(src, tmp_path / "eval.png")
+    assert not (tmp_path / "eval.png").exists()
+
+
+def test_webp_takes_reencode_path(tmp_path):
+    """WEBP is allowed through the documented lossy path."""
+    from PIL import Image
+
+    from audits import realworld_intake as intake
+
+    src = tmp_path / "orig.webp"
+    Image.new("RGB", (16, 16), (10, 200, 10)).save(src, "WEBP")
+    report = intake.prepare_evaluation_copy(src, tmp_path / "eval.webp")
+    assert report["transform"] == "re-encode"
+    assert report["format"] == "WEBP"
+
+
+def test_unsupported_format_rejected(tmp_path):
+    """Formats outside the app allowlist are refused with guidance."""
+    from PIL import Image
+
+    from audits import realworld_intake as intake
+    from audits.realworld_intake import IntakeError
+
+    src = tmp_path / "orig.gif"
+    Image.new("RGB", (16, 16), (10, 10, 10)).save(src, "GIF")
+    with pytest.raises(IntakeError, match="convert"):
+        intake.prepare_evaluation_copy(src, tmp_path / "eval.gif")
+
+
 def test_gps_metadata_quarantines_photo(tmp_path):
     """Images carrying GPS metadata are refused, not silently stripped."""
 
@@ -446,6 +536,71 @@ def test_admission_requires_rights_privacy_equipment():
             validate_admission({**entry, field: bad}, case)
 
 
+def test_admission_rejects_hash_mismatch():
+    """Register evaluation hash must equal the case photo hash."""
+    from audits.realworld_intake import IntakeError, validate_admission
+
+    entry, case = _admission_pair()
+    entry["evaluation_sha256"] = "e" * 64
+    with pytest.raises(IntakeError) as excinfo:
+        validate_admission(entry, case)
+    assert "evaluation_sha256" in str(excinfo.value)
+    assert "e" * 64 not in str(excinfo.value)
+
+
+def test_admission_rejects_missing_source_group():
+    """A case with no (or empty) source_group fails the explicit gate."""
+    from audits.realworld_intake import IntakeError, validate_admission
+
+    entry, case = _admission_pair()
+    case.pop("source_group")
+    with pytest.raises(IntakeError, match="has no source_group"):
+        validate_admission(entry, case)
+    entry, case = _admission_pair()
+    case["source_group"] = ""
+    with pytest.raises(IntakeError, match="has no source_group"):
+        validate_admission(entry, case)
+
+
+def test_admission_rejects_group_mismatch():
+    """Register and case source groups must be identical (opaque)."""
+    from audits.realworld_intake import IntakeError, validate_admission
+
+    entry, case = _admission_pair()
+    entry["source_group"] = "group-other"
+    with pytest.raises(IntakeError) as excinfo:
+        validate_admission(entry, case)
+    assert "source_group" in str(excinfo.value)
+    assert "group-other" not in str(excinfo.value)
+
+
+def test_admission_rejects_vehicle_mismatch():
+    """Register vehicle must match the case vehicle field by field."""
+    from audits.realworld_intake import IntakeError, validate_admission
+
+    entry, case = _admission_pair()
+    entry["vehicle"] = {**entry["vehicle"], "model": "Optima"}
+    with pytest.raises(IntakeError) as excinfo:
+        validate_admission(entry, case)
+    assert "vehicle" in str(excinfo.value)
+    assert "Optima" not in str(excinfo.value)
+
+
+def test_admission_vehicle_compare_ignores_case_and_spacing():
+    """Make/model/trim/market compare after strip+casefold; year as string."""
+    from audits.realworld_intake import validate_admission
+
+    entry, case = _admission_pair()
+    entry["vehicle"] = {
+        "make": "  kia ",
+        "model": "FORTE",
+        "year": "2021",
+        "trim": "gt-line",
+        "market": " us",
+    }
+    assert validate_admission(entry, case) == "accepted"
+
+
 def test_admission_requires_matching_claim_text():
     """Register claim text must equal the manifest's seller wording."""
     from audits.realworld_intake import IntakeError, validate_admission
@@ -502,14 +657,229 @@ def _photo_manifest(ids, digest="f" * 64):
     )
 
 
+def _write_case_photo(tmp_path, name, color=(200, 30, 30)):
+    import hashlib
+
+    from PIL import Image
+
+    path = tmp_path / "photos" / f"{name}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (32, 32), color).save(path)
+    return path, hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _freeze_pair(tmp_path, *, holdout_ids=("h1", "h2"), dev_ids=("d1",)):
+    """Real-file dev/holdout manifests with matching hashes for freeze tests."""
+    holdout_cases = []
+    dev_cases = []
+    photo_paths = {}
+    for cid in holdout_ids:
+        path, digest = _write_case_photo(tmp_path / "hold", cid)
+        holdout_cases.append(
+            {
+                **_manifest_case(id=cid),
+                "source_group": f"group-{cid}",
+                "photo": {
+                    "path": f"{cid}.png",
+                    "sha256": digest,
+                    "provenance": "evaluator photograph",
+                },
+            }
+        )
+        photo_paths[cid] = path
+    for cid in dev_ids:
+        import hashlib as _hashlib
+
+        from PIL import Image as _Image
+
+        dev_path = tmp_path / "dev" / "photos" / f"{cid}.png"
+        dev_path.parent.mkdir(parents=True, exist_ok=True)
+        split = _Image.new("RGB", (32, 32), (30, 30, 200))
+        for x in range(16, 32):
+            for y in range(32):
+                split.putpixel((x, y), (230, 220, 40))
+        split.save(dev_path)
+        digest = _hashlib.sha256(dev_path.read_bytes()).hexdigest()
+        dev_cases.append(
+            {
+                **_manifest_case(id=cid),
+                "source_group": f"group-{cid}",
+                "photo": {
+                    "path": f"{cid}.png",
+                    "sha256": digest,
+                    "provenance": "evaluator photograph",
+                },
+            }
+        )
+        photo_paths[cid] = dev_path
+    holdout = {
+        "manifest_version": "realworld-v1",
+        "dataset": "pilot",
+        "split": "holdout",
+        "cases": holdout_cases,
+    }
+    dev = {
+        "manifest_version": "realworld-v1",
+        "dataset": "pilot",
+        "split": "dev",
+        "cases": dev_cases,
+    }
+    return holdout, dev, photo_paths
+
+
+def test_freeze_refuses_without_dev_manifest(tmp_path, monkeypatch):
+    """A freeze with no dev manifest (or no photo paths) cannot proceed."""
+    from audits.realworld_intake import IntakeError, freeze_holdout
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    holdout, dev, photo_paths = _freeze_pair(tmp_path)
+    with pytest.raises(IntakeError):
+        freeze_holdout(
+            dataset="pilot",
+            manifest=holdout,
+            dev_manifest=None,
+            photo_paths=photo_paths,
+            reviewer_role="dataset-reviewer",
+        )
+    with pytest.raises(IntakeError):
+        freeze_holdout(
+            dataset="pilot",
+            manifest=holdout,
+            dev_manifest=dev,
+            photo_paths=None,
+            reviewer_role="dataset-reviewer",
+        )
+
+
+def test_freeze_refuses_incomplete_photo_coverage(tmp_path, monkeypatch):
+    """Every case in both manifests needs a photo path."""
+    from audits.realworld_intake import IntakeError, freeze_holdout
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    holdout, dev, photo_paths = _freeze_pair(tmp_path)
+    photo_paths.pop("h1")
+    with pytest.raises(IntakeError) as excinfo:
+        freeze_holdout(
+            dataset="pilot",
+            manifest=holdout,
+            dev_manifest=dev,
+            photo_paths=photo_paths,
+            reviewer_role="dataset-reviewer",
+        )
+    assert "h1" in str(excinfo.value)
+
+
+def test_freeze_refuses_wrong_splits(tmp_path, monkeypatch):
+    """Only a holdout manifest against a dev manifest may freeze."""
+    from audits.realworld_intake import IntakeError, freeze_holdout
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    holdout, dev, photo_paths = _freeze_pair(tmp_path)
+    dev_split = {**holdout, "split": "dev"}
+    with pytest.raises(IntakeError):
+        freeze_holdout(
+            dataset="pilot",
+            manifest=dev_split,
+            dev_manifest=dev,
+            photo_paths=photo_paths,
+            reviewer_role="dataset-reviewer",
+        )
+    holdout_dev = {**dev, "split": "holdout"}
+    with pytest.raises(IntakeError):
+        freeze_holdout(
+            dataset="pilot",
+            manifest=holdout,
+            dev_manifest=holdout_dev,
+            photo_paths=photo_paths,
+            reviewer_role="dataset-reviewer",
+        )
+
+
+def test_freeze_refuses_sha_mismatch(tmp_path, monkeypatch):
+    """Bytes that do not match the manifest digest block the freeze."""
+    from audits.realworld_intake import IntakeError, freeze_holdout
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    holdout, dev, photo_paths = _freeze_pair(tmp_path)
+    holdout["cases"][0]["photo"]["sha256"] = "0" * 64
+    with pytest.raises(IntakeError) as excinfo:
+        freeze_holdout(
+            dataset="pilot",
+            manifest=holdout,
+            dev_manifest=dev,
+            photo_paths=photo_paths,
+            reviewer_role="dataset-reviewer",
+        )
+    assert "sha256" in str(excinfo.value)
+
+
+def test_freeze_refuses_overwrite_without_reason(tmp_path, monkeypatch):
+    """An existing freeze is never silently overwritten."""
+    from audits.realworld_intake import IntakeError, freeze_holdout
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    holdout, dev, photo_paths = _freeze_pair(tmp_path)
+    first = freeze_holdout(
+        dataset="pilot",
+        manifest=holdout,
+        dev_manifest=dev,
+        photo_paths=photo_paths,
+        reviewer_role="dataset-reviewer",
+    )
+    with pytest.raises(IntakeError):
+        freeze_holdout(
+            dataset="pilot",
+            manifest=holdout,
+            dev_manifest=dev,
+            photo_paths=photo_paths,
+            reviewer_role="dataset-reviewer",
+        )
+    assert first["manifest_sha256"]
+
+
+def test_freeze_replace_archives_prior_record(tmp_path, monkeypatch):
+    """A recorded reason archives the prior freeze and links supersession."""
+    from audits.realworld_intake import check_holdout_freeze, freeze_holdout
+
+    monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
+    holdout, dev, photo_paths = _freeze_pair(tmp_path)
+    first = freeze_holdout(
+        dataset="pilot",
+        manifest=holdout,
+        dev_manifest=dev,
+        photo_paths=photo_paths,
+        reviewer_role="dataset-reviewer",
+    )
+    second = freeze_holdout(
+        dataset="pilot",
+        manifest=holdout,
+        dev_manifest=dev,
+        photo_paths=photo_paths,
+        reviewer_role="dataset-reviewer",
+        replace_reason="re-freeze after adding reviewer role",
+    )
+    assert second["supersedes"] == first["manifest_sha256"]
+    assert second["replace_reason"] == "re-freeze after adding reviewer role"
+    archived = list((tmp_path / "priv").glob("holdout-freeze-pilot.superseded-*.json"))
+    assert len(archived) == 1
+    assert (
+        check_holdout_freeze("pilot", holdout)["manifest_sha256"]
+        == second["manifest_sha256"]
+    )
+
+
 def test_holdout_freeze_round_trip(tmp_path, monkeypatch):
     """Freeze records manifest hash + inventory; unchanged check passes."""
     from audits.realworld_intake import check_holdout_freeze, freeze_holdout
 
     monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
-    manifest = _photo_manifest(["h1", "h2"])
+    manifest, dev, photo_paths = _freeze_pair(tmp_path)
     record = freeze_holdout(
-        dataset="pilot", manifest=manifest, reviewer_role="dataset-reviewer"
+        dataset="pilot",
+        manifest=manifest,
+        dev_manifest=dev,
+        photo_paths=photo_paths,
+        reviewer_role="dataset-reviewer",
     )
     assert record["manifest_sha256"]
     assert record["case_ids"] == ["h1", "h2"]
@@ -528,8 +898,14 @@ def test_holdout_change_detected(tmp_path, monkeypatch):
     )
 
     monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
-    manifest = _photo_manifest(["h1", "h2"])
-    freeze_holdout(dataset="pilot", manifest=manifest, reviewer_role="dataset-reviewer")
+    manifest, dev, photo_paths = _freeze_pair(tmp_path)
+    freeze_holdout(
+        dataset="pilot",
+        manifest=manifest,
+        dev_manifest=dev,
+        photo_paths=photo_paths,
+        reviewer_role="dataset-reviewer",
+    )
     tampered = _photo_manifest(["h1", "h2", "h3"])
     with pytest.raises(IntakeError):
         check_holdout_freeze("pilot", tampered)
@@ -544,28 +920,65 @@ def test_missing_freeze_record_reported(tmp_path, monkeypatch):
         check_holdout_freeze("pilot", _photo_manifest(["h1"]))
 
 
+def _split_case(cid, group, photo_name, digest):
+    return {
+        **_manifest_case(id=cid),
+        "source_group": group,
+        "photo": {
+            "path": photo_name,
+            "sha256": digest,
+            "provenance": "evaluator photograph",
+        },
+    }
+
+
+def _split_manifest(split, cases):
+    return {
+        "manifest_version": "realworld-v1",
+        "dataset": "pilot",
+        "split": split,
+        "cases": cases,
+    }
+
+
 def test_duplicates_block_freeze_until_disposition(tmp_path, monkeypatch):
     """Exact and near duplicates across splits block the freeze."""
+    import hashlib
+    import shutil
+
     from PIL import Image
 
     from audits.realworld_intake import IntakeError, freeze_holdout
 
     monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
-    dev = _photo_manifest(["d1"])
-    holdout = _photo_manifest(["h1"])  # same digest "f"*64 as dev
+    red = tmp_path / "red.png"
+    Image.new("RGB", (32, 32), (200, 30, 30)).save(red)
+    red_sha = hashlib.sha256(red.read_bytes()).hexdigest()
+    dev = _split_manifest("dev", [_split_case("d1", "group-d1", "red.png", red_sha)])
+    same = tmp_path / "same.png"
+    shutil.copy(red, same)
+    holdout = _split_manifest(
+        "holdout", [_split_case("h1", "group-h1", "same.png", red_sha)]
+    )
+    photos = {"d1": red, "h1": same}
     with pytest.raises(IntakeError):
         freeze_holdout(
             dataset="pilot",
             manifest=holdout,
             dev_manifest=dev,
+            photo_paths=photos,
             reviewer_role="dataset-reviewer",
         )
 
-    distinct = _photo_manifest(["h1"], digest="e" * 64)
-    red = tmp_path / "red.png"
-    Image.new("RGB", (32, 32), (200, 30, 30)).save(red)
-    photos = {"d1": tmp_path / "dev.png", "h1": red}
-    Image.new("RGB", (32, 32), (200, 30, 30)).save(photos["d1"])
+    near = tmp_path / "near.png"
+    altered = Image.open(red)
+    altered.putpixel((0, 0), (201, 30, 30))
+    altered.save(near)
+    near_sha = hashlib.sha256(near.read_bytes()).hexdigest()
+    distinct = _split_manifest(
+        "holdout", [_split_case("h1", "group-h1", "near.png", near_sha)]
+    )
+    photos = {"d1": red, "h1": near}
     with pytest.raises(IntakeError):
         freeze_holdout(
             dataset="pilot",
@@ -688,7 +1101,8 @@ def test_validate_intake_surfaces_admission_failure():
     """A pending license in the linked register fails the run."""
     from audits.realworld_intake import validate_intake
 
-    manifest = _photo_manifest(["case-zz-1"])
+    manifest = _photo_manifest(["case-zz-1"], digest="d" * 64)
+    manifest["cases"][0]["source_group"] = "group-a1b2c3"
     entry = _register_entry(id="case-zz-1", license_status="pending")
     report = validate_intake(manifest=manifest, entries={"case-zz-1": entry})
     assert report["passed"] is False
@@ -740,6 +1154,79 @@ def test_validate_intake_detects_tampered_photo_bytes(tmp_path):
     report = validate_intake(manifest=manifest, photos_root=tmp_path / "sample")
     assert report["passed"] is False
     assert any("sha256 mismatch" in failure for failure in report["failures"])
+
+
+def _near_dupe_pair(tmp_path):
+    """Dev/holdout manifests whose photos differ by one pixel."""
+    import hashlib
+
+    from PIL import Image
+
+    hold_dir = tmp_path / "hold"
+    dev_dir = tmp_path / "devp"
+    hold_dir.mkdir(parents=True, exist_ok=True)
+    dev_dir.mkdir(parents=True, exist_ok=True)
+    red = hold_dir / "h.png"
+    Image.new("RGB", (32, 32), (200, 30, 30)).save(red)
+    near = dev_dir / "d.png"
+    altered = Image.open(red)
+    altered.putpixel((0, 0), (201, 30, 30))
+    altered.save(near)
+
+    def manifest(split, cid, group, path):
+        return {
+            "manifest_version": "realworld-v1",
+            "dataset": "pilot",
+            "split": split,
+            "cases": [
+                {
+                    **_manifest_case(id=cid),
+                    "source_group": group,
+                    "photo": {
+                        "path": path.name,
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                        "provenance": "evaluator photograph",
+                    },
+                }
+            ],
+        }
+
+    return (
+        manifest("holdout", "h1", "group-h1", red),
+        manifest("dev", "d1", "group-d1", near),
+        hold_dir,
+        dev_dir,
+    )
+
+
+def test_validate_flags_cross_split_near_duplicate(tmp_path):
+    """An unresolved cross-split near-duplicate fails validation."""
+    from audits.realworld_intake import validate_intake
+
+    holdout, dev, hold_dir, dev_dir = _near_dupe_pair(tmp_path)
+    report = validate_intake(
+        manifest=holdout,
+        photos_root=hold_dir,
+        other_manifest=dev,
+        other_photos_root=dev_dir,
+    )
+    assert report["passed"] is False
+    assert any("near-duplicate" in failure for failure in report["failures"])
+
+
+def test_validate_passes_cross_split_near_duplicate_with_disposition(tmp_path):
+    """A recorded disposition resolves the cross-split near-duplicate."""
+    from audits.realworld_intake import validate_intake
+
+    holdout, dev, hold_dir, dev_dir = _near_dupe_pair(tmp_path)
+    report = validate_intake(
+        manifest=holdout,
+        photos_root=hold_dir,
+        other_manifest=dev,
+        other_photos_root=dev_dir,
+        dispositions={"d1|h1": "distinct vehicles confirmed by dataset-reviewer"},
+    )
+    assert report["passed"] is True, report["failures"]
 
 
 def test_validate_intake_public_branch_has_no_identifiers():
@@ -917,6 +1404,40 @@ def test_phase_c_audit_summarizes_blocked_candidates():
     assert audit["ready"] == ["cand-ready-001"]
     assert audit["blocked"][0]["id"] == "cand-forte-2015-dash"
     assert audit["blocked"][0]["missing"]
+
+
+def test_validate_print_says_not_measured_without_register():
+    """No register: the printed line admits admission was not measured."""
+    import json
+
+    from audits.realworld_intake import format_validate_output, validate_intake
+
+    manifest = json.loads(
+        (REPO_ROOT / "fixtures" / "realworld-sample" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    report = validate_intake(
+        manifest=manifest, photos_root=REPO_ROOT / "fixtures" / "realworld-sample"
+    )
+    text = format_validate_output(report)
+    assert "passed=True" in text
+    assert "admission=not measured" in text
+    assert "NOT a completed dataset" in text
+    assert "rights, privacy, and equipment evidence are unverified" in text
+
+
+def test_validate_print_says_measured_with_register():
+    """Linked register: the printed line says admission was measured."""
+    from audits.realworld_intake import format_validate_output, validate_intake
+
+    manifest = _photo_manifest(["case-zz-1"], digest="d" * 64)
+    manifest["cases"][0]["source_group"] = "group-a1b2c3"
+    entry = _register_entry(id="case-zz-1")
+    report = validate_intake(manifest=manifest, entries={"case-zz-1": entry})
+    text = format_validate_output(report)
+    assert "admission=measured" in text
+    assert "NOT a completed dataset" not in text
 
 
 def test_intake_never_derives_labels_from_reconciliation():

@@ -9,6 +9,9 @@ Usage:
                                                     # paired live eval, needs approval
     uv run python evals/run.py realworld-validate --manifest <path>
                                                     # zero inference, always safe
+    uv run python evals/run.py realworld-freeze --manifest <holdout> \
+        --other-manifest <dev> --reviewer-role <role>
+                                                    # zero inference, always safe
 
 ``muse-live`` refuses to run unless ``VCC_LIVE_SMOKE=1`` is set, a Meta
 (Muse) key is present, and the estimated spend is under ``--max-spend``
@@ -80,7 +83,12 @@ from audits.realworld import (
     summarize,
     validate_manifest,
 )
-from audits.realworld_intake import validate_intake, validate_register
+from audits.realworld_intake import (
+    format_validate_output,
+    freeze_from_paths,
+    validate_intake,
+    validate_register,
+)
 from django.conf import settings
 
 CASES = REPO / "evals" / "cases" / "v1"
@@ -275,8 +283,10 @@ def run_intake_validate(
     photos_root: Path,
     *,
     other_manifest=None,
+    other_photos_root=None,
     register_path=None,
     enforce_freeze: bool = False,
+    dispositions_path=None,
 ) -> dict:
     """Zero-inference intake validation: schema, privacy, hashes, gates.
 
@@ -290,12 +300,50 @@ def run_intake_validate(
         register = json.loads(Path(register_path).read_text(encoding="utf-8"))
         validate_register(register)
         entries = {entry["id"]: entry for entry in register["entries"]}
+    dispositions = None
+    if dispositions_path is not None:
+        dispositions = json.loads(Path(dispositions_path).read_text(encoding="utf-8"))
     return validate_intake(
         manifest=manifest_path,
         photos_root=photos_root,
         other_manifest=other_manifest,
+        other_photos_root=(
+            other_photos_root
+            or (Path(other_manifest).parent if other_manifest else None)
+        ),
         entries=entries,
         enforce_freeze=enforce_freeze,
+        dispositions=dispositions,
+    )
+
+
+def run_intake_freeze(
+    manifest_path: Path,
+    photos_root: Path,
+    *,
+    dev_manifest_path,
+    other_photos_root=None,
+    reviewer_role: str,
+    dispositions_path=None,
+    replace_reason=None,
+) -> dict:
+    """Zero-inference holdout freeze. Never calls providers.
+
+    Photo paths derive from the photos roots. The freeze refuses
+    without a dev manifest, full photo coverage, matching digests, a
+    holdout split, and (on re-freeze) a recorded replace reason.
+    """
+    dispositions = None
+    if dispositions_path is not None:
+        dispositions = json.loads(Path(dispositions_path).read_text(encoding="utf-8"))
+    return freeze_from_paths(
+        manifest_path=manifest_path,
+        dev_manifest_path=dev_manifest_path,
+        photos_root=photos_root,
+        other_photos_root=other_photos_root or Path(dev_manifest_path).parent,
+        reviewer_role=reviewer_role,
+        dispositions=dispositions,
+        replace_reason=replace_reason,
     )
 
 
@@ -675,6 +723,7 @@ def main() -> None:
             "realworld-dryrun",
             "realworld-live",
             "realworld-validate",
+            "realworld-freeze",
         ],
     )
     parser.add_argument("--max-spend", type=float, default=0.25)
@@ -700,7 +749,34 @@ def main() -> None:
         "--other-manifest",
         type=str,
         default=None,
-        help="realworld-validate: second manifest for cross-split checks.",
+        help="realworld-validate/freeze: second manifest for cross-split checks.",
+    )
+    parser.add_argument(
+        "--other-photos-root",
+        type=str,
+        default=None,
+        help="realworld-validate/freeze: photos root for the other manifest "
+        "(defaults to its own directory).",
+    )
+    parser.add_argument(
+        "--dispositions",
+        type=str,
+        default=None,
+        help="realworld-validate/freeze: JSON file mapping 'idA|idB' to a "
+        "human near-duplicate disposition.",
+    )
+    parser.add_argument(
+        "--reviewer-role",
+        type=str,
+        default=None,
+        help="realworld-freeze: reviewer role recording the freeze.",
+    )
+    parser.add_argument(
+        "--replace-reason",
+        type=str,
+        default=None,
+        help="realworld-freeze: recorded reason for replacing a freeze; "
+        "archives the prior record instead of overwriting.",
     )
     parser.add_argument(
         "--register",
@@ -733,17 +809,32 @@ def main() -> None:
             manifest_path,
             _resolve_photos_root(manifest_path, args.photos_root),
             other_manifest=args.other_manifest,
+            other_photos_root=args.other_photos_root,
             register_path=args.register,
             enforce_freeze=args.enforce_freeze,
+            dispositions_path=args.dispositions,
         )
-        if args.public_report:
-            print(json.dumps(report["public_report"], indent=2))
-        else:
-            print(f"passed={report['passed']} cases={report['cases']}")
-            for failure in report["failures"]:
-                print(f"- {failure}")
-            print(json.dumps(report["public_report"], indent=2))
+        print(format_validate_output(report, public_only=args.public_report))
         name = f"{date.today().isoformat()}-realworld-validate.json"
+    elif args.eval == "realworld-freeze":
+        if not args.manifest:
+            raise SystemExit("realworld-freeze needs --manifest <path>")
+        if not args.other_manifest:
+            raise SystemExit("realworld-freeze needs --other-manifest <path>")
+        if not args.reviewer_role:
+            raise SystemExit("realworld-freeze needs --reviewer-role <role>")
+        manifest_path = Path(args.manifest)
+        report = run_intake_freeze(
+            manifest_path,
+            _resolve_photos_root(manifest_path, args.photos_root),
+            dev_manifest_path=args.other_manifest,
+            other_photos_root=args.other_photos_root,
+            reviewer_role=args.reviewer_role,
+            dispositions_path=args.dispositions,
+            replace_reason=args.replace_reason,
+        )
+        print(json.dumps(report, indent=2))
+        name = f"{date.today().isoformat()}-realworld-freeze.json"
     elif args.eval == "realworld-dryrun":
         if not args.manifest:
             raise SystemExit("realworld-dryrun needs --manifest <path>")
