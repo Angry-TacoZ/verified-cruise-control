@@ -865,6 +865,8 @@ def main() -> None:
     dest.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
     if report.get("eval") == "realworld-intake-validate":
         print(f"intake valid={report['passed']} cases={report['cases']} -> {dest}")
+    elif "manifest_sha256" in report and "case_ids" in report:
+        print(f"frozen {report['dataset']} cases={report['case_ids']} -> {dest}")
     elif "summary" in report:
         print(
             f"paired_cases={report['summary']['paired_cases']} "
