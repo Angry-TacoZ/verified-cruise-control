@@ -155,3 +155,8 @@ Branch: feat/005-realworld-intake. Zero inference, zero spend. Phase A complete 
 
 8 Commons candidates in evals/realworld/private/candidate-sources.json (gitignored, metadata only, zero bytes downloaded). All license-verified (CC BY 2.0/4.0, CC BY-SA 4.0, 1x public domain), all pending: equipment proof and privacy review outstanding for every one; no accepted cases. Claims are researcher-authored. Coverage: LKA, cruise x3, ACC, assistance menu, lane-centering, LDW cluster. Gaps: ACC Stop & Go, ambiguous-symbol, stalk-specific. Nothing supplied yet; Phase C blocked on James's rights-cleared photos + equipment evidence.
 
+
+## PR #5 Phase C — readiness audit (2026-11-04, NOT complete)
+
+audit_phase_c_readiness over the 8 private candidates: 0 ready, 8 blocked. Every candidate is missing the same five items: rights-holder confirmation for this evaluation; manual privacy review of actual bytes; vehicle-specific equipment evidence; original SHA-256; evaluation-copy SHA-256. Licenses verified on all 8 (CC BY 2.0/4.0, CC BY-SA 4.0, public domain). No bytes downloaded, no cases admitted, no labels assigned. Phase C stays open pending James's evidence per INTAKE.md.
+
