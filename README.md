@@ -10,15 +10,19 @@ reviewable evidence packets for a human reviewer.
 > AI results are advisory evidence for a human reviewer; the system never
 > independently certifies disputed features.
 
-**Current scope (PR #3):** foundation + listing import (PR #1) and the
-multimodal audit engine — Muse visual observations, SAM localization,
-manufacturer-aware interpretation, deterministic five-state
+**Current scope (PR #6, this branch):** foundation + listing import
+(PR #1) and the multimodal audit engine — Muse visual observations, SAM
+localization, manufacturer-aware interpretation, deterministic five-state
 reconciliation, durable worker, enforced spend caps (PR #2) — plus an
 offline-first paired harness comparing baseline (m2) vs
 reference-assisted (m3) recognition on real-world photos
-(`evals/realworld/`, `docs/realworld-evaluation.md`). Reference-assisted
-recognition is experimental and unvalidated against live inference; no
-live model comparison has been authorized.
+(`evals/realworld/`, `docs/realworld-evaluation.md`), cross-brand
+evidence generalization (PR #4), and the first real-listing ACC path:
+an Autotrader vehicle-detail extractor, operator-requested ACC checks
+kept separate from seller claims, photo-gated audit queueing, and a
+PASS / INCONCLUSIVE / FAIL presentation layer over the five-state
+taxonomy. Reference-assisted recognition is experimental and unvalidated
+against live inference; no live model comparison has been authorized.
 
 ## Why this is more than an image describer (hackathon context)
 
@@ -65,16 +69,19 @@ consume:
 | Output | a description | discrepancy report with five evidence states |
 | Human review | n/a | required: reports are advisory evidence |
 
-**Concrete illustrative example (planned behavior, not yet implemented).** A
-listing claims *adaptive cruise control*. Photo A (interior) shows
-steering-wheel distance-control buttons — Muse observes them, SAM segments the
-button cluster: that sub-check reads *visually supported*, never *verified*
-(buttons alone do not prove the feature works). Photo B (front grille) is too
-low-resolution to confirm or deny the radar sensor: *insufficient evidence*,
-not a contradiction — a photo's failure to show equipment never proves absence.
-Reconciliation keeps the claim open and asks for a closer grille photo instead
-of guessing — a single-image caption would have answered from one photo and
-stopped.
+**Concrete illustrative example (shipped in PR #6 on the synthetic
+fixture).** A listing claims *adaptive cruise control*. Photo A (interior)
+shows steering-wheel distance-control buttons — Muse observes them, SAM
+segments the button cluster: that sub-check reads *visually supported*, never
+*verified* (buttons alone do not prove the feature works). Photo B (front
+grille) is too low-resolution to confirm or deny the radar sensor:
+*insufficient evidence*, not a contradiction — a photo's failure to show
+equipment never proves absence. Reconciliation keeps the claim open and asks
+for a closer grille photo instead of guessing — a single-image caption would
+have answered from one photo and stopped. The mother app presents this as
+**PASS — Visual evidence supports ACC**; see
+`docs/demo/acc-dashboard.png` and `docs/demo/acc-detail.png` (regenerated
+by `e2e/acc.spec.ts`).
 
 **The five evidence states (approved taxonomy, AGENTS.md Rule E).** Each
 advertised claim ends in exactly one state: **Verified** (authoritative
@@ -85,15 +92,30 @@ vehicle-specific evidence establishes the feature), **Visually supported**
 **Not visually verifiable** (confirmation needs another evidence form). PR #1
 stores the photos and claims these states will be computed from.
 
-**Status honesty.** Implemented in PR #1: listing capture, immutable
-original-photo preservation, pairing, local storage, dashboard, and tests — zero
-paid model calls. Planned for PR #2: live Meta inference, multimodal analysis,
-conditional rechecks, deterministic reconciliation, initial evals. Later: full
-human review workflows and discrepancy-report export. The organizers clarified
+**Status honesty.** Shipped: listing capture, immutable original-photo
+preservation, pairing, local storage, dashboard, and tests with zero paid
+model calls (PR #1); live Meta inference, multimodal analysis,
+conditional rechecks, deterministic reconciliation, initial evals (PR #2);
+the real-listing ACC path — Autotrader extractor, operator-requested
+checks, photo-gated queueing, PASS / INCONCLUSIVE / FAIL display
+(PR #6, this branch). Later: full human review workflows and
+discrepancy-report export. The organizers clarified
 that the Simple Image Analyzers exclusion targets generic one-prompt projects,
 and that applications reconciling listing claims across several images into
 reviewable discrepancy reports fit the intended larger-workflow pattern; that is
 guidance, not a guarantee of acceptance.
+
+**Hackathon theme fit — Build for Your World.** Meta's models are brought
+into the used-car domain: Muse Spark Open 1026 reads assistance controls
+and indicators in listing photos, SAM 3.1 localizes the exact regions,
+and deterministic reconciliation turns both into per-claim verdicts. The
+firsthand problem is verifying advertised driver-assistance features
+against the photos that are supposed to show them — work that today means
+manual photo-by-photo inspection. The tool frees up that time by
+compiling every claim, photo, observation, crop, and cost into one
+reviewable evidence packet for a human reviewer, making claim-linked,
+localized discrepancy reports possible where a generic caption could
+only describe one picture.
 
 ## Architecture
 
@@ -147,7 +169,9 @@ Then:
    `chrome://extensions` → Developer mode → **Load unpacked** →
    `apps/extension/.output/chrome-mv3`. Paste the pairing token in the popup.
 3. Open `http://127.0.0.1:8901/listing-1987-coupe.html`, click the extension
-   icon → **Import this listing**.
+   icon → **Verify Adaptive Cruise Control** (imports the listing and marks
+   ACC as the operator-requested evaluation target; plain **Import this
+   listing** skips the requested check).
 4. Open the listing in the mother app — real rows in SQLite, original bytes
    on disk under `backend/runtime-data/` (gitignored).
 5. `./scripts/stop-dev.ps1` stops everything.
@@ -221,6 +245,28 @@ stages consume no model allowance. Killing the worker mid-audit is
 safe — the next worker pass reclaims the job and resumes without
 re-firing completed calls (exactly-once billing is not claimed).
 
+### Real-listing ACC checks (PR #6)
+
+- **Autotrader extractor** (`autotrader-v1`, see
+  `docs/decisions/002-real-listing-site.md`): JSON-LD vehicle data first,
+  OpenGraph/DOM fallbacks; search, dealer, and sell pages are rejected and
+  never mistaken for listings. Host permissions cover only the Autotrader
+  origins — no `<all_urls>`; unpermitted image hosts surface as recorded
+  permission failures, never silent drops.
+- **Requested checks stay separate**: the operator's ACC selection travels
+  the extension protocol on an allowlist and is stored as
+  `requested_checks` — never merged into `advertised_claims`. A
+  search-filter selection never becomes a seller claim.
+- **Photo-gated queueing**: audits refuse photo-less listings (HTTP 422)
+  before any provider spend; a failed or empty import can never trigger
+  paid inference.
+- **Presentation**: the five-state taxonomy is preserved internally and
+  shown as PASS (`verified`/`visually_supported`), FAIL (`contradicted`),
+  or INCONCLUSIVE (everything else); queued/running/paused/failed audits
+  display as operational states, never as evidence results. The dashboard
+  shows the latest ACC result per listing; the detail page shows
+  provenance, the banner, findings, observations, crops, and costs.
+
 ## Repository layout
 
 ```
@@ -240,20 +286,23 @@ committed. Copy `backend/.env.example` to `backend/.env` for local keys.
 
 | Area      | Command (repo root)                              | Coverage |
 |-----------|--------------------------------------------------|----------|
-| Backend   | `.venv/Scripts/python -m pytest backend/`        | 220+ tests: migrations, WAL, import, photos, failure records, concurrency, pairing, CSRF, zero-inference, audits (queue/claim/budget/stages/worker), providers, eval goldens |
-| Mother    | `npm test --prefix apps/mother`                  | API client, dashboard, import form, failure display, audit panel |
-| Extension | `npm test --prefix apps/extension`               | Extractor, protocol, uploader, retry, URL/redirect policy, storage guards, popup UI |
-| Browser   | `npx playwright test` in `apps/mother`           | Setup → dashboard → manual import smoke + extension E2E (full + partial import, retry, storage restriction) + screenshots |
+| Backend   | `.venv/Scripts/python -m pytest backend/`        | 490 tests: migrations, WAL, import, photos, failure records, concurrency, pairing, CSRF, zero-inference, audits (queue/claim/budget/stages/worker), providers, eval goldens, requested checks, photo-gated queueing |
+| Mother    | `npm test --prefix apps/mother`                  | API client, dashboard, import form, failure display, audit panel, ACC verdict mapping, dashboard badges, provenance display |
+| Extension | `npm test --prefix apps/extension`               | Extractors (synthetic + Autotrader), protocol (incl. requested-check allowlist), uploader, retry, URL/redirect policy, storage guards, popup UI |
+| Browser   | `npx playwright test` in `apps/mother`           | Setup → dashboard → manual import smoke + extension E2E (full + partial import, retry, storage restriction) + Verify-ACC import → queued audit → settled PASS finding (`acc.spec.ts`, scripted adapters, $0) + screenshots |
 
 CI (`.github/workflows/ci.yml`) runs lint, typecheck, tests, and production
 builds on every PR with mocked providers only — no model credentials exist
 in CI.
 
-## Known limitations (PR #2 branch)
+## Known limitations (PR #6 branch)
 
 - Live inference spends real credits: keep `VCC_INFERENCE_ENABLED` off
   unless you mean it, and never set `VCC_LIVE_SMOKE=1` in CI.
-- One extractor (synthetic fixture server); dealership rules are later.
+- Two extractors (synthetic fixture server + Autotrader VDP). The
+  Autotrader rule is verified against representative DOM fixtures, not a
+  live page: headless automation is bot-walled, so genuine VDP
+  verification needs the operator's own headed Chrome session.
 - Reconciliation is conservative by design: photo-only audits reach
   `contradicted`/`verified` only with authoritative backing, so most
   real listings land in `insufficient_evidence` until more sources exist.
@@ -269,12 +318,16 @@ in CI.
 
 ## Roadmap
 
-- **PR #2 (this branch)**: live Muse Spark Open 1026 + SAM 3.1
+- **PR #2 (merged)**: live Muse Spark Open 1026 + SAM 3.1
   integration, standalone audit worker, ownership-fenced durable jobs,
   SHA-verified evidence, Pillow crops, manufacturer-aware ADAS
   evidence mapping, deterministic reconciliation, five-state findings,
   baseline evals with real cost accounting.
-- Later: dealership extractor pack, reviewer QA workflow, evidence packets,
+- **PR #6 (this branch)**: first real-listing site (Autotrader
+  extractor), operator-requested ACC checks, photo-gated audit queueing,
+  PASS / INCONCLUSIVE / FAIL display, Verify-ACC end-to-end test with
+  scripted adapters.
+- Later: more dealership sites, reviewer QA workflow, evidence packets,
   packaging hardening.
 
 ## Fixture provenance & license
