@@ -160,3 +160,8 @@ Branch: feat/005-realworld-intake. Zero inference, zero spend. Phase A complete 
 
 audit_phase_c_readiness over the 8 private candidates: 0 ready, 8 blocked. Every candidate is missing the same five items: rights-holder confirmation for this evaluation; manual privacy review of actual bytes; vehicle-specific equipment evidence; original SHA-256; evaluation-copy SHA-256. Licenses verified on all 8 (CC BY 2.0/4.0, CC BY-SA 4.0, public domain). No bytes downloaded, no cases admitted, no labels assigned. Phase C stays open pending James's evidence per INTAKE.md.
 
+
+## PR #5 review fixes 1-8 (2026-11-04, head 5d5eec6, unmerged)
+
+Closed the privacy bypass (list-depth scan), the register-to-manifest gap (hash/group/vehicle linkage), and the fail-open freeze (required dev+photos, split checks, sha verify, overwrite archive, realworld-freeze CLI). Printed admission status, RGB pixel-identity check, JPEG/PNG/WEBP allowlist. Suite 548 passed / 10 skipped x3; 14/14 mutations fail behaviorally; dry-run identical; e2e validate+freeze verified on synthetic tmp data. Edited existing tests (setup-only freeze tests + license setup alignment + coverage message pin) listed in the PR body. No genuine photographs admitted; no accuracy established.
+
