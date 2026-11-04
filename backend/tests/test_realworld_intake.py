@@ -758,7 +758,7 @@ def test_freeze_refuses_incomplete_photo_coverage(tmp_path, monkeypatch):
     monkeypatch.setenv("VCC_REALWORLD_PRIVATE_DIR", str(tmp_path / "priv"))
     holdout, dev, photo_paths = _freeze_pair(tmp_path)
     photo_paths.pop("h1")
-    with pytest.raises(IntakeError) as excinfo:
+    with pytest.raises(IntakeError, match="holdout freeze refused: no photo path"):
         freeze_holdout(
             dataset="pilot",
             manifest=holdout,
@@ -766,7 +766,6 @@ def test_freeze_refuses_incomplete_photo_coverage(tmp_path, monkeypatch):
             photo_paths=photo_paths,
             reviewer_role="dataset-reviewer",
         )
-    assert "h1" in str(excinfo.value)
 
 
 def test_freeze_refuses_wrong_splits(tmp_path, monkeypatch):
