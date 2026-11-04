@@ -247,6 +247,12 @@ export async function reportFailure(
   return (await res.json()) as ReportedFailure;
 }
 
+export interface UploadPhotoOptions {
+  /** Operator-selected local file: stored with user-supplied provenance,
+   * never attributed to the listing page. */
+  userSupplied?: boolean;
+}
+
 export async function uploadPhoto(
   token: string,
   listingId: string,
@@ -254,10 +260,12 @@ export async function uploadPhoto(
   filename: string,
   sourceUrl: string | null,
   fetchImpl: typeof fetch = fetch,
+  options?: UploadPhotoOptions,
 ): Promise<UploadedPhoto> {
   const form = new FormData();
   form.append('file', bytes, filename);
   if (sourceUrl) form.append('source_url', sourceUrl);
+  if (options?.userSupplied) form.append('user_supplied', '1');
   const res = await fetchImpl(`${LOCAL_API_BASE}/api/extension/listings/${listingId}/photos`, {
     method: 'POST',
     headers: authHeaders(token),

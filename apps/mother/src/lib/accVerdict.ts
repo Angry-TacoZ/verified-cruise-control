@@ -26,6 +26,9 @@ export interface AccAssessment {
   /** Underlying five-state finding, or null when no ACC finding exists. */
   state: string | null;
   provenance: AccProvenance;
+  /** False for a completed audit that produced no ACC finding: render the
+   * unavailable state, never an evidence-based INCONCLUSIVE badge. */
+  available: boolean;
   /** Limitation or ambiguity text shown alongside the result. */
   limitation: string;
 }
@@ -74,7 +77,10 @@ export function accLabelForState(state: string | null | undefined): AccLabel {
   }
 }
 
-function headlineFor(label: AccLabel): string {
+function headlineFor(label: AccLabel, available: boolean): string {
+  if (!available) {
+    return 'ACC finding unavailable — the completed audit produced no ACC finding';
+  }
   switch (label) {
     case 'PASS':
       return 'PASS — Visual evidence supports ACC';
@@ -85,7 +91,26 @@ function headlineFor(label: AccLabel): string {
   }
 }
 
-function limitationFor(label: AccLabel, state: string | null, provenance: AccProvenance): string {
+function limitationFor(
+  label: AccLabel,
+  state: string | null,
+  provenance: AccProvenance,
+  available: boolean,
+): string {
+  if (!available) {
+    const scope =
+      provenance === 'operator-requested'
+        ? 'ACC was operator-requested; the seller did not advertise it. '
+        : provenance === 'seller-advertised'
+          ? 'ACC was seller-advertised. '
+          : '';
+    return (
+      scope +
+      'The audit completed but produced no ACC-specific finding. This is ' +
+      'not evidence for or against ACC — absence of a visible control ' +
+      'does not prove ACC is absent.'
+    );
+  }
   if (provenance === 'operator-requested') {
     if (label === 'INCONCLUSIVE' && state === null) {
       return (
@@ -138,12 +163,14 @@ export function assessAcc(input: {
           : 'neither';
   const state = typeof input.accState === 'string' ? input.accState : null;
   const label = accLabelForState(state);
+  const available = state !== null;
   return {
     label,
-    headline: headlineFor(label),
+    headline: headlineFor(label, available),
     state,
     provenance,
-    limitation: limitationFor(label, state, provenance),
+    available,
+    limitation: limitationFor(label, state, provenance, available),
   };
 }
 

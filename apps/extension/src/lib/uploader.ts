@@ -21,7 +21,7 @@ import {
   uploadPhoto,
   type ListingPayload,
 } from './api';
-import type { ExtractedListing, RequestedCheck } from './protocol';
+import type { ExtractedListing, ListingOverrides, ManualEntry, RequestedCheck } from './protocol';
 
 export interface PhotoProgress {
   url: string;
@@ -78,6 +78,104 @@ export interface ImportDeps {
    * store at report time, so an overlapping run cannot misattribute
    * failures to the wrong listing. */
   reportFailure?: (listingId: string, report: FailureReport) => Promise<void>;
+}
+
+const MIN_MODEL_YEAR = 1900;
+const MAX_MODEL_YEAR = 2100;
+
+function checkedYear(year: number | null | undefined, field: string): number | null {
+  if (year === undefined || year === null) return year ?? null;
+  if (!Number.isInteger(year) || year < MIN_MODEL_YEAR || year > MAX_MODEL_YEAR) {
+    throw new Error(`${field} year ${year} is out of range`);
+  }
+  return year;
+}
+
+/** Apply operator corrections to an extracted listing. Only whitelisted
+ * scalar fields change; claims and photos are selected, never typed, so an
+ * override can never fabricate seller equipment or photo evidence. Override
+ * fields are marked `operator` provenance; untouched fields keep theirs. */
+export function applyListingOverrides(
+  listing: ExtractedListing,
+  overrides: ListingOverrides,
+): ExtractedListing {
+  const next: ExtractedListing = {
+    ...listing,
+    title: overrides.title?.trim() ? overrides.title.trim().slice(0, 500) : listing.title,
+    year: overrides.year === undefined ? listing.year : checkedYear(overrides.year, 'override'),
+    make: overrides.make === undefined ? listing.make : overrides.make.trim().slice(0, 100),
+    model: overrides.model === undefined ? listing.model : overrides.model.trim().slice(0, 100),
+    trim: overrides.trim === undefined ? listing.trim : overrides.trim.trim().slice(0, 100),
+    description:
+      overrides.description === undefined
+        ? listing.description
+        : overrides.description.trim().slice(0, 20000),
+  };
+  const sources = { ...(listing.extraction?.fieldSources ?? {}) };
+  for (const [field, value] of Object.entries(overrides)) {
+    // A supplied override (including clearing a field to ''/null) is an
+    // operator assertion; absent keys keep their detected provenance.
+    if (value !== undefined && value !== '') sources[field] = 'operator';
+  }
+  if (listing.extraction) next.extraction = { ...listing.extraction, fieldSources: sources };
+  return next;
+}
+
+/** Build a listing from operator manual entry for pages where no vehicle
+ * was detected. Identity fields the operator leaves blank stay unknown;
+ * claims are empty and photos arrive separately as user-supplied uploads. */
+export function listingFromManualEntry(entry: ManualEntry, pageUrl: string): ExtractedListing {
+  let hostname: string;
+  try {
+    hostname = new URL(pageUrl).hostname.toLowerCase();
+  } catch {
+    hostname = '';
+  }
+  return {
+    sourceUrl: pageUrl,
+    sourceSite: hostname,
+    title: entry.title.trim().slice(0, 500),
+    year: checkedYear(entry.year, 'manual entry'),
+    make: entry.make.trim().slice(0, 100),
+    model: entry.model.trim().slice(0, 100),
+    trim: entry.trim.trim().slice(0, 100),
+    vin: null,
+    description: entry.description.trim().slice(0, 20000),
+    advertisedClaims: [],
+    photos: [],
+    extractorId: 'manual-entry',
+    extraction: {
+      confidence: 'low',
+      reasons: ['operator-entered manually; no page detection'],
+      fieldSources: {
+        ...(entry.title.trim() ? { title: 'operator' as const } : {}),
+        ...(entry.year !== null ? { year: 'operator' as const } : {}),
+        ...(entry.make.trim() ? { make: 'operator' as const } : {}),
+        ...(entry.model.trim() ? { model: 'operator' as const } : {}),
+        ...(entry.trim.trim() ? { trim: 'operator' as const } : {}),
+        ...(entry.description.trim() ? { description: 'operator' as const } : {}),
+      },
+    },
+  };
+}
+
+/** Decode an operator-selected image data URL to bytes. Rejects non-image
+ * payloads before any upload is attempted. */
+export function dataUrlToBlob(dataUrl: string): Blob {
+  const match = /^data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!match) throw new Error('user file is not a base64 image data URL');
+  const binary = atob(match[2]);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return new Blob([bytes], { type: match[1].toLowerCase() });
+}
+
+/** Strip path components and cap length so an operator-chosen filename is
+ * safe to send as a multipart filename. */
+export function sanitizeUserFilename(name: string): string {
+  const base = name.split(/[\\/]/).pop() ?? '';
+  const cleaned = base.replace(/[^A-Za-z0-9._-]+/g, '_').slice(0, 120);
+  return cleaned || 'photo';
 }
 
 export function toListingPayload(

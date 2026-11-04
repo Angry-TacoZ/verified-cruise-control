@@ -227,7 +227,7 @@ describe('AuditPanel', () => {
     expect(items.length).toBeGreaterThan(0);
   });
 
-  it('shows operator-requested INCONCLUSIVE when no ACC finding exists', async () => {
+  it('shows ACC finding unavailable when no ACC finding exists', async () => {
     const laneOnly = findings.filter((f) => f.claim_text !== 'adaptive cruise control');
     stubFetch({
       [`/api/listings/${LISTING}/audits`]: [baseJob],
@@ -241,8 +241,11 @@ describe('AuditPanel', () => {
         requestedChecks: ['adaptive_cruise_control'],
       },
     });
-    expect(await screen.findByText(/INCONCLUSIVE — ACC cannot be established/)).toBeInTheDocument();
+    // A completed audit with no ACC finding is unavailable, never an
+    // evidence-based INCONCLUSIVE result.
+    expect(await screen.findByText(/^ACC finding unavailable/)).toBeInTheDocument();
     expect(screen.getByText(/Operator-requested check \(not a seller claim\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/INCONCLUSIVE — ACC cannot be established/)).not.toBeInTheDocument();
     expect(screen.queryByText(/^FAIL/)).not.toBeInTheDocument();
   });
 

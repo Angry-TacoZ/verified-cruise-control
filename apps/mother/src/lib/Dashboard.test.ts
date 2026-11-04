@@ -121,6 +121,29 @@ describe('Dashboard', () => {
     expect(screen.getByText('ACC requested — no audit yet')).toBeInTheDocument();
   });
 
+  it('shows a completed audit with no ACC finding as unavailable', async () => {
+    const unavailable = {
+      ...listing,
+      requested_checks: ['adaptive_cruise_control'],
+      latest_audit: {
+        job_id: '77777777-7777-7777-7777-777777777777',
+        status: 'complete',
+        current_stage: 'done',
+        acc_state: null,
+        spend_usd: '0.0100',
+        model_calls_made: 2,
+        updated_at: '2026-10-31T00:01:00Z',
+      },
+    };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(JSON.stringify({ items: [unavailable], count: 1 }))),
+    );
+    render(Dashboard, { props: { gateSetup: false } });
+    expect(await screen.findByText('ACC finding unavailable')).toBeInTheDocument();
+    expect(screen.queryByText(/ACC: (PASS|FAIL|INCONCLUSIVE)/)).not.toBeInTheDocument();
+  });
+
   it('never shows a failed audit as an ACC evidence result', async () => {
     const failed = {
       ...listing,

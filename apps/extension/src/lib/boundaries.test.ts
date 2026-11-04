@@ -21,12 +21,17 @@ describe('security boundaries (static guards)', () => {
     const config = read('wxt.config.ts');
     expect(config).not.toContain('<all_urls>');
     expect(config).not.toContain('chrome-extension://*');
-    expect(config).not.toMatch(/['"]scripting['"]/);
     expect(config).toContain('http://127.0.0.1:8000/*');
     expect(config).toContain('http://127.0.0.1:8901/*');
-    // First real listing host is narrowly scoped (ADR 002).
-    expect(config).toContain('https://www.autotrader.com/*');
-    expect(config).toContain('https://autotrader.com/*');
+    // Site-neutral (ADR 003): no listing-site host is pre-granted; page
+    // access is temporary via scripting + activeTab, and CDN origins are
+    // optional (requested at runtime, never auto-granted).
+    expect(config).toMatch(/['"]scripting['"]/);
+    expect(config).toContain('optional_host_permissions');
+    expect(config).not.toContain('autotrader.com');
+    // No content-script match may name a real listing host.
+    const content = read('entrypoints/listing.content.ts');
+    expect(content).not.toContain('autotrader.com');
   });
 
   it('background restricts storage.local before handling messages', () => {

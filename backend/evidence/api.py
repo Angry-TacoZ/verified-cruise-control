@@ -178,9 +178,18 @@ def ext_upload_photo(
     listing_id: uuid.UUID,
     file: UploadedFile = File(...),  # noqa: B008 - required Ninja idiom
     source_url: str | None = Form(None),
+    user_supplied: bool = Form(False),
 ):
-    """One photograph per multipart request (extension)."""
-    return _store_upload(request, listing_id, file, source_url, Provenance.EXTENSION)
+    """One photograph per multipart request (extension).
+
+    ``user_supplied`` marks operator-selected local files: they are stored
+    with user-supplied provenance and no source URL, never attributed to
+    the listing page.
+    """
+    if user_supplied and source_url:
+        raise HttpError(422, "user-supplied photos must not carry a page source URL")
+    provenance = Provenance.USER_SUPPLIED if user_supplied else Provenance.EXTENSION
+    return _store_upload(request, listing_id, file, source_url, provenance)
 
 
 @app_router.post("/listings/{listing_id}/photos", response={201: PhotoOut})

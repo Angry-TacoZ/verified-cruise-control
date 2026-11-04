@@ -3,10 +3,14 @@ import { defineContentScript } from 'wxt/utils/define-content-script';
 import { extractorForUrl } from '../src/lib/extractors';
 
 export default defineContentScript({
-  // Synthetic fixture server first; Autotrader (ADR 002) is the first real
-  // listing host. CDN image origins stay unlisted on purpose: unpermitted
+  // Site-neutral (ADR 003): content scripts NEVER auto-run on listing
+  // sites. Only the synthetic fixture server keeps a registered script, so
+  // automated tests exercise the message path. Real pages are inspected by
+  // temporary user-activated injection of this same bundle via the
+  // scripting API (background extractFromTab), which then answers the same
+  // message below. CDN image origins stay unlisted on purpose: unpermitted
   // hosts surface as permission failures in the mother app, never silent drops.
-  matches: ['http://127.0.0.1:8901/*', 'https://www.autotrader.com/*', 'https://autotrader.com/*'],
+  matches: ['http://127.0.0.1:8901/*'],
   main() {
     browser.runtime.onMessage.addListener((message) => {
       if (typeof message !== 'object' || message === null) return undefined;

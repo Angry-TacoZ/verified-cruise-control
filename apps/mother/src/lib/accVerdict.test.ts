@@ -75,6 +75,24 @@ describe('assessAcc', () => {
     expect(assessment.limitation).toMatch(/does not prove ACC is absent/);
   });
 
+  it('marks a completed audit with no ACC finding as unavailable, not evidence', () => {
+    const assessment = assessAcc({
+      advertisedClaims: ['leather seats'],
+      requestedChecks: ['adaptive_cruise_control'],
+      accState: null,
+    });
+    expect(assessment.available).toBe(false);
+    expect(assessment.headline).toMatch(/^ACC finding unavailable/);
+    expect(assessment.limitation).toMatch(/produced no ACC-specific finding/);
+    expect(
+      assessAcc({
+        advertisedClaims: ['Adaptive Cruise Control'],
+        requestedChecks: [],
+        accState: 'insufficient_evidence',
+      }).available,
+    ).toBe(true);
+  });
+
   it('marks contradicted ACC as FAIL', () => {
     const assessment = assessAcc({
       advertisedClaims: ['Adaptive Cruise Control'],

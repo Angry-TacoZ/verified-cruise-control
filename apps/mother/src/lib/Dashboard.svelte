@@ -48,6 +48,11 @@
       return { text: 'Audit failed', tone: 'bg-red-100 text-red-800' };
     }
     if (!wantsAcc) return { text: 'audited', tone: 'bg-slate-100 text-slate-600' };
+    // A completed audit with no ACC finding is an unavailable result, not
+    // an evidence-based INCONCLUSIVE one.
+    if (audit.acc_state === null) {
+      return { text: 'ACC finding unavailable', tone: 'bg-slate-200 text-slate-800' };
+    }
     const label = accLabelForState(audit.acc_state);
     if (label === 'PASS') return { text: 'ACC: PASS', tone: 'bg-emerald-100 text-emerald-800' };
     if (label === 'FAIL') return { text: 'ACC: FAIL', tone: 'bg-red-100 text-red-800' };

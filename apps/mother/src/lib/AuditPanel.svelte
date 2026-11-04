@@ -313,15 +313,18 @@
       {@const assessment = accAssessment}
       <div
         class="mt-2 rounded-md border p-3 text-sm"
-        class:border-emerald-200={assessment.label === 'PASS'}
-        class:bg-emerald-50={assessment.label === 'PASS'}
-        class:text-emerald-900={assessment.label === 'PASS'}
-        class:border-red-200={assessment.label === 'FAIL'}
-        class:bg-red-50={assessment.label === 'FAIL'}
-        class:text-red-900={assessment.label === 'FAIL'}
-        class:border-amber-200={assessment.label === 'INCONCLUSIVE'}
-        class:bg-amber-50={assessment.label === 'INCONCLUSIVE'}
-        class:text-amber-900={assessment.label === 'INCONCLUSIVE'}
+        class:border-emerald-200={assessment.available && assessment.label === 'PASS'}
+        class:bg-emerald-50={assessment.available && assessment.label === 'PASS'}
+        class:text-emerald-900={assessment.available && assessment.label === 'PASS'}
+        class:border-red-200={assessment.available && assessment.label === 'FAIL'}
+        class:bg-red-50={assessment.available && assessment.label === 'FAIL'}
+        class:text-red-900={assessment.available && assessment.label === 'FAIL'}
+        class:border-amber-200={assessment.available && assessment.label === 'INCONCLUSIVE'}
+        class:bg-amber-50={assessment.available && assessment.label === 'INCONCLUSIVE'}
+        class:text-amber-900={assessment.available && assessment.label === 'INCONCLUSIVE'}
+        class:border-slate-200={!assessment.available}
+        class:bg-slate-50={!assessment.available}
+        class:text-slate-800={!assessment.available}
         role="status"
       >
         <div class="font-semibold">{assessment.headline}</div>
@@ -336,7 +339,7 @@
                 : 'No ACC claim recorded'}
         </div>
         <div class="mt-1">{assessment.limitation}</div>
-        {#if assessment.label === 'INCONCLUSIVE'}
+        {#if !assessment.available || assessment.label === 'INCONCLUSIVE'}
           <div class="mt-1">Full evidence is below — a badge alone is never the whole result.</div>
         {/if}
       </div>

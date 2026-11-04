@@ -4,21 +4,27 @@ const {
   mainHolder,
   tabsGet,
   tabsSend,
+  scriptingExecute,
+  permissionsContains,
   runImportMock,
   retryMock,
   abandonMock,
   setCancelledMock,
   loadMock,
+  uploadPhotoMock,
   storeState,
 } = vi.hoisted(() => ({
   mainHolder: { fn: null as ((message: unknown, sender: unknown) => Promise<unknown>) | null },
   tabsGet: vi.fn(),
   tabsSend: vi.fn(),
+  scriptingExecute: vi.fn(),
+  permissionsContains: vi.fn(),
   runImportMock: vi.fn(),
   retryMock: vi.fn(),
   abandonMock: vi.fn(),
   setCancelledMock: vi.fn(),
   loadMock: vi.fn(),
+  uploadPhotoMock: vi.fn(),
   storeState: {
     token: 'tok' as string | null,
     progress: null as unknown,
@@ -30,6 +36,12 @@ vi.mock('wxt/browser', () => ({
     tabs: {
       get: (...args: unknown[]) => tabsGet(...args),
       sendMessage: (...args: unknown[]) => tabsSend(...args),
+    },
+    scripting: {
+      executeScript: (...args: unknown[]) => scriptingExecute(...args),
+    },
+    permissions: {
+      contains: (...args: unknown[]) => permissionsContains(...args),
     },
     runtime: {
       onMessage: {
@@ -53,6 +65,7 @@ vi.mock('wxt/utils/define-background', () => ({
 
 vi.mock('./api', () => ({
   reportFailure: vi.fn(async () => ({})),
+  uploadPhoto: (...args: unknown[]) => uploadPhotoMock(...args),
 }));
 
 vi.mock('./uploader', async (importOriginal) => {
@@ -112,6 +125,9 @@ beforeEach(async () => {
   loadMock.mockImplementation(async () => storeState.progress);
   tabsGet.mockResolvedValue({ url: 'http://127.0.0.1:8901/listing-1987-coupe.html' });
   tabsSend.mockResolvedValue({ type: 'vcc:extract-result', listing: validListing() });
+  scriptingExecute.mockResolvedValue([]);
+  permissionsContains.mockResolvedValue(true);
+  uploadPhotoMock.mockResolvedValue({ duplicate: false });
   // The entrypoint module executes once (worker startup); later imports are
   // cached, so the listener is read from shared holder state instead of
   // asserting a fresh registration each time.
@@ -315,6 +331,147 @@ describe('background single-active-operation guard', () => {
     runImportMock.mockResolvedValueOnce({ status: 'complete' });
     await expect(listener({ type: 'vcc:start-import', tabId: 7 }, {})).resolves.toMatchObject({
       ok: true,
+    });
+  });
+});
+
+describe('background site-neutral preview and import', () => {
+  it('previews a registered-host tab through its content script', async () => {
+    await expect(listener({ type: 'vcc:preview-extract', tabId: 7 }, {})).resolves.toMatchObject({
+      type: 'vcc:preview-result',
+      listing: expect.objectContaining({ extractorId: 'synthetic-v1' }),
+    });
+    expect(scriptingExecute).not.toHaveBeenCalled();
+  });
+
+  it('previews an unknown site by injecting the bundled extractor', async () => {
+    tabsGet.mockResolvedValueOnce({ url: 'https://dealer.example/inventory/42' });
+    // No auto-registered listener on this host: the first ask fails, the
+    // injected bundle answers the second.
+    tabsSend.mockRejectedValueOnce(new Error('no receiving end'));
+    await expect(listener({ type: 'vcc:preview-extract', tabId: 7 }, {})).resolves.toMatchObject({
+      type: 'vcc:preview-result',
+    });
+    expect(scriptingExecute).toHaveBeenCalledWith({
+      target: { tabId: 7 },
+      files: ['content-scripts/listing.js'],
+    });
+    expect(tabsSend).toHaveBeenCalledWith(7, { type: 'vcc:extract-request' });
+  });
+
+  it('reports injection failures instead of a listing', async () => {
+    tabsGet.mockResolvedValueOnce({ url: 'https://dealer.example/inventory/42' });
+    tabsSend.mockRejectedValueOnce(new Error('no receiving end'));
+    scriptingExecute.mockRejectedValueOnce(new Error('denied'));
+    await expect(listener({ type: 'vcc:preview-extract', tabId: 7 }, {})).resolves.toMatchObject({
+      type: 'vcc:error',
+      message: expect.stringMatching(/scripting blocked/),
+    });
+  });
+
+  it('refuses to inspect non-web pages', async () => {
+    tabsGet.mockResolvedValueOnce({ url: 'chrome://extensions/' });
+    // Privileged pages never host content scripts: the ask fails, and the
+    // scheme check refuses injection before anything is injected.
+    tabsSend.mockRejectedValueOnce(new Error('no receiving end'));
+    await expect(listener({ type: 'vcc:preview-extract', tabId: 7 }, {})).resolves.toMatchObject({
+      type: 'vcc:error',
+      message: expect.stringMatching(/only web pages/),
+    });
+    expect(scriptingExecute).not.toHaveBeenCalled();
+  });
+
+  it('applies operator overrides and enforces the photo subset', async () => {
+    const listing = {
+      ...validListing(),
+      photos: [
+        { url: 'http://127.0.0.1:8901/photos/a.jpg' },
+        { url: 'http://127.0.0.1:8901/photos/b.jpg' },
+      ],
+    };
+    tabsSend.mockResolvedValueOnce({ type: 'vcc:extract-result', listing });
+    runImportMock.mockResolvedValueOnce({ status: 'complete', listingId: 'L9' });
+    await expect(
+      listener(
+        {
+          type: 'vcc:start-import',
+          tabId: 7,
+          overrides: { year: 2021 },
+          photoUrls: ['http://127.0.0.1:8901/photos/b.jpg', 'https://invented.example/evil.jpg'],
+        },
+        {},
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    const effective = runImportMock.mock.calls[0][1] as typeof listing;
+    expect(effective.year).toBe(2021);
+    // The invented URL is dropped: selection only, never typed evidence.
+    expect(effective.photos).toEqual([{ url: 'http://127.0.0.1:8901/photos/b.jpg' }]);
+  });
+
+  it('imports a manual entry and uploads user files as user-supplied', async () => {
+    tabsGet.mockResolvedValueOnce({ url: 'https://dealer.example/inventory/9' });
+    runImportMock.mockResolvedValueOnce({ status: 'partial', listingId: 'L10' });
+    await expect(
+      listener(
+        {
+          type: 'vcc:start-import',
+          tabId: 7,
+          manualEntry: {
+            title: '2018 Mazda 3',
+            year: 2018,
+            make: 'Mazda',
+            model: '3',
+            trim: '',
+            description: '',
+          },
+          userFiles: [{ name: 'dash.jpg', dataUrl: 'data:image/jpeg;base64,AAAA' }],
+        },
+        {},
+      ),
+    ).resolves.toMatchObject({ ok: true });
+    const effective = runImportMock.mock.calls[0][1] as { extractorId: string; photos: unknown[] };
+    expect(effective.extractorId).toBe('manual-entry');
+    expect(effective.photos).toEqual([]);
+    expect(scriptingExecute).not.toHaveBeenCalled();
+    expect(uploadPhotoMock).toHaveBeenCalledTimes(1);
+    expect(uploadPhotoMock.mock.calls[0][4]).toBeNull();
+    expect(uploadPhotoMock.mock.calls[0][6]).toEqual({ userSupplied: true });
+  });
+
+  it('surfaces user-file upload failures as a warning, not an import failure', async () => {
+    runImportMock.mockResolvedValueOnce({ status: 'complete', listingId: 'L11' });
+    uploadPhotoMock.mockRejectedValueOnce(new Error('too large'));
+    await expect(
+      listener(
+        {
+          type: 'vcc:start-import',
+          tabId: 7,
+          userFiles: [{ name: 'dash.jpg', dataUrl: 'data:image/jpeg;base64,AAAA' }],
+        },
+        {},
+      ),
+    ).resolves.toMatchObject({ ok: true, warning: expect.stringMatching(/dash\.jpg/) });
+  });
+
+  it('reports per-origin host access', async () => {
+    permissionsContains.mockImplementation(async (query: unknown) => {
+      const origins = (query as { origins: string[] }).origins;
+      return !origins[0].includes('blocked');
+    });
+    await expect(
+      listener(
+        {
+          type: 'vcc:check-hosts',
+          origins: ['https://cdn.example.com', 'https://blocked.example'],
+        },
+        {},
+      ),
+    ).resolves.toEqual({
+      type: 'vcc:host-access',
+      access: { 'https://cdn.example.com': true, 'https://blocked.example': false },
+    });
+    expect(permissionsContains).toHaveBeenCalledWith({
+      origins: ['https://cdn.example.com/*'],
     });
   });
 });

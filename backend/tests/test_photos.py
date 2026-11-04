@@ -36,9 +36,44 @@ def test_valid_photo_saved_with_hash(client, ext_headers, ext_listing, png_bytes
     photo = Photograph.objects.get(pk=body["id"])
     assert photo.width == 64 and photo.height == 48
     assert photo.image_format == "PNG" and photo.mime_type == "image/png"
+    assert photo.provenance == "extension"
     stored = images.original_path(photo.storage_ref, photo.image_format)
     assert stored.is_file()
     assert stored.read_bytes() == png_bytes  # original bytes preserved
+
+
+def test_user_supplied_upload_stored_with_own_provenance(
+    client, ext_headers, ext_listing, png_bytes
+):
+    response = client.post(
+        f"/api/extension/listings/{ext_listing['id']}/photos",
+        data={
+            "file": SimpleUploadedFile("dash.jpg", png_bytes, content_type="image/png"),
+            "user_supplied": "1",
+        },
+        headers=ext_headers,
+    )
+    assert response.status_code == 201, response.content
+    body = response.json()
+    assert body["provenance"] == "user_supplied"
+    assert body["source_url"] is None
+    photo = Photograph.objects.get(pk=body["id"])
+    assert photo.provenance == "user_supplied"
+
+
+def test_user_supplied_with_page_url_is_rejected(
+    client, ext_headers, ext_listing, png_bytes
+):
+    response = client.post(
+        f"/api/extension/listings/{ext_listing['id']}/photos",
+        data={
+            "file": SimpleUploadedFile("dash.jpg", png_bytes, content_type="image/png"),
+            "user_supplied": "1",
+            "source_url": "https://dealer.example/car/1",
+        },
+        headers=ext_headers,
+    )
+    assert response.status_code == 422, response.content
 
 
 @pytest.mark.parametrize(
