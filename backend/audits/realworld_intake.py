@@ -857,6 +857,18 @@ CANDIDATE_VERSION = "candidates-v1"
 CANDIDATE_LICENSES = frozenset(
     {"CC BY 2.0", "CC BY 4.0", "CC BY-SA 3.0", "CC BY-SA 4.0", "Public domain"}
 )
+# Optional Phase C evidence fields. Still strictly enumerated: a fully
+# evidenced source stays validatable, while free-form extras are
+# rejected as before.
+PHASE_C_EVIDENCE_FIELDS = frozenset(
+    {
+        "rights_confirmed",
+        "privacy_review",
+        "equipment_evidence",
+        "original_sha256",
+        "evaluation_sha256",
+    }
+)
 CANDIDATE_FIELDS = frozenset(
     {
         "id",
@@ -897,7 +909,7 @@ def validate_candidate_sources(doc: dict) -> dict:
     seen = set()
     for source in sources:
         source = _require_mapping(source, "candidate source")
-        extra = set(source) - CANDIDATE_FIELDS
+        extra = set(source) - CANDIDATE_FIELDS - PHASE_C_EVIDENCE_FIELDS
         if extra:
             raise IntakeError(f"candidate source has unexpected fields {sorted(extra)}")
         source_id = source.get("id")
@@ -957,6 +969,62 @@ def save_candidate_sources(doc: dict) -> Path:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(doc, indent=2, sort_keys=True), encoding="utf-8")
     return target
+
+
+# Phase C readiness audit. A candidate is admittable only when it
+# carries: a verified reusable license, a human rights-holder
+# confirmation for this evaluation, a passed manual privacy review of
+# the actual bytes, vehicle-specific equipment evidence, and the
+# SHA-256 of the original and final evaluation copy. Phase B research
+# records none of the byte-derived evidence (bytes stay undownloaded),
+# so every research-only candidate is blocked with its exact
+# shortfall — never silently, never optimistically.
+def candidate_readiness(source: dict) -> dict:
+    """Report whether a candidate is admittable and what is missing."""
+    missing = []
+    if not (
+        source.get("license_verified") and source.get("license") in CANDIDATE_LICENSES
+    ):
+        missing.append("usage rights verified for evaluation use")
+    if source.get("rights_confirmed") is not True:
+        missing.append("rights-holder confirmation for this evaluation")
+    if source.get("privacy_review") != "passed":
+        missing.append("manual privacy review of actual bytes")
+    if not source.get("equipment_evidence"):
+        missing.append("vehicle-specific equipment evidence")
+    for field in ("original_sha256", "evaluation_sha256"):
+        value = source.get(field)
+        valid = isinstance(value, str) and len(value) == 64
+        if valid:
+            try:
+                int(value, 16)
+            except ValueError:
+                valid = False
+        if not valid:
+            missing.append(field)
+    return {"id": source.get("id"), "ready": not missing, "missing": missing}
+
+
+def audit_phase_c_readiness(doc: dict) -> dict:
+    """Separate admittable candidates from blocked ones with shortfalls."""
+    validate_candidate_sources(doc)
+    ready = []
+    blocked = []
+    for source in doc["sources"]:
+        report = candidate_readiness(source)
+        if report["ready"]:
+            ready.append(report["id"])
+        else:
+            blocked.append(report)
+    return {
+        "ready": ready,
+        "blocked": blocked,
+        "summary": {
+            "ready": len(ready),
+            "blocked": len(blocked),
+            "total": len(doc["sources"]),
+        },
+    }
 
 
 def load_register() -> dict:

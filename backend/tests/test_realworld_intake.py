@@ -853,6 +853,72 @@ def test_candidate_sources_contain_no_image_bytes():
                     raise AssertionError(f"{key} looks like embedded bytes")
 
 
+def _ready_source(**overrides):
+    source = _candidate_source(id="cand-ready-001")
+    source.update(
+        {
+            "rights_confirmed": True,
+            "privacy_review": "passed",
+            "equipment_evidence": "window sticker record 2026-11-05 on file",
+            "original_sha256": "b" * 64,
+            "evaluation_sha256": "c" * 64,
+        }
+    )
+    source.update(overrides)
+    return source
+
+
+def test_readiness_blocks_evidence_free_candidate():
+    """A metadata-only candidate is blocked on privacy, equipment, hashes."""
+    from audits.realworld_intake import candidate_readiness
+
+    report = candidate_readiness(_candidate_source())
+    assert report["ready"] is False
+    assert "manual privacy review of actual bytes" in report["missing"]
+    assert "vehicle-specific equipment evidence" in report["missing"]
+    assert "original_sha256" in report["missing"]
+    assert "evaluation_sha256" in report["missing"]
+
+
+def test_readiness_passes_fully_evidenced_candidate():
+    """All Phase C evidence present admits readiness."""
+    from audits.realworld_intake import candidate_readiness
+
+    report = candidate_readiness(_ready_source())
+    assert report == {"id": "cand-ready-001", "ready": True, "missing": []}
+
+
+def test_readiness_requires_reusable_license_and_confirmation():
+    """Unverifiable licenses and unconfirmed rights block readiness."""
+    from audits.realworld_intake import candidate_readiness
+
+    assert (
+        "usage rights verified for evaluation use"
+        in candidate_readiness(
+            _ready_source(license="unknown", license_verified=False)
+        )["missing"]
+    )
+    assert (
+        "rights-holder confirmation for this evaluation"
+        in candidate_readiness(_ready_source(rights_confirmed=False))["missing"]
+    )
+
+
+def test_phase_c_audit_summarizes_blocked_candidates():
+    """The audit separates ready from blocked with exact shortfalls."""
+    from audits.realworld_intake import audit_phase_c_readiness
+
+    doc = {
+        "candidate_version": "candidates-v1",
+        "sources": [_candidate_source(), _ready_source()],
+    }
+    audit = audit_phase_c_readiness(doc)
+    assert audit["summary"] == {"ready": 1, "blocked": 1, "total": 2}
+    assert audit["ready"] == ["cand-ready-001"]
+    assert audit["blocked"][0]["id"] == "cand-forte-2015-dash"
+    assert audit["blocked"][0]["missing"]
+
+
 def test_intake_never_derives_labels_from_reconciliation():
     """Admission code must not call the production reconciler."""
     source = (REPO_ROOT / "backend" / "audits" / "realworld_intake.py").read_text(
