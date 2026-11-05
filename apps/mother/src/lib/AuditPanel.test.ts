@@ -101,8 +101,8 @@ const evidence = {
     {
       id: 'e1',
       stage: 'muse',
-      provider: 'baseten',
-      model_id: 'meta-models/muse-spark-open-1026',
+      provider: 'meta',
+      model_id: 'muse-spark-1.3-contributor',
       photo_ids: [],
       ok: true,
       attempts: 1,
@@ -203,12 +203,173 @@ describe('AuditPanel', () => {
     expect(screen.getByRole('button', { name: 'Run fresh audit' })).toBeInTheDocument();
   });
 
+  it('sends scope acc when running an ACC audit', async () => {
+    const posted: { url: string; body: unknown }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: unknown, init?: RequestInit) => {
+        if (String(url).endsWith('/audits') && init?.method === 'POST') {
+          posted.push({ url: String(url), body: JSON.parse(String(init?.body)) });
+          return new Response(
+            JSON.stringify({
+              job: { ...baseJob, id: JOB, status: 'queued', current_stage: '' },
+              created: true,
+            }),
+          );
+        }
+        if (String(url) === '/api/csrf') {
+          return new Response(JSON.stringify({ csrf_token: 'test-csrf' }));
+        }
+        if (String(url).endsWith('/audits')) return new Response(JSON.stringify([]));
+        if (String(url).includes(`/api/audits/${JOB}/evidence`)) {
+          return new Response(JSON.stringify({ observations: [], crops: [], executions: [] }));
+        }
+        throw new Error(`unexpected fetch ${String(url)}`);
+      }),
+    );
+    render(AuditPanel, {
+      props: {
+        listingId: LISTING,
+        advertisedClaims: ['Adaptive Cruise Control', 'Bluetooth'],
+        requestedChecks: [],
+      },
+    });
+    (await screen.findByRole('button', { name: 'Run ACC Audit' })).click();
+    await vi.waitFor(() => expect(posted).toHaveLength(1));
+    expect(posted[0].body).toEqual({ scope: 'acc' });
+  });
+
   it('shows cancel for in-flight jobs', async () => {
     const running = { ...baseJob, status: 'running', current_stage: 'muse' };
     stubFetch({ [`/api/listings/${LISTING}/audits`]: [running] });
     render(AuditPanel, { props: { listingId: LISTING } });
     expect(await screen.findByText('running — muse')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+  });
+
+  it('shows photo-level stage detail and a paced ETA while observing', async () => {
+    const running = {
+      ...baseJob,
+      status: 'running',
+      current_stage: 'muse',
+      calls_made: 10,
+      model_calls_made: 9,
+      created_at: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    };
+    const inFlightEvidence = {
+      observations: [],
+      crops: [],
+      executions: [
+        {
+          id: 'e0',
+          stage: 'screening',
+          provider: 'local',
+          model_id: '',
+          photo_ids: [],
+          ok: true,
+          attempts: 1,
+          latency_ms: 50,
+          usage: { claims: 2, photos: 31, integrity: 'sha256-verified' },
+          cost_usd: null,
+          error_code: '',
+          created_at: running.created_at,
+        },
+        {
+          id: 'e1',
+          stage: 'muse',
+          provider: 'meta',
+          model_id: 'muse-spark-1.3-contributor',
+          photo_ids: [],
+          ok: true,
+          attempts: 1,
+          latency_ms: 9000,
+          usage: {
+            prompt_version: 'triage-v1',
+            triage_included: 6,
+            triage_excluded: ['x1', 'x2', 'x3', 'x4'],
+            filename_excluded: ['f0'],
+          },
+          cost_usd: '0.0001',
+          error_code: '',
+          created_at: running.created_at,
+        },
+        {
+          id: 'e2',
+          stage: 'muse',
+          provider: 'meta',
+          model_id: 'muse-spark-1.3-contributor',
+          photo_ids: ['p1'],
+          ok: true,
+          attempts: 1,
+          latency_ms: 12000,
+          usage: { prompt_version: 'm2' },
+          cost_usd: '0.0005',
+          error_code: '',
+          created_at: running.created_at,
+        },
+        {
+          id: 'e3',
+          stage: 'muse',
+          provider: 'meta',
+          model_id: 'muse-spark-1.3-contributor',
+          photo_ids: ['p2'],
+          ok: true,
+          attempts: 1,
+          latency_ms: 12000,
+          usage: { prompt_version: 'm2' },
+          cost_usd: '0.0005',
+          error_code: '',
+          created_at: running.created_at,
+        },
+      ],
+    };
+    stubFetch({
+      [`/api/listings/${LISTING}/audits`]: [running],
+      [`/api/audits/${JOB}`]: running,
+      [`/api/audits/${JOB}/evidence`]: inFlightEvidence,
+    });
+    render(AuditPanel, { props: { listingId: LISTING } });
+    expect(
+      await screen.findByText('Examining photo 3 of 6 (4 by triage + 1 by filename)'),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/~[0-9]+ (min|sec) left/)).toBeInTheDocument();
+  });
+
+  it('shows triage narrowing before photo observation starts', async () => {
+    const running = {
+      ...baseJob,
+      status: 'running',
+      current_stage: 'muse',
+      calls_made: 1,
+      model_calls_made: 0,
+    };
+    stubFetch({
+      [`/api/listings/${LISTING}/audits`]: [running],
+      [`/api/audits/${JOB}`]: running,
+      [`/api/audits/${JOB}/evidence`]: {
+        observations: [],
+        crops: [],
+        executions: [
+          {
+            id: 'e0',
+            stage: 'screening',
+            provider: 'local',
+            model_id: '',
+            photo_ids: [],
+            ok: true,
+            attempts: 1,
+            latency_ms: 50,
+            usage: { claims: 66, photos: 31 },
+            cost_usd: null,
+            error_code: '',
+            created_at: running.created_at,
+          },
+        ],
+      },
+    });
+    render(AuditPanel, { props: { listingId: LISTING } });
+    expect(await screen.findByText(/Narrowing 31 photos to the relevant ones/)).toBeInTheDocument();
+    expect(screen.getByText('estimating pace…')).toBeInTheDocument();
   });
 
   it('shows a PASS banner for seller-advertised ACC with visual support', async () => {

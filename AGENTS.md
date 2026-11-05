@@ -12,8 +12,8 @@ reviewer — the system must never independently certify disputed features.
 
 Stack (locked): Svelte 5 + TypeScript + Vite + Tailwind mother app, Django +
 Django Ninja + SQLite + Pillow backend, WXT + Svelte + TypeScript MV3 browser
-extension. AI inference uses only Meta-developed models: Muse Spark Open 1026
-(via Baseten) and SAM 3.1 (via Meta Model API), server-side only.
+extension. AI inference uses only Meta-developed models: Muse Spark 1.3
+Contributor and SAM 3.1 (both via Meta Model API), server-side only.
 
 ## Rule A: Engineering workflow
 
@@ -59,8 +59,8 @@ unexecuted test passed):
 
 Application inference uses only the approved Meta-developed models:
 
-- Baseten `meta-models/muse-spark-open-1026` (base
-  `https://inference.baseten.co/v1`, credential `BASETEN_API_KEY`)
+- Meta `muse-spark-1.3-contributor` (base `https://api.meta.ai/v1`,
+  credential `META_API_KEY`)
 - Meta `sam-3.1` (base `https://api.meta.ai/v1`, credential `META_API_KEY`)
 
 Rules:
@@ -73,7 +73,7 @@ Rules:
   + version, prompt/instruction version, request params, input photo ids,
   status, validation result, latency, retries, token usage, estimated cost,
   error info, audit job id. Never log credentials or excess payload.
-- Costs stay attributable to separate Baseten vs Meta credit pools.
+- Costs stay attributable to separate Meta Muse vs Meta SAM credit pools.
 - No inference during CI, startup, import, or fixture testing. Tests and CI
   use deterministic mocks. The app must work without model keys until real
   inference lands.
@@ -237,7 +237,7 @@ available. Unsupported success claims are prohibited.
   works; no fabricated audit findings, scores, or "AI-verified" labels
 - [ ] Auth/input-validation tests pass; frontend + backend checks green;
   E2E executed or limitations explicitly reported
-- [ ] CI runs with mocked providers only; zero Baseten/Meta calls; no
+- [ ] CI runs with mocked providers only; zero Meta (Muse/SAM) calls; no
   credentials in source, history, logs, or artifacts
 - [ ] README enables public reproduction; no paid credits consumed
 - [ ] Reviewable draft PR exists; PR #2 (live inference, audit worker,

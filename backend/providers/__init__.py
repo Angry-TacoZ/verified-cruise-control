@@ -20,17 +20,28 @@ from .base import (
     UsageLedger,
     UsageRecord,
 )
-from .baseten import BASETEN_API_BASE, BASETEN_MODEL_ID, BasetenMuseAdapter
 from .meta import META_API_BASE, SAM31_MODEL_ID, MetaSamAdapter
+from .meta_muse import (
+    META_MUSE_API_BASE,
+    META_MUSE_MODEL_ID,
+    META_MUSE_PRICING_VERSION,
+    MetaMuseAdapter,
+    MuseObservationResult,
+    MuseRequest,
+    validate_observation_payload,
+)
 
 __all__ = [
-    "BASETEN_API_BASE",
-    "BASETEN_MODEL_ID",
     "META_API_BASE",
+    "META_MUSE_API_BASE",
+    "META_MUSE_MODEL_ID",
+    "META_MUSE_PRICING_VERSION",
     "SAM31_MODEL_ID",
-    "BasetenMuseAdapter",
     "ImageAttachment",
+    "MetaMuseAdapter",
     "MetaSamAdapter",
+    "MuseObservationResult",
+    "MuseRequest",
     "PriceTable",
     "ProviderAdapter",
     "ProviderAuthError",
@@ -41,4 +52,5 @@ __all__ = [
     "ProviderTimeoutError",
     "UsageLedger",
     "UsageRecord",
+    "validate_observation_payload",
 ]

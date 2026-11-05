@@ -102,6 +102,57 @@ def test_queue_reuses_in_flight_without_respawn(
     assert AuditJob.objects.count() == 1
 
 
+def test_queue_acc_scope(operator_client, listing_with_photo, enabled, no_spawn):
+    response = post_json(
+        operator_client,
+        f"/api/listings/{listing_with_photo.pk}/audits",
+        {"scope": "acc"},
+    )
+    assert response.status_code == 202, response.content
+    assert response.json()["created"] is True
+
+
+def test_queue_acc_scope_conflicts_with_full_audit(operator_client, enabled, no_spawn):
+    from listings.models import Listing
+
+    listing = Listing.objects.create(
+        source_url="https://example.test/l/api-audit-conflict",
+        source_site="example.test",
+        title="api audit conflict listing",
+        advertised_claims=["adaptive cruise control", "lane keeping assist"],
+        expected_photo_count=1,
+    )
+    from evidence import images
+
+    from .conftest import make_image_bytes
+
+    images.store_listing_photo(
+        listing,
+        data=make_image_bytes("PNG", "Q1"),
+        filename="q1.png",
+        source_url=None,
+        provenance="extension",
+    )
+    _queue(operator_client, listing.pk)
+    response = post_json(
+        operator_client,
+        f"/api/listings/{listing.pk}/audits",
+        {"scope": "acc"},
+    )
+    assert response.status_code == 409, response.content
+
+
+def test_queue_unknown_scope_is_refused(
+    operator_client, listing_with_photo, enabled, no_spawn
+):
+    response = post_json(
+        operator_client,
+        f"/api/listings/{listing_with_photo.pk}/audits",
+        {"scope": "everything"},
+    )
+    assert response.status_code == 422, response.content
+
+
 def test_queue_refuses_when_disabled(operator_client, listing, settings, no_spawn):
     settings.AUDIT_INFERENCE_ENABLED = False
     response = _queue(operator_client, listing.pk)

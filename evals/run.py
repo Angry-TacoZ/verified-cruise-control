@@ -8,9 +8,9 @@ Usage:
     uv run python evals/run.py realworld-live --manifest <path>
                                                     # paired live eval, needs approval
 
-``muse-live`` refuses to run unless ``VCC_LIVE_SMOKE=1`` is set, a Baseten
-key is present, and the estimated spend is under ``--max-spend`` (default
-$0.25). Never run it in CI.
+``muse-live`` refuses to run unless ``VCC_LIVE_SMOKE=1`` is set, a Meta
+(Muse) key is present, and the estimated spend is under ``--max-spend``
+(default $0.25). Never run it in CI.
 
 ``realworld-dryrun`` validates a realworld-v1 manifest, verifies photo
 bytes when present, scores recorded model outputs when given, and prints
@@ -125,7 +125,7 @@ def run_reconcile(version: str = GOLDENS_VERSION) -> dict:
 
 def run_muse_live(max_spend: float) -> dict:
     from providers.base import ImageAttachment
-    from providers.baseten import BasetenMuseAdapter, MuseRequest
+    from providers.meta_muse import MetaMuseAdapter, MuseRequest
 
     if os.environ.get("VCC_LIVE_SMOKE") != "1":
         raise SystemExit("refusing: set VCC_LIVE_SMOKE=1 to run live evals")
@@ -142,7 +142,7 @@ def run_muse_live(max_spend: float) -> dict:
         attachments.append(
             ImageAttachment(photo_id=name, mime_type=MIME[Path(name).suffix], data=data)
         )
-    adapter = BasetenMuseAdapter()
+    adapter = MetaMuseAdapter()
     adapter.require_configured()
     request = MuseRequest(
         prompt_version=PROMPT_VERSION,
@@ -306,15 +306,15 @@ def run_realworld_live(
     """Paired baseline (m2) vs reference-assisted (m3) live evaluation.
 
     Injectable adapters/directories exist for deterministic offline tests
-    (fake adapters, tmp dirs); production calls construct the real Baseten
-    and Meta adapters. No paid inference happens without VCC_LIVE_SMOKE=1
+    (fake adapters, tmp dirs); production calls construct the real Meta
+    Muse and Meta SAM adapters. No paid inference happens without VCC_LIVE_SMOKE=1
     (plus VCC_LIVE_SAM=1 for the SAM stage) and configured provider keys.
 
     With ``pattern_mode`` an opt-in third "pattern" mode (prompt m4)
     joins the loop; the default two-mode run is byte-identical without it.
     """
     from providers.base import ImageAttachment
-    from providers.baseten import BasetenMuseAdapter, MuseRequest
+    from providers.meta_muse import MetaMuseAdapter, MuseRequest
 
     if os.environ.get("VCC_LIVE_SMOKE") != "1":
         raise SystemExit("refusing: set VCC_LIVE_SMOKE=1 to run live evals")
@@ -352,7 +352,7 @@ def run_realworld_live(
             f"refusing: worst-case bound ${preflight['worst_case_usd']} exceeds --max-spend ${max_spend}"
         )
     if muse_adapter is None:
-        muse_adapter = BasetenMuseAdapter()
+        muse_adapter = MetaMuseAdapter()
     muse_adapter.require_configured()
 
     out_dir = Path(results_dir) if results_dir is not None else RESULTS

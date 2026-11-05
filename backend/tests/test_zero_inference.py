@@ -28,7 +28,6 @@ def _block_sockets(monkeypatch):
 def test_import_flow_makes_zero_network_calls(
     client, ext_headers, listing_payload, monkeypatch, png_bytes
 ):
-    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
     monkeypatch.delenv("META_API_KEY", raising=False)
     _block_sockets(monkeypatch)
 
@@ -61,7 +60,6 @@ def test_import_flow_makes_zero_network_calls(
 def test_missing_credentials_do_not_break_setup_or_reads(
     client, csrf_client, monkeypatch
 ):
-    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
     monkeypatch.delenv("META_API_KEY", raising=False)
     assert client.get("/api/health").status_code == 200
     assert csrf_client.get("/api/setup/status").status_code == 200

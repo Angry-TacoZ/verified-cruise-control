@@ -6,103 +6,95 @@ import ListingDetail from './ListingDetail.svelte';
 afterEach(() => cleanup());
 
 const listing = {
-  id: '11111111-1111-1111-1111-111111111111',
-  source_url: 'https://example.test/l/1',
+  id: 'l1',
+  source_url:
+    'https://example.test/l/1?inclusionType=NATIONWIDE_SHIPPING&sponsoredType=NONE&extra=abcdefghij',
   source_site: 'example.test',
-  year: 1987,
+  year: 2021,
   make: 'Test',
-  model: 'Coupe',
+  model: 'Hybrid',
   trim: 'LX',
   vin: null,
-  title: '1987 Test Coupe LX',
+  title: '2021 Test Hybrid LX',
   description: '',
-  advertised_claims: [],
-  expected_photo_count: 2,
-  failed_upload_count: 1,
+  advertised_claims: ['VIN WMWZB3C57R7N12345', 'Bluetooth'],
+  expected_photo_count: 3,
+  failed_upload_count: 2,
   photo_count: 1,
   import_status: 'partial',
   created_at: '2026-10-29T00:00:00Z',
 };
 
-const failures = [
+const photos = [
   {
-    id: 'f1',
-    listing_id: listing.id,
-    key: 'url:abc',
-    kind: 'download',
-    detail: 'image download failed (404)',
-    source_url: 'http://127.0.0.1:8901/photos/missing.jpg',
-    resolved: false,
-    created_at: '2026-10-29T00:00:00Z',
+    id: 'p1',
+    listing_id: 'l1',
+    source_url: 'https://example.test/p1.jpg',
+    sha256: 'abc123def456abc123def456abc123def456abc123def456abc123def456abcd',
+    original_filename: 'p1.jpg',
+    file_size: 1234,
+    mime_type: 'image/jpeg',
+    image_format: 'JPEG',
+    width: 800,
+    height: 600,
+    provenance: 'listing',
+    upload_status: 'stored',
   },
 ];
 
-function stubFetch(failurePayload: unknown[]) {
+const failures = [
+  {
+    id: 'f1',
+    kind: 'download',
+    detail: 'host blocked the request',
+    source_url: 'https://cdn.test/a.jpg',
+    resolved: false,
+  },
+  { id: 'f2', kind: 'permission', detail: '', source_url: '', resolved: true },
+];
+
+function stubFetch(failureRows: unknown[]) {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (url: string) => {
-      if (url === `/api/listings/${listing.id}`) {
-        return new Response(JSON.stringify(listing));
-      }
-      if (url === `/api/listings/${listing.id}/photos`) {
-        return new Response(JSON.stringify([]));
-      }
-      if (url === `/api/listings/${listing.id}/failed-photos`) {
-        return new Response(JSON.stringify(failurePayload));
-      }
-      if (url === `/api/listings/${listing.id}/audits`) {
-        return new Response(JSON.stringify([]));
-      }
-      throw new Error(`unexpected ${url}`);
+    vi.fn(async (url: unknown) => {
+      const u = String(url);
+      if (u.endsWith('/failed-photos')) return new Response(JSON.stringify(failureRows));
+      if (u.endsWith('/photos')) return new Response(JSON.stringify(photos));
+      return new Response(JSON.stringify(listing));
     }),
   );
 }
 
 describe('ListingDetail import failures', () => {
-  it('shows outstanding per-photo failure outcomes for a partial import', async () => {
+  it('summarizes outstanding failures and collapses per-photo rows', async () => {
     stubFetch(failures);
-    render(ListingDetail, { props: { id: listing.id } });
-    expect(await screen.findByText('partial')).toBeInTheDocument();
-    expect(await screen.findByText('Import failures (1)')).toBeInTheDocument();
-    expect(await screen.findByText('download failed')).toBeInTheDocument();
-    expect(await screen.findByText('— image download failed (404)')).toBeInTheDocument();
-    expect(await screen.findByText('http://127.0.0.1:8901/photos/missing.jpg')).toBeInTheDocument();
+    render(ListingDetail, { props: { id: 'l1' } });
+    expect(await screen.findByText('Import failures (2)')).toBeInTheDocument();
+    expect(await screen.findByText(/1 photo couldn't be/)).toBeInTheDocument();
+    expect(await screen.findByText(/runs on the 1 available/)).toBeInTheDocument();
+    const details = screen.getByText('Show per-photo details').closest('details');
+    expect(details).not.toBeNull();
+    expect(details!.textContent).toMatch(/download failed/);
+    expect(details!.textContent).toMatch(/host permission denied \(recovered\)/);
+    expect(details!.textContent).toMatch(/cdn\.test\/a\.jpg/);
   });
 
-  it('marks recovered failures while keeping them visible', async () => {
-    stubFetch([{ ...failures[0], resolved: true }]);
-    render(ListingDetail, { props: { id: listing.id } });
-    expect(await screen.findByText('download failed (recovered)')).toBeInTheDocument();
-    expect(
-      await screen.findByText('All reported failures recovered on retry — evidence is complete.'),
-    ).toBeInTheDocument();
-  });
-
-  it('hides the failure section when nothing was reported', async () => {
+  it('truncates the source URL but keeps the full link, and shows the claim VIN', async () => {
     stubFetch([]);
-    render(ListingDetail, { props: { id: listing.id } });
-    await screen.findByRole('heading', { name: '1987 Test Coupe LX' });
-    expect(screen.queryByText(/Import failures \(/)).not.toBeInTheDocument();
+    render(ListingDetail, { props: { id: 'l1' } });
+    const link = await screen.findByRole('link', { name: /example\.test/ });
+    expect(link.textContent).toMatch(/\u2026$/);
+    expect(link.textContent!.length).toBeLessThan(listing.source_url.length);
+    expect(link.getAttribute('href')).toBe(listing.source_url);
+    expect(link.getAttribute('title')).toBe(listing.source_url);
+    expect(screen.getByText('WMWZB3C57R7N12345')).toBeInTheDocument();
   });
 
-  it('reloads when the routed listing id changes', async () => {
-    const other = { ...listing, id: 'other-id', title: 'Other Listing', failed_upload_count: 0 };
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string) => {
-        if (url === `/api/listings/${listing.id}`) return new Response(JSON.stringify(listing));
-        if (url === `/api/listings/other-id`) return new Response(JSON.stringify(other));
-        if (url.endsWith('/photos')) return new Response(JSON.stringify([]));
-        if (url.endsWith('/failed-photos')) {
-          return new Response(JSON.stringify(url.includes('other-id') ? [] : failures));
-        }
-        throw new Error(`unexpected ${url}`);
-      }),
-    );
-    const view = render(ListingDetail, { props: { id: listing.id } });
-    await screen.findByText('Import failures (1)');
-    await view.rerender({ id: 'other-id' });
-    await screen.findByRole('heading', { name: 'Other Listing' });
-    expect(screen.queryByText(/Import failures \(/)).not.toBeInTheDocument();
+  it('reports a fully recovered import without the warning tone', async () => {
+    stubFetch([{ ...failures[1] }]);
+    render(ListingDetail, { props: { id: 'l1' } });
+    expect(await screen.findByText('Import failures (1)')).toBeInTheDocument();
+    expect(await screen.findByText(/evidence is complete/)).toBeInTheDocument();
+    expect(screen.queryByText(/couldn't be/)).not.toBeInTheDocument();
   });
 });

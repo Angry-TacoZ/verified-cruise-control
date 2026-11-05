@@ -265,10 +265,10 @@ export const backend = {
   revokePairing: (id: string) =>
     request<{ ok: boolean }>(`/api/pairing/${id}/revoke`, { method: 'POST', json: {} }),
   photoUrl: (listingId: string, photoId: string) => `/api/listings/${listingId}/photos/${photoId}`,
-  queueAudit: (listingId: string) =>
+  queueAudit: (listingId: string, scope?: string) =>
     request<{ job: AuditJob; created: boolean }>(`/api/listings/${listingId}/audits`, {
       method: 'POST',
-      json: {},
+      json: scope ? { scope } : {},
     }),
   listAudits: (listingId: string) => request<AuditJob[]>(`/api/listings/${listingId}/audits`),
   getAudit: (jobId: string) => request<AuditJob>(`/api/audits/${jobId}`),

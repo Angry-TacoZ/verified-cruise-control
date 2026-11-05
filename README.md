@@ -107,9 +107,9 @@ and does not show.
 zero model calls by design — it built the evidence pipeline the models now
 consume:
 
-- **Muse Spark Open 1026** (Baseten) provides visual understanding of every
-  listing photo: which assistance controls, sensors, and indicators are visible,
-  and where.
+- **Muse Spark 1.3 Contributor** (Meta Model API) provides visual
+  understanding of every listing photo: which assistance controls, sensors, and
+  indicators are visible, and where.
 - **SAM 3.1** (Meta) localizes and segments the named parts — the steering-wheel
   button cluster, the grille sensor window — so verdicts rest on precise regions
   instead of vague whole-image captions.
@@ -286,7 +286,7 @@ verify pairing + evidence persist, re-import and confirm no duplicate
 evidence. The partial fixture (`listing-partial.html`) exercises the
 failed-photo path: one photo 404s, the failure is recorded server-side and
 shown in the mother app, and the popup's retry reuses the same listing.
-Import makes zero Baseten/Meta calls by construction.
+Import makes zero Meta (Muse/SAM) calls by construction.
 
 ## Audit engine (PR #2)
 
@@ -294,8 +294,8 @@ Audits compare advertised claims against the imported photos and produce
 per-claim findings in five states (`verified`, `visually_supported`,
 `insufficient_evidence`, `not_visually_verifiable`, `contradicted`).
 
-Run one (needs `VCC_INFERENCE_ENABLED=1` plus `BASETEN_API_KEY` and
-`META_API_KEY` in `backend/.env` — see `backend/.env.example`):
+Run one (needs `VCC_INFERENCE_ENABLED=1` plus `META_API_KEY`
+in `backend/.env` — see `backend/.env.example`):
 
 1. `./scripts/dev.ps1` (the audit worker starts in its own window), or
    `./scripts/start-audit-worker.ps1` standalone.

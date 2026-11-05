@@ -28,7 +28,7 @@ from providers.base import (
     ProviderResponseError,
     UsageRecord,
 )
-from providers.baseten import MuseObservationResult
+from providers.meta_muse import MuseObservationResult, TriageResult
 
 from .conftest import make_image_bytes
 
@@ -371,11 +371,53 @@ class FakeMuseAdapter:
     model_id = "fake-muse"
     last_attempts = 1
 
-    def __init__(self, observations=None, error=None, cost=0.0123):
+    def __init__(
+        self,
+        observations=None,
+        error=None,
+        cost=0.0123,
+        triage_result=None,
+        triage_error=None,
+    ):
         self._observations = observations or []
         self._error = error
         self._cost = cost
+        self._triage_result = triage_result
+        self._triage_error = triage_error
         self.calls = 0
+        self.triage_calls = 0
+
+    def analyze_triage(self, request):
+        """Serve the triage step without consuming observation scripts.
+
+        Defaults to "everything is relevant" (production fallback
+        equivalent); tests set triage_result to a photo-id list or
+        triage_error to exercise narrowing and fallback.
+        """
+        self.triage_calls += 1
+        if self._triage_error is not None:
+            raise self._triage_error
+        if self._triage_result is not None:
+            included = tuple(self._triage_result)
+        else:
+            included = tuple(request.photo_ids)
+        return TriageResult(
+            included=included,
+            model=self.model_id,
+            prompt_version=request.prompt_version,
+            usage=UsageRecord(
+                provider="meta",
+                model_id=self.model_id,
+                prompt_version=request.prompt_version,
+                photo_ids=tuple(request.photo_ids),
+                status="ok",
+                latency_ms=11,
+                input_tokens=100,
+                output_tokens=50,
+                estimated_cost_usd=self._cost,
+                pricing_version="test",
+            ),
+        )
 
     def analyze(self, request):
         self.calls += 1
@@ -386,7 +428,7 @@ class FakeMuseAdapter:
             model=self.model_id,
             prompt_version=request.prompt_version,
             usage=UsageRecord(
-                provider="baseten",
+                provider="meta",
                 model_id=self.model_id,
                 prompt_version=request.prompt_version,
                 photo_ids=tuple(request.photo_ids),
@@ -503,7 +545,7 @@ def test_muse_unknown_cost_pauses(listing, photos, enabled):
     # billed server-side, and a resumed audit must never re-pay for them.
     assert Observation.objects.filter(job=job).count() == 2
     row = AuditExecution.objects.filter(
-        job=job, stage=Stage.Muse, provider=Provider.BASETEN
+        job=job, stage=Stage.Muse, provider=Provider.META
     ).get()
     assert row.cost_usd is None
     assert row.attempts == 1
@@ -813,7 +855,7 @@ def test_recheck_confirms_crop(listing, photos, enabled):
     obs = Observation.objects.get(job=job, source=ObservationSource.RECHECK)
     assert obs.source_crop_id == crop.pk
     row = AuditExecution.objects.get(
-        job=job, stage=Stage.RECHECK, provider=Provider.BASETEN
+        job=job, stage=Stage.RECHECK, provider=Provider.META
     )
     assert row.usage["prompt_version"] == "m2-recheck"
     assert row.usage["crop_id"] == str(crop.pk)
@@ -1358,7 +1400,7 @@ def test_muse_chunks_large_claim_sets(enabled):
     )
     assert pipeline.run_muse(job.pk, "w1", screened, adapter) == 9
     assert adapter.calls == 2
-    assert adapter.requests[0].max_output_tokens == 4096
+    assert adapter.requests[0].max_output_tokens == pipeline.MUSE_MAX_OUTPUT_TOKENS
 
 
 def test_muse_empty_batch_fails(listing, photos, enabled):
@@ -1373,7 +1415,7 @@ def test_muse_empty_batch_fails(listing, photos, enabled):
     # The billed call is still in the ledger.
     assert (
         AuditExecution.objects.filter(
-            job=job, stage=Stage.Muse, provider=Provider.BASETEN
+            job=job, stage=Stage.Muse, provider=Provider.META
         ).count()
         == 1
     )
@@ -1435,7 +1477,7 @@ def test_muse_duplicates_first_wins_with_warning(listing, photos, enabled):
     )
     assert obs.rationale == "first"
     row = AuditExecution.objects.filter(
-        job=job, stage=Stage.Muse, provider=Provider.BASETEN
+        job=job, stage=Stage.Muse, provider=Provider.META
     ).earliest("created_at")
     assert any("duplicate" in w for w in row.usage["validation_warnings"])
 
@@ -1746,8 +1788,8 @@ def test_provider_costs_attributable_by_pool(listing, photos, enabled):
     totals: dict[str, Decimal] = {}
     for row in AuditExecution.objects.filter(job=job).exclude(cost_usd__isnull=True):
         totals[row.provider] = totals.get(row.provider, Decimal(0)) + row.cost_usd
-    assert totals[Provider.BASETEN] == Decimal("0.0123") * 2
-    assert totals[Provider.META] == Decimal("0.0025")
+    assert totals[Provider.META] == Decimal("0.0123") * 2 + Decimal("0.0025")
+    assert set(totals) == {Provider.META}
     job.refresh_from_db()
     assert job.spend_usd == sum(totals.values(), Decimal(0))
 
@@ -1804,6 +1846,7 @@ def test_full_pipeline_completes_with_findings(listing, photos, enabled):
     )
     assert stages == [
         "screening",
+        "muse",  # triage-v1 photo relevance pass
         "muse",
         "muse",
         "sam",
@@ -1956,7 +1999,7 @@ def test_run_audit_worker_once_processes_job(listing, photos, enabled, monkeypat
 
     muse = ScriptedMuseAdapter(_two_photo_scripts(photos))
     sam = FakeSamAdapter(records=[_segment()])
-    monkeypatch.setattr(pipeline, "BasetenMuseAdapter", lambda model_id="": muse)
+    monkeypatch.setattr(pipeline, "MetaMuseAdapter", lambda model_id="": muse)
     monkeypatch.setattr(pipeline, "MetaSamAdapter", lambda model_id="": sam)
     services.queue_audit(listing.pk, requested_by="operator")
     out = io.StringIO()
@@ -2072,7 +2115,7 @@ def test_stale_muse_keeps_ledger_loses_evidence(listing, photos, enabled):
     assert job.reserved_calls == 0
     assert (
         AuditExecution.objects.filter(
-            job=job, stage=Stage.Muse, provider=Provider.BASETEN
+            job=job, stage=Stage.Muse, provider=Provider.META
         ).count()
         == 1
     )
@@ -2387,7 +2430,7 @@ def test_recheck_per_crop_spend_attribution(listing, photos, enabled):
     assert pipeline.run_recheck(job.pk, "w1", adapter) == 2
     rows = list(
         AuditExecution.objects.filter(
-            job=job, stage=Stage.RECHECK, provider=Provider.BASETEN
+            job=job, stage=Stage.RECHECK, provider=Provider.META
         )
     )
     assert len(rows) == 2

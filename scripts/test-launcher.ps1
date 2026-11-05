@@ -153,14 +153,13 @@ Set-Content $fakeDotEnv @'
 # comment line
 
 VCC_INFERENCE_ENABLED=1
-BASETEN_API_KEY=fake-test-key
 META_API_KEY="quoted-test-key"
 EMPTY_IGNORED=
 BAD LINE WITHOUT EQUALS IGNORED
 '@ -Encoding UTF8
 $dotenvStart = Invoke-Launcher 'Start' $testApiPort $testWebPort $testStateDir $fakeDotEnv
 Assert ($dotenvStart.code -eq 0 -or $dotenvStart.code -eq 2) "Start with test .env exits 0/2 (got $($dotenvStart.code))"
-Assert ($dotenvStart.output -match 'backend/.env supplies 3 variable\(s\)') '.env parsing skips comments, blanks, empties, bad lines'
+Assert ($dotenvStart.output -match 'backend/.env supplies 2 variable\(s\)') '.env parsing skips comments, blanks, empties, bad lines'
 Assert ($dotenvStart.output -match 'Inference: ENABLED') '.env flag and keys reach the effective inference report'
 Assert ($dotenvStart.output -notmatch 'fake-test-key|quoted-test-key') '.env values are never printed'
 $finalStop = Invoke-Launcher 'Stop' $testApiPort $testWebPort $testStateDir

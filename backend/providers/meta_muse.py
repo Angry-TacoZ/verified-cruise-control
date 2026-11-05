@@ -1,12 +1,19 @@
-"""Baseten Muse Spark Open adapter (PR #2: live inference).
+"""Meta Muse Spark adapter (live inference).
 
-Verified 2026-10-31 against official Baseten docs: OpenAI-compatible
-``POST {api_base}/chat/completions`` with Bearer ``BASETEN_API_KEY``.
-Images ride as ``image_url`` data URIs. Baseten documents that Muse Spark
-Open *accepts* ``response_format: json_schema`` but does not enforce it,
-so the strict client-side validator below — not the server — is the
-schema contract. Malformed model output is quarantined, never persisted
-as observations.
+Calls Meta Model API's OpenAI-compatible ``POST {api_base}/chat/completions``
+with a Muse Spark model (default ``muse-spark-1.3-contributor``). Images ride
+as ``image_url`` data URIs, so local originals never need public hosting.
+
+Pricing (USD per 1M tokens, verified Nov 2026 against Meta's published
+rates via promptfoo/LiteLLM/OpenRouter, all converging): input 0.10,
+output 0.20, cached input 0.002. The contributor tier permits Meta to train
+on prompts/completions; that tradeoff is the operator's explicit choice of
+model ID, recorded on every usage row.
+
+Observation validation lives here next to the only adapter that uses it:
+the server is never the schema contract, malformed output is quarantined,
+and an empty observation list stays valid (a photo may legitimately show
+nothing relevant).
 """
 
 from __future__ import annotations
@@ -28,21 +35,17 @@ from .base import (
     UsageRecord,
 )
 
-BASETEN_MODEL_ID = "meta-models/muse-spark-open-1026"
-BASETEN_API_BASE = "https://inference.baseten.co/v1"
-BASETEN_PRICING_VERSION = "baseten-2026-10-31"
-BASETEN_INPUT_USD_PER_1M = 1.25
-BASETEN_OUTPUT_USD_PER_1M = 4.25
-
-OBSERVATION_REQUIRED_KEYS = (
-    "photo_id",
-    "claim_concept",
-    "visible_object",
-    "description",
-    "supports_localization",
-    "ambiguous",
-    "needs_crop",
-    "needs_other_view",
+OBSERVATION_REQUIRED_KEYS = frozenset(
+    {
+        "photo_id",
+        "claim_concept",
+        "visible_object",
+        "description",
+        "supports_localization",
+        "ambiguous",
+        "needs_crop",
+        "needs_other_view",
+    }
 )
 OBSERVATION_BOOL_KEYS = frozenset(
     {
@@ -92,15 +95,9 @@ class MuseRequest:
                 {"type": "image_url", "image_url": {"url": image.data_url()}}
             )
         return {
-            "model": BASETEN_MODEL_ID,
             "temperature": self.temperature,
             "max_tokens": self.max_output_tokens,
             "response_format": {"type": "json_object"},
-            "metadata": {
-                "prompt_version": self.prompt_version,
-                # Baseten validates metadata values as strings.
-                "photo_ids": ",".join(self.photo_ids),
-            },
             "messages": [
                 {"role": "system", "content": self.system_instructions},
                 {"role": "user", "content": content},
@@ -262,26 +259,66 @@ class MuseObservationResult:
     validation_warnings: tuple[str, ...] = ()
 
 
+META_MUSE_MODEL_ID = "muse-spark-1.3-contributor"
+META_MUSE_API_BASE = "https://api.meta.ai/v1"
+META_MUSE_PRICING_VERSION = "meta-muse-2026-11-04"
+META_MUSE_INPUT_USD_PER_1M = 0.10
+META_MUSE_OUTPUT_USD_PER_1M = 0.20
+
+
 def _sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
-class BasetenMuseAdapter(ProviderAdapter):
-    provider_name = "baseten"
-    model_id = BASETEN_MODEL_ID
-    api_base = BASETEN_API_BASE
-    env_key_name = "BASETEN_API_KEY"
+def validate_triage_payload(
+    payload: object, ordered_ids: list[str]
+) -> tuple[list[str], list[str]]:
+    """Strictly validate a triage response: every screened photo id appears
+    exactly once with a boolean verdict. Anything else raises
+    :class:`ProviderResponseError` so the caller falls back to the full
+    photo set instead of silently auditing a subset.
+    """
+    if not isinstance(payload, dict):
+        raise ProviderResponseError("Meta Muse triage response is not a JSON object")
+    relevant = payload.get("relevant")
+    if not isinstance(relevant, dict):
+        raise ProviderResponseError("Meta Muse triage response lacks a 'relevant' map")
+    wanted = set(ordered_ids)
+    got = set(relevant)
+    if got != wanted:
+        raise ProviderResponseError(
+            f"Meta Muse triage covers {len(got)} of {len(wanted)} photos; "
+            "falling back to the full set"
+        )
+    bad = sorted(key for key, value in relevant.items() if not isinstance(value, bool))
+    if bad:
+        raise ProviderResponseError(
+            f"Meta Muse triage has {len(bad)} non-boolean verdict(s); "
+            "falling back to the full set"
+        )
+    return [pid for pid in ordered_ids if relevant[pid]], []
+
+
+@dataclass(frozen=True)
+class TriageResult:
+    """Validated triage output plus its usage record."""
+
+    included: tuple[str, ...]
+    model: str
+    prompt_version: str
+    usage: UsageRecord
+    validation_warnings: tuple[str, ...] = ()
+
+
+class MetaMuseAdapter(ProviderAdapter):
+    provider_name = "meta"
+    model_id = META_MUSE_MODEL_ID
+    api_base = META_MUSE_API_BASE
+    env_key_name = "META_API_KEY"
     timeout_s = 90.0
     retry_policy = RetryPolicy(max_retries=2)
 
-    def analyze(
-        self,
-        request: MuseRequest,
-        *,
-        client: httpx.Client | None = None,
-        sleep=_sleep,
-    ) -> MuseObservationResult:
-        """Run one Muse observation call with bounded retries."""
+    def _check_request(self, request: MuseRequest) -> None:
         self.require_configured()
         photo_ids = frozenset(request.photo_ids)
         if not photo_ids:
@@ -289,6 +326,18 @@ class BasetenMuseAdapter(ProviderAdapter):
         if {image.photo_id for image in request.images} - photo_ids:
             raise ValueError("MuseRequest images must match declared photo_ids")
 
+    def _post(
+        self,
+        request: MuseRequest,
+        *,
+        client: httpx.Client | None = None,
+        sleep=_sleep,
+    ) -> tuple[httpx.Response, int, float]:
+        """POST one chat-completion request with bounded retries.
+
+        Returns ``(response, retries, started)`` on HTTP 200; otherwise
+        raises the last :class:`ProviderError`.
+        """
         policy = self.retry_policy
         retries = 0
         last_error: ProviderError | None = None
@@ -296,6 +345,8 @@ class BasetenMuseAdapter(ProviderAdapter):
         owned_client = (
             client if client is not None else httpx.Client(timeout=self.timeout_s)
         )
+        # Correlation stays client-side: request photo_ids + ledger rows.
+        payload = request.to_payload()
         try:
             for attempt in range(policy.max_retries + 1):
                 self.live_calls_attempted += 1
@@ -303,16 +354,16 @@ class BasetenMuseAdapter(ProviderAdapter):
                     response = owned_client.post(
                         f"{self.api_base}/chat/completions",
                         headers={"Authorization": f"Bearer {self._api_key}"},
-                        json={**request.to_payload(), "model": self.model_id},
+                        json={**payload, "model": self.model_id},
                     )
                 except (httpx.TimeoutException, httpx.ConnectError) as exc:
                     last_error = ProviderTimeoutError(
-                        f"baseten request failed: {exc.__class__.__name__}"
+                        f"meta request failed: {exc.__class__.__name__}"
                     )
                 else:
                     if response.status_code == 200:
                         self.last_attempts = retries + 1
-                        return self._handle_success(request, response, retries, started)
+                        return response, retries, started
                     last_error = self.map_http_error(
                         response.status_code, response.text
                     )
@@ -330,6 +381,73 @@ class BasetenMuseAdapter(ProviderAdapter):
         self.last_attempts = retries + 1
         self._record(request, retries, started, None, None, None, last_error)
         raise last_error
+
+    def analyze(
+        self,
+        request: MuseRequest,
+        *,
+        client: httpx.Client | None = None,
+        sleep=_sleep,
+    ) -> MuseObservationResult:
+        """Run one Muse observation call with bounded retries."""
+        self._check_request(request)
+        response, retries, started = self._post(request, client=client, sleep=sleep)
+        return self._handle_success(request, response, retries, started)
+
+    def analyze_triage(
+        self,
+        request: MuseRequest,
+        *,
+        client: httpx.Client | None = None,
+        sleep=_sleep,
+    ) -> TriageResult:
+        """Run one photo-triage call with bounded retries.
+
+        The thumbnails ride as ``images``; the validated result lists which
+        screened photo ids merit full observation. Malformed output raises
+        :class:`ProviderResponseError` so the caller falls back to all
+        photos instead of auditing a corrupt subset.
+        """
+        self._check_request(request)
+        response, retries, started = self._post(request, client=client, sleep=sleep)
+        return self._handle_triage(request, response, retries, started)
+
+    def _handle_triage(
+        self,
+        request: MuseRequest,
+        response: httpx.Response,
+        retries: int,
+        started: float,
+    ) -> TriageResult:
+        try:
+            body = response.json()
+            content = body["choices"][0]["message"]["content"]
+        except (ValueError, KeyError, IndexError, TypeError) as exc:
+            raise ProviderResponseError(
+                f"Meta Muse triage has no usable message content: {exc}"
+            ) from exc
+        if not isinstance(content, str):
+            raise ProviderResponseError("Meta Muse triage message content is not text")
+        try:
+            payload = json.loads(content)
+        except ValueError as exc:
+            raise ProviderResponseError(
+                f"Meta Muse triage content is not JSON: {exc}"
+            ) from exc
+        included, warnings = validate_triage_payload(payload, list(request.photo_ids))
+        usage_block = body.get("usage") if isinstance(body, dict) else None
+        input_tokens = self._token_count(usage_block, "prompt_tokens")
+        output_tokens = self._token_count(usage_block, "completion_tokens")
+        usage = self._record(
+            request, retries, started, input_tokens, output_tokens, None, None
+        )
+        return TriageResult(
+            included=tuple(included),
+            model=self.model_id,
+            prompt_version=request.prompt_version,
+            usage=usage,
+            validation_warnings=tuple(warnings),
+        )
 
     @staticmethod
     def _retryable(error: ProviderError | None) -> bool:
@@ -349,24 +467,24 @@ class BasetenMuseAdapter(ProviderAdapter):
             content = body["choices"][0]["message"]["content"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             raise ProviderResponseError(
-                f"Baseten response has no usable message content: {exc}"
+                f"Meta Muse response has no usable message content: {exc}"
             ) from exc
         if not isinstance(content, str):
-            raise ProviderResponseError("Baseten message content is not text")
+            raise ProviderResponseError("Meta Muse message content is not text")
         choice = body["choices"][0]
         finish_reason = (
             choice.get("finish_reason") if isinstance(choice, dict) else None
         )
         if finish_reason == "length":
             raise ProviderResponseError(
-                "Baseten response hit the output-token limit; observations "
+                "Meta Muse response hit the output-token limit; observations "
                 "are incomplete"
             )
         try:
             payload = json.loads(content)
         except ValueError as exc:
             raise ProviderResponseError(
-                f"Baseten message content is not JSON: {exc}"
+                f"Meta Muse message content is not JSON: {exc}"
             ) from exc
         observations, warnings = validate_observation_payload(
             payload, frozenset(request.photo_ids)
@@ -406,8 +524,8 @@ class BasetenMuseAdapter(ProviderAdapter):
         cost: float | None = None
         if input_tokens is not None and output_tokens is not None:
             cost = (
-                input_tokens / 1_000_000 * BASETEN_INPUT_USD_PER_1M
-                + output_tokens / 1_000_000 * BASETEN_OUTPUT_USD_PER_1M
+                input_tokens / 1_000_000 * META_MUSE_INPUT_USD_PER_1M
+                + output_tokens / 1_000_000 * META_MUSE_OUTPUT_USD_PER_1M
             )
         record = UsageRecord(
             provider=self.provider_name,
@@ -420,7 +538,7 @@ class BasetenMuseAdapter(ProviderAdapter):
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             estimated_cost_usd=cost_override if cost_override is not None else cost,
-            pricing_version=BASETEN_PRICING_VERSION,
+            pricing_version=META_MUSE_PRICING_VERSION,
             error=str(error) if error else None,
         )
         self.ledger.record(record)

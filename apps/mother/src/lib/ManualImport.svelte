@@ -75,7 +75,7 @@
 
 <section aria-labelledby="import-title" class="max-w-2xl">
   <h1 id="import-title" class="text-2xl font-semibold">Manual import</h1>
-  <p class="mt-1 text-sm text-slate-600">
+  <p class="mt-1 text-sm text-[#6f5f4c]">
     Fallback for sites the extension cannot read. Creates the listing, then uploads each photo as
     its own request.
   </p>
@@ -156,7 +156,7 @@
       </div>
     {/if}
     {#if progress}
-      <div class="rounded-md border border-slate-200 bg-white p-3 text-sm" role="status">
+      <div class="rounded-md border border-[#e6c795] bg-[#fff8ef] p-3 text-sm" role="status">
         {progress}
       </div>
     {/if}

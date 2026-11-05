@@ -24,6 +24,7 @@ from PIL import Image
 
 from audits.rsa_reference import REFERENCE_VERSION as RSA_REFERENCE_VERSION
 from audits.rsa_reference import guidance_for as _rsa_guidance_for
+from audits.vehicle_match import is_wrong_vehicle
 from evidence.images import original_path
 from evidence.models import Photograph
 from providers.base import (
@@ -35,8 +36,8 @@ from providers.base import (
     ProviderResponseError,
     RetryPolicy,
 )
-from providers.baseten import BasetenMuseAdapter, MuseRequest
 from providers.meta import MetaSamAdapter, SamRequest
+from providers.meta_muse import MetaMuseAdapter, MuseRequest
 
 from . import adas_evidence, services
 from .models import (
@@ -87,11 +88,14 @@ SYSTEM_INSTRUCTIONS = (
 )
 
 # Batching limits (documented, tested): one photo per Muse call, at most
-# six claims per call, 4096 output tokens. Six observations were
-# live-verified to fit in 4096 tokens (evals 2026-10-30-muse-m1); larger
-# claim sets are chunked so no call can silently truncate.
+# six claims per call. Six observations were live-verified to fit in
+# 4096 output tokens (evals 2026-10-30-muse-m1); larger claim sets are
+# chunked so no call can silently truncate.
 MUSE_MAX_CLAIMS_PER_CALL = 6
-MUSE_MAX_OUTPUT_TOKENS = 4096
+# Live single-photo observations exceed 4096 output tokens
+# (finish_reason=length, 2026-11-04). 16384 caps worst-case output spend
+# at a fraction of a cent per call at current contributor pricing.
+MUSE_MAX_OUTPUT_TOKENS = 16384
 
 
 def chunked(items: list, size: int):
@@ -446,6 +450,201 @@ def _raise_if_halted(settled, job_id, stage: str, worker_id: str) -> None:
     raise services.JobNotRunningError(f"job {job_id} stopped during {stage}")
 
 
+TRIAGE_PROMPT_VERSION = "triage-v1"
+TRIAGE_THUMBNAIL_MAX_PX = 256
+TRIAGE_SYSTEM_INSTRUCTIONS = (
+    "You are an ADAS photo triager for used-car listing audits. "
+    "You receive small thumbnails, one per photo. "
+    "ACC can only be verified in TWO places: the steering wheel, and "
+    "the dashboard / instrument-cluster area (including the column "
+    "stalks visible there). Mark a photo relevant ONLY if it shows one "
+    "of those two places. Mark everything else not relevant: exteriors, "
+    "seats, wheels, grilles, radar housings, engine bays, icons, "
+    "unrelated cars, and any view that is neither wheel nor dash. "
+    "A radar housing alone never proves ACC, so sensor close-ups stay "
+    "out. When genuinely unsure whether a blurry view is wheel or dash, "
+    "INCLUDE it: a missed photo is lost evidence, an extra photo is one "
+    "cheap call. Respond with ONLY a JSON object shaped "
+    '{"relevant": {"<photo id>": true}} with exactly one boolean entry '
+    "per photo id listed, in any order."
+)
+
+
+def build_triage_text(claims: list[str], photo_ids: list[str]) -> str:
+    lines = [
+        "Claim under review:",
+        *(f"- {text}" for text in claims),
+        "",
+        "Thumbnails under review (in attachment order):",
+        *(f"- {photo_id}" for photo_id in photo_ids),
+        "",
+        (
+            "Which of these photos shows a steering wheel or a dashboard? "
+            'Reply ONLY {"relevant": {<photo id>: true/false, ...}}.'
+        ),
+    ]
+    return "\n".join(lines)
+
+
+def build_triage_thumbnails(
+    job_id, worker_id: str, photos: list[Photograph]
+) -> list[ImageAttachment]:
+    """Downscale screened originals to small JPEG thumbnails for triage.
+
+    Originals are never altered: bytes are re-verified against the
+    snapshot before downscaling, and thumbnails live only in the request.
+    """
+    attachments = []
+    for photo in photos:
+        data = verified_original_bytes(job_id, worker_id, photo)
+        with Image.open(io.BytesIO(data)) as img:
+            thumb = img.convert("RGB")
+            thumb.thumbnail((TRIAGE_THUMBNAIL_MAX_PX, TRIAGE_THUMBNAIL_MAX_PX))
+            buf = io.BytesIO()
+            thumb.save(buf, format="JPEG", quality=60)
+            attachments.append(
+                ImageAttachment(
+                    photo_id=str(photo.id),
+                    mime_type="image/jpeg",
+                    data=buf.getvalue(),
+                )
+            )
+    return attachments
+
+
+def run_triage(
+    job_id,
+    worker_id: str,
+    screened: ScreenedJob,
+    adapter=None,
+) -> list[Photograph]:
+    """Rank screened photos by likely relevance with one cheap call.
+
+    Returns the subset meriting full observation, in screened order.
+    Any triage failure (provider error or malformed verdicts) falls back
+    to the FULL set: triage only ever saves calls, it never blocks the
+    audit or silently drops evidence. Every outcome is ledger-recorded.
+    """
+    job = AuditJob.objects.get(pk=job_id)
+    services.check_budget(job, worker_id)
+    own_adapter = adapter or MetaMuseAdapter(model_id=settings.AUDIT_META_MUSE_MODEL_ID)
+    filename_excluded = [
+        str(p.id)
+        for p in screened.photos
+        if is_wrong_vehicle(
+            p.original_filename,
+            job.listing.year,
+            job.listing.make,
+            job.listing.model,
+        )
+    ]
+    candidates = [p for p in screened.photos if str(p.id) not in filename_excluded]
+    if filename_excluded and candidates:
+        services.record_execution(
+            job_id,
+            worker_id,
+            stage=Stage.Muse,
+            provider=Provider.LOCAL,
+            usage={
+                "prompt_version": TRIAGE_PROMPT_VERSION,
+                "filename_excluded": filename_excluded,
+            },
+        )
+    if not candidates:
+        # Every photo excluded (or none screened): fail open to the full set
+        # rather than auditing nothing. Triage below may still narrow.
+        candidates = list(screened.photos)
+        filename_excluded = []
+    ordered = [str(p.id) for p in candidates]
+    request = MuseRequest(
+        prompt_version=TRIAGE_PROMPT_VERSION,
+        system_instructions=TRIAGE_SYSTEM_INSTRUCTIONS,
+        user_text=build_triage_text(screened.claims, ordered),
+        photo_ids=tuple(ordered),
+        images=tuple(build_triage_thumbnails(job_id, worker_id, candidates)),
+        max_output_tokens=max(512, 64 * len(ordered) + 128),
+    )
+    max_attempts = _max_attempts_for(own_adapter)
+    services.reserve_call(
+        job_id,
+        worker_id,
+        max_attempts=max_attempts,
+        reserve_usd=settings.AUDIT_RESERVE_PER_CALL_USD,
+    )
+    try:
+        result = own_adapter.analyze_triage(request)
+    except ProviderError as exc:
+        attempts = _error_attempts(own_adapter, exc, max_attempts)
+        cost = classify_error_cost(exc)
+        services.settle_call(
+            job_id, worker_id, attempts=attempts, cost_usd=cost, ok=False
+        )
+        services.record_execution(
+            job_id,
+            worker_id,
+            stage=Stage.Muse,
+            provider=Provider.META,
+            model_id=own_adapter.model_id,
+            photo_ids=ordered,
+            ok=False,
+            attempts=attempts,
+            usage={
+                "prompt_version": TRIAGE_PROMPT_VERSION,
+                "triage": "fallback-full-set",
+                "billing": "certain-zero" if cost is not None else "unknown",
+            },
+            cost_usd=cost,
+            error_code=type(exc).__name__,
+            error_detail=str(exc)[:500],
+        )
+        return list(candidates)
+    estimated = result.usage.estimated_cost_usd
+    cost = Decimal(str(estimated)) if estimated is not None else None
+    settled = services.settle_call(
+        job_id,
+        worker_id,
+        attempts=(result.usage.retries or 0) + 1,
+        cost_usd=cost,
+        ok=True,
+    )
+    _raise_if_halted(settled, job_id, "triage", worker_id)
+    by_id = {str(p.id): p for p in candidates}
+    unknown = sorted(set(result.included) - set(by_id))
+    included = [by_id[pid] for pid in result.included if pid in by_id]
+    excluded = [pid for pid in ordered if pid not in set(result.included)]
+    services.record_execution(
+        job_id,
+        worker_id,
+        stage=Stage.Muse,
+        provider=Provider.META,
+        model_id=result.model,
+        photo_ids=ordered,
+        attempts=(result.usage.retries or 0) + 1,
+        latency_ms=result.usage.latency_ms,
+        usage={
+            "prompt_version": result.usage.prompt_version,
+            "triage_included": len(included),
+            "triage_excluded": excluded,
+            "triage_unknown_ids": len(unknown),
+            "filename_excluded": filename_excluded,
+            "input_tokens": result.usage.input_tokens,
+            "output_tokens": result.usage.output_tokens,
+            "pricing_version": result.usage.pricing_version,
+        },
+        cost_usd=cost,
+    )
+    if unknown:
+        services.record_execution(
+            job_id,
+            worker_id,
+            stage=Stage.Muse,
+            provider=Provider.LOCAL,
+            usage={"triage": "fallback-full-set", "reason": "unknown-photo-ids"},
+        )
+        return list(candidates)
+    return included
+
+
 def _verdict(item: dict) -> str:
     """Map a validated observation to PRESENT/ABSENT/UNCLEAR.
 
@@ -551,7 +750,7 @@ def run_muse(
     job_id,
     worker_id: str,
     screened: ScreenedJob,
-    adapter: BasetenMuseAdapter | None = None,
+    adapter: MetaMuseAdapter | None = None,
     reference_mode: bool = False,
     pattern_guidance: bool = False,
 ) -> int:
@@ -583,9 +782,7 @@ def run_muse(
         )
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
-    own_adapter = adapter or BasetenMuseAdapter(
-        model_id=settings.AUDIT_BASETEN_MODEL_ID
-    )
+    own_adapter = adapter or MetaMuseAdapter(model_id=settings.AUDIT_META_MUSE_MODEL_ID)
     snapshot = get_snapshot(job)
     entries = snapshot.get("claims", [])
     done = {
@@ -631,7 +828,7 @@ def run_muse(
                 own_adapter,
                 request,
                 stage=Stage.Muse,
-                provider=Provider.BASETEN,
+                provider=Provider.META,
                 model_id=own_adapter.model_id,
                 photo_ids=[str(photo.pk)],
             )
@@ -641,7 +838,7 @@ def run_muse(
                 job_id,
                 worker_id,
                 stage=Stage.Muse,
-                provider=Provider.BASETEN,
+                provider=Provider.META,
                 model_id=result.model,
                 photo_ids=[str(photo.pk)],
                 attempts=attempts,
@@ -1052,7 +1249,7 @@ def crop_needs_recheck(crop: AuditCrop, job: AuditJob) -> bool:
 def run_recheck(
     job_id,
     worker_id: str,
-    adapter: BasetenMuseAdapter | None = None,
+    adapter: MetaMuseAdapter | None = None,
 ) -> int:
     """Re-examine ambiguous crops with Muse: at most one call per crop,
     scoped to the crop's own originating claim, bounded by the recheck
@@ -1064,9 +1261,7 @@ def run_recheck(
     history, including disagreements. Returns provider calls made."""
     job = AuditJob.objects.get(pk=job_id)
     services.check_budget(job, worker_id)
-    own_adapter = adapter or BasetenMuseAdapter(
-        model_id=settings.AUDIT_BASETEN_MODEL_ID
-    )
+    own_adapter = adapter or MetaMuseAdapter(model_id=settings.AUDIT_META_MUSE_MODEL_ID)
     cap = settings.AUDIT_MAX_RECHECKS_PER_JOB
     id_to_text = {
         entry["id"]: entry["text"]
@@ -1142,7 +1337,7 @@ def run_recheck(
             own_adapter,
             request,
             stage=Stage.RECHECK,
-            provider=Provider.BASETEN,
+            provider=Provider.META,
             model_id=own_adapter.model_id,
             photo_ids=[str(photo.id)],
         )
@@ -1153,7 +1348,7 @@ def run_recheck(
             job_id,
             worker_id,
             stage=Stage.RECHECK,
-            provider=Provider.BASETEN,
+            provider=Provider.META,
             model_id=result.model,
             photo_ids=[str(photo.id)],
             attempts=attempts,
@@ -1529,7 +1724,7 @@ def run_reconcile(job_id, worker_id: str) -> int:
 def run_stages(
     job_id,
     worker_id: str,
-    muse_adapter: BasetenMuseAdapter | None = None,
+    muse_adapter: MetaMuseAdapter | None = None,
     sam_adapter: MetaSamAdapter | None = None,
 ) -> AuditJob:
     """Run the full pipeline: screening, Muse, SAM, crop, recheck,
@@ -1540,6 +1735,10 @@ def run_stages(
     screened = run_screening(job_id, worker_id)
     if not services.heartbeat(job_id, worker_id):
         raise services.JobNotRunningError(f"job {job_id} stopped after screening")
+    triaged = run_triage(job_id, worker_id, screened, muse_adapter)
+    screened = ScreenedJob(claims=screened.claims, photos=triaged)
+    if not services.heartbeat(job_id, worker_id):
+        raise services.JobNotRunningError(f"job {job_id} stopped after triage")
     run_muse(job_id, worker_id, screened, muse_adapter)
     if not services.heartbeat(job_id, worker_id):
         raise services.JobNotRunningError(f"job {job_id} stopped after muse")

@@ -73,7 +73,7 @@ nothing holds a transaction across network I/O.
 ## Provider contracts (PR #2: live behind keys)
 
 `backend/providers/` defines per-model adapters with exact identifiers
-(`meta-models/muse-spark-open-1026` on Baseten, `sam-3.1` on Meta),
+(`muse-spark-1.3-contributor` and `sam-3.1`, both on Meta),
 bounded retries, structured errors, pure payload builders, and a
 per-provider usage ledger. Every adapter call reports `last_attempts`
 and token usage; missing usage means unknown cost, never zero.

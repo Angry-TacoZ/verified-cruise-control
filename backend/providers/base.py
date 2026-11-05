@@ -40,7 +40,7 @@ class ProviderResponseError(ProviderError):
 class UsageRecord:
     """One inference execution's attribution. Costs stay separable by pool."""
 
-    provider: str  # "baseten" | "meta"
+    provider: str  # "meta"
     model_id: str
     prompt_version: str
     photo_ids: tuple[str, ...]

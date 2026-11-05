@@ -287,16 +287,15 @@ function Show-InferenceStatus($serviceEnv) {
     $flag = $serviceEnv['VCC_INFERENCE_ENABLED']
   }
   $enabled = $flag -eq '1'
-  $hasBaseten = -not [string]::IsNullOrEmpty($env:BASETEN_API_KEY) -or $serviceEnv.ContainsKey('BASETEN_API_KEY')
   $hasMeta = -not [string]::IsNullOrEmpty($env:META_API_KEY) -or $serviceEnv.ContainsKey('META_API_KEY')
   Write-Host ''
-  if ($enabled -and $hasBaseten -and $hasMeta) {
-    Write-Host '  Inference: ENABLED (VCC_INFERENCE_ENABLED=1 with provider keys present).'
+  if ($enabled -and $hasMeta) {
+    Write-Host '  Inference: ENABLED (VCC_INFERENCE_ENABLED=1 with Meta key present).'
     Write-Host '  ACC audits you queue will spend real credits within server caps.'
   } else {
     Write-Host '  Inference: DISABLED (default; paid calls stay off).' -ForegroundColor Yellow
     Write-Host '  Queued ACC audits will pause with "Inference is disabled". To enable:'
-    Write-Host '  set VCC_INFERENCE_ENABLED=1 plus BASETEN_API_KEY and META_API_KEY'
+    Write-Host '  set VCC_INFERENCE_ENABLED=1 plus META_API_KEY'
     Write-Host '  (see backend/.env.example), restart with Stop + Start, and authorize'
     Write-Host '  each run yourself. Startup succeeding does NOT mean live inference works.'
   }

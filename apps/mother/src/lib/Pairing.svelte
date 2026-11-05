@@ -70,7 +70,7 @@
 
 <section aria-labelledby="pairing-title">
   <h1 id="pairing-title" class="text-2xl font-semibold">Extension pairing</h1>
-  <p class="mt-1 max-w-2xl text-sm text-slate-600">
+  <p class="mt-1 max-w-2xl text-sm text-[#6f5f4c]">
     Pair the browser extension once: paste a token below into the extension popup on this machine.
     Tokens authenticate extension uploads only — the mother app itself uses this browser session.
   </p>
@@ -80,7 +80,7 @@
       Sign in first on the <a class="underline" href="#/setup">setup page</a>.
     </div>
   {:else if loading}
-    <p class="mt-4 text-slate-500">Loading…</p>
+    <p class="mt-4 text-[#8a7660]">Loading…</p>
   {:else}
     {#if error}
       <div class="mt-4 rounded-md border border-red-200 bg-red-50 p-4 text-red-800" role="alert">
@@ -102,7 +102,7 @@
       <div class="mt-4 max-w-2xl rounded-md border border-amber-300 bg-amber-50 p-4">
         <h2 class="font-semibold text-amber-900">New pairing token — shown once</h2>
         <div class="mt-2 flex items-center gap-2">
-          <code class="flex-1 break-all rounded bg-white px-2 py-1 font-mono text-xs"
+          <code class="flex-1 break-all rounded bg-[#fff8ef] px-2 py-1 font-mono text-xs"
             >{newToken}</code
           >
           <button
@@ -118,9 +118,9 @@
 
     <h2 class="mt-6 text-lg font-semibold">Pairings</h2>
     {#if pairings.length === 0}
-      <p class="mt-2 text-sm text-slate-500">No pairings yet.</p>
+      <p class="mt-2 text-sm text-[#8a7660]">No pairings yet.</p>
     {:else}
-      <ul class="mt-2 divide-y divide-slate-200 rounded-md border border-slate-200 bg-white">
+      <ul class="mt-2 divide-y divide-[#e6c795] rounded-md border border-[#e6c795] bg-[#fff8ef]">
         {#each pairings as pairing (pairing.id)}
           <li class="flex items-center gap-4 px-4 py-3 text-sm">
             <span
@@ -128,13 +128,13 @@
               class:bg-emerald-100={pairing.active}
               class:text-emerald-800={pairing.active}
               class:bg-slate-200={!pairing.active}
-              class:text-slate-600={!pairing.active}
+              class:text-[#6f5f4c]={!pairing.active}
             >
               {pairing.active ? 'active' : 'revoked'}
             </span>
-            <span class="font-mono text-xs text-slate-500">{pairing.id.slice(0, 8)}…</span>
-            <span class="text-slate-600">{pairing.label || '—'}</span>
-            <span class="ml-auto text-slate-500">last used {fmt(pairing.last_used_at)}</span>
+            <span class="font-mono text-xs text-[#8a7660]">{pairing.id.slice(0, 8)}…</span>
+            <span class="text-[#6f5f4c]">{pairing.label || '—'}</span>
+            <span class="ml-auto text-[#8a7660]">last used {fmt(pairing.last_used_at)}</span>
             {#if pairing.active}
               <button
                 class="rounded-md border border-slate-300 px-2 py-1 text-xs disabled:opacity-50"
