@@ -145,7 +145,10 @@ AUDIT_RESERVE_PER_CALL_USD = _audit_decimal("VCC_AUDIT_RESERVE_PER_CALL", "0.50"
 AUDIT_MAX_CROPS_PER_JOB = _audit_int("VCC_AUDIT_MAX_CROPS", 12)
 AUDIT_MAX_RECHECKS_PER_JOB = _audit_int("VCC_AUDIT_MAX_RECHECKS", 12)
 AUDIT_WORKER_HEARTBEAT_S = _audit_int("VCC_AUDIT_HEARTBEAT_S", 300)
-AUDIT_BASETEN_MODEL_ID = os.environ.get(
-    "VCC_BASETEN_MODEL", "meta-models/muse-spark-open-1026"
+# Muse observation provider: Meta Model API (Muse Spark contributor tier).
+# The contributor ID opts into Meta's training-data terms at a ~10x discount;
+# standard `muse-spark-1.3` can be restored via this variable.
+AUDIT_META_MUSE_MODEL_ID = os.environ.get(
+    "VCC_META_MUSE_MODEL", "muse-spark-1.3-contributor"
 )
 AUDIT_SAM_MODEL_ID = os.environ.get("VCC_SAM_MODEL", "sam-3.1")

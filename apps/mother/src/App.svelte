@@ -49,22 +49,22 @@
   const listingMatch = $derived(route.match(/^#\/listings\/([0-9a-f-]+)/i));
 </script>
 
-<div class="min-h-screen bg-slate-100 text-slate-900">
-  <header class="border-b border-slate-200 bg-white">
+<div class="min-h-screen bg-[#ffe4c4] text-[#3a2f23]">
+  <header class="border-b border-[#e6c795] bg-[#fff8ef]">
     <div class="mx-auto flex max-w-5xl items-center gap-6 px-6 py-4">
       <a href="#/" class="text-lg font-semibold tracking-tight">Verified Cruise Control</a>
       <nav class="flex gap-4 text-sm" aria-label="Primary">
-        <a class="text-slate-600 hover:text-slate-900 hover:underline" href="#/">Dashboard</a>
-        <a class="text-slate-600 hover:text-slate-900 hover:underline" href="#/import"
+        <a class="text-[#6f5f4c] hover:text-[#3a2f23] hover:underline" href="#/">Dashboard</a>
+        <a class="text-[#6f5f4c] hover:text-[#3a2f23] hover:underline" href="#/import"
           >Manual import</a
         >
-        <a class="text-slate-600 hover:text-slate-900 hover:underline" href="#/pairing"
+        <a class="text-[#6f5f4c] hover:text-[#3a2f23] hover:underline" href="#/pairing"
           >Extension pairing</a
         >
       </nav>
       <div class="ml-auto text-sm" role="status" aria-label="Backend status">
         {#if backendOk === null}
-          <span class="text-slate-400">connecting…</span>
+          <span class="text-[#a08a6e]">connecting…</span>
         {:else if backendOk}
           <span class="rounded-full bg-emerald-100 px-3 py-1 text-emerald-800"
             >backend connected</span
@@ -92,7 +92,7 @@
     {:else}
       <Dashboard gateSetup={initialized === false} />
     {/if}
-    <footer class="mt-12 border-t border-slate-200 pt-4 text-xs text-slate-500">
+    <footer class="mt-12 border-t border-[#e6c795] pt-4 text-xs text-[#8a7660]">
       Listings and original photos are imported evidence. Audits run only when you start one — photo
       support is never labeled AI-verified.
     </footer>

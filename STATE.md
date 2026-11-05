@@ -58,7 +58,7 @@ Review follow-ups (5 minor items, no verdict-behavior change):
 
 Branch: `feat/003-real-world-adas-evaluation` (from `main` @ `97dafb3`, PR #2 merged).
 Reference: RSA "Advanced Driver Assistance Systems (ADAS)", September 2026 (22 pp).
-Budget: $0 authorized. No live Baseten/Meta inference without James Lane's explicit approval. No paid calls in CI, startup, imports, or unit tests.
+Budget: $0 authorized. No live Meta (Muse/SAM) inference without James Lane's explicit approval. No paid calls in CI, startup, imports, or unit tests.
 
 ## Milestones
 
@@ -80,7 +80,7 @@ Budget: $0 authorized. No live Baseten/Meta inference without James Lane's expli
 ## File map (planned)
 
 - `backend/audits/rsa_reference.json` + loader (M1; schema TBD in M1).
-- Prompt builder changes in `backend/audits/pipeline.py` + `backend/providers/baseten.py` (M2).
+- Prompt builder changes in `backend/audits/pipeline.py` + `backend/providers/meta_muse.py` (M2).
 - `evals/realworld/` manifests + harness extension in `evals/run.py` (M3/M4; live gate M5).
 - `docs/rsa-adas-reference.md` (M1 human-readable) + `docs/realworld-evaluation.md` findings (M6).
 - `backend/audits/realworld.py` + `backend/tests/test_realworld.py` (M3/M4; 16 tests) + `fixtures/realworld-sample/` (2 PNGs, manifest, dry-run vectors).

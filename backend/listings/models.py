@@ -29,6 +29,10 @@ class Listing(models.Model):
     title = models.CharField(max_length=500)
     description = models.TextField(blank=True, default="")
     advertised_claims = models.JSONField(default=list)
+    # Operator-requested verification checks (e.g. "adaptive_cruise_control").
+    # Stored separately from advertised_claims so a user-requested check is
+    # never presented as a seller claim. See docs/decisions/002-real-listing-site.md.
+    requested_checks = models.JSONField(default=list)
     expected_photo_count = models.PositiveSmallIntegerField(null=True, blank=True)
     failed_upload_count = models.PositiveIntegerField(default=0)
     import_status = models.CharField(

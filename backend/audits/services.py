@@ -45,7 +45,63 @@ class JobNotRunningError(AuditError):
     """Raised when writing to a job that is no longer running."""
 
 
-def build_snapshot(listing_id) -> dict:
+class NoEvidenceError(AuditError):
+    """Raised when queueing an audit with no usable photographs.
+
+    A failed or empty import must never trigger provider spending: the
+    queue refuses the job before any model call can happen.
+    """
+
+
+class UnknownClaimError(AuditError):
+    """Raised when a scoped audit names an unknown scope."""
+
+
+class ConflictingAuditError(AuditError):
+    """Raised when a scoped audit collides with a different in-flight audit."""
+
+
+ACC_FEATURE_ID = "adaptive_cruise_control"
+
+
+def _resolve_claims(
+    advertised: list[str], requested_checks: list, scope: str | None
+) -> list[str]:
+    """Resolve an audit scope to snapshot claim texts.
+
+    ``None`` means all claims (current behavior for general audits):
+    every advertised text plus requested-check labels.
+    ``"acc"`` means ACC only: every advertised text whose normalized
+    feature is ``adaptive_cruise_control`` (ACC, adaptive/smart cruise,
+    and documented trade names per :mod:`audits.adas_evidence` — plain
+    "cruise control" never matches). When the seller advertised no ACC
+    wording, the snapshot holds the operator-requested ACC label, so
+    the finding records that the source did not claim ACC while the
+    photos are still judged for ACC evidence.
+    """
+    from audits.adas_evidence import normalize_feature
+    from listings.services import REQUESTED_CHECK_LABELS
+
+    base = [str(c) for c in (advertised or []) if str(c)]
+    if scope is None:
+        claims = list(base)
+        have = {normalize_feature(text) for text in claims}
+        for check in requested_checks or []:
+            label = REQUESTED_CHECK_LABELS.get(str(check), str(check))
+            if normalize_feature(label) not in have:
+                claims.append(label)
+        return claims
+    if scope != "acc":
+        raise UnknownClaimError(f"unknown audit scope: {scope}")
+    acc_claims = [text for text in base if normalize_feature(text) == ACC_FEATURE_ID]
+    if acc_claims:
+        return acc_claims
+    return [
+        REQUESTED_CHECK_LABELS.get(ACC_FEATURE_ID, ACC_FEATURE_ID),
+    ]
+
+
+def build_snapshot(listing_id, scope: str | None = None) -> dict:
     """Freeze the audit inputs: vehicle identity, claim IDs + texts,
     photo IDs + SHA-256.
 
@@ -53,12 +109,16 @@ def build_snapshot(listing_id) -> dict:
     later claim edits or photo arrivals cannot shift historical findings.
     The vehicle block (year/make/model/trim, never the VIN) gates
     manufacturer-specific catalog entries at reconcile time.
+    ``scope`` narrows the snapshot (see :func:`_resolve_claims`);
+    ``None`` snapshots every claim.
     """
     from evidence.models import Photograph
     from listings.models import Listing
 
     listing = Listing.objects.get(pk=listing_id)
-    claims = [str(c) for c in (listing.advertised_claims or []) if str(c)]
+    claims = _resolve_claims(
+        listing.advertised_claims, getattr(listing, "requested_checks", None), scope
+    )
     photos = Photograph.objects.filter(listing=listing).order_by("created_at")
     return {
         "taken_at": timezone.now().isoformat(),
@@ -84,22 +144,68 @@ def build_snapshot(listing_id) -> dict:
     }
 
 
-def queue_audit(listing_id, requested_by: str = "") -> tuple[AuditJob, bool]:
+def _snapshot_claims(snapshot: dict) -> list[str]:
+    from audits.adas_evidence import normalize_feature
+
+    return [
+        normalize_feature(entry.get("text", ""))
+        for entry in snapshot.get("claims", [])
+        if isinstance(entry, dict)
+    ]
+
+
+def queue_audit(
+    listing_id, requested_by: str = "", scope: str | None = None
+) -> tuple[AuditJob, bool]:
     """Queue an audit, reusing an in-flight job for the same listing.
 
     Returns ``(job, created)``. Refuses to queue when inference is not
     explicitly enabled. The partial unique index is the backstop: a
     submission that loses a creation race returns the winner.
+    ``scope`` narrows the snapshot (see :func:`_resolve_claims`);
+    ``None`` audits every claim. An ``"acc"`` scope also records the
+    operator's ACC request on the listing so the request is visible
+    wherever requested checks are shown. Reuse requires the same claim
+    scope: a colliding in-flight job with different claims raises
+    :class:`ConflictingAuditError` instead of silently changing scope.
     """
     if not settings.AUDIT_INFERENCE_ENABLED:
         raise InferenceDisabledError(
             "Inference is disabled; set VCC_INFERENCE_ENABLED=1 to queue audits."
+        )
+    # Fail closed on empty evidence: a listing with no stored photographs
+    # (failed or empty import) must never enter the queue, so no provider
+    # spending can happen without usable evidence. Checked before the
+    # reuse lookup so even a retry cannot queue a photo-less listing.
+    from evidence.models import Photograph
+
+    if not Photograph.objects.filter(listing_id=listing_id).exists():
+        raise NoEvidenceError(
+            "No usable photographs stored for this listing; "
+            "import photos before running an audit."
         )
     import random
     import time
 
     from django.db import OperationalError
 
+    from audits.adas_evidence import normalize_feature
+    from listings.models import Listing
+
+    listing = Listing.objects.get(pk=listing_id)
+    if scope == "acc":
+        checks = list(getattr(listing, "requested_checks", None) or [])
+        if ACC_FEATURE_ID not in checks:
+            listing.requested_checks = checks + [ACC_FEATURE_ID]
+            listing.save(update_fields=["requested_checks"])
+    resolved = [
+        normalize_feature(text)
+        for text in _resolve_claims(
+            listing.advertised_claims,
+            getattr(listing, "requested_checks", None),
+            scope,
+        )
+    ]
     last_error: OperationalError | None = None
     for attempt in range(4):
         try:
@@ -110,11 +216,16 @@ def queue_audit(listing_id, requested_by: str = "") -> tuple[AuditJob, bool]:
                     .first()
                 )
                 if existing is not None:
-                    return existing, False
+                    if sorted(_snapshot_claims(existing.snapshot)) == sorted(resolved):
+                        return existing, False
+                    raise ConflictingAuditError(
+                        "A different audit is already in flight for this "
+                        "listing; cancel it before queueing a new scope."
+                    )
                 job = AuditJob.objects.create(
                     listing_id=listing_id,
                     requested_by=requested_by,
-                    snapshot=build_snapshot(listing_id),
+                    snapshot=build_snapshot(listing_id, scope),
                     max_calls=settings.AUDIT_MAX_CALLS_PER_JOB,
                     spend_cap_usd=settings.AUDIT_SPEND_CAP_USD,
                 )
@@ -127,7 +238,12 @@ def queue_audit(listing_id, requested_by: str = "") -> tuple[AuditJob, bool]:
             )
             if winner is None:
                 raise
-            return winner, False
+            if sorted(_snapshot_claims(winner.snapshot)) == sorted(resolved):
+                return winner, False
+            raise ConflictingAuditError(
+                "A different audit is already in flight for this "
+                "listing; cancel it before queueing a new scope."
+            )
         except OperationalError as exc:
             last_error = exc
             time.sleep(0.05 * (2**attempt) + random.uniform(0, 0.05))

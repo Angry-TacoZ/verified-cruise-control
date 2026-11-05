@@ -28,8 +28,65 @@ def test_valid_import_persists_with_real_id(client, ext_headers, listing_payload
     listing = Listing.objects.get(pk=body["id"])  # ID must be a real row
     assert listing.source_url == listing_payload["source_url"]
     assert listing.advertised_claims == listing_payload["advertised_claims"]
+    assert listing.requested_checks == []
     assert listing.import_status == "importing"
     assert body["photo_count"] == 0
+
+
+def test_requested_acc_check_persists_separately(client, ext_headers, listing_payload):
+    """A user-requested ACC check is stored apart from seller claims."""
+    listing_payload["advertised_claims"] = ["leather seats"]
+    listing_payload["requested_checks"] = ["adaptive_cruise_control"]
+    response = _post(client, listing_payload, ext_headers)
+    assert response.status_code == 201, response.content
+    body = response.json()
+    assert body["requested_checks"] == ["adaptive_cruise_control"]
+    listing = Listing.objects.get(pk=body["id"])
+    assert listing.requested_checks == ["adaptive_cruise_control"]
+    # Never mixed into the seller's advertised claims.
+    assert listing.advertised_claims == ["leather seats"]
+
+
+def test_unsupported_requested_check_rejected(client, ext_headers, listing_payload):
+    listing_payload["requested_checks"] = ["self_driving"]
+    response = _post(client, listing_payload, ext_headers)
+    assert response.status_code in (400, 422), response.content
+    assert Listing.objects.count() == 0
+
+
+def test_snapshot_adds_user_requested_acc_claim():
+    """The audit snapshot covers a requested ACC check the seller did not
+    advertise, without duplicating an advertised ACC claim."""
+    from audits import services as audit_services
+    from evidence import images
+    from listings.models import Listing as ListingModel
+
+    from .conftest import make_image_bytes
+
+    row = ListingModel.objects.create(
+        source_url="https://example.test/l/req-acc",
+        source_site="example.test",
+        title="requested acc",
+        advertised_claims=["lane keeping assist"],
+        requested_checks=["adaptive_cruise_control"],
+    )
+    images.store_listing_photo(
+        row,
+        data=make_image_bytes("PNG", "RA"),
+        filename="ra.png",
+        source_url=None,
+        provenance="extension",
+    )
+    snapshot = audit_services.build_snapshot(row.pk)
+    texts = [c["text"] for c in snapshot["claims"]]
+    assert any("(user-requested check)" in t for t in texts)
+    assert sum("(user-requested check)" in t for t in texts) == 1
+
+    row.advertised_claims = ["Adaptive Cruise Control"]
+    row.save(update_fields=["advertised_claims"])
+    again = audit_services.build_snapshot(row.pk)
+    assert sum("(user-requested check)" in c["text"] for c in again["claims"]) == 0
+    assert len(again["claims"]) == 1
 
 
 def test_missing_vin_accepted(client, ext_headers, listing_payload):

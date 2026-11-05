@@ -32,7 +32,24 @@ class ListingIn(Schema):
     title: str = Field(max_length=500)
     description: str = Field(default="", max_length=limits.MAX_LISTING_TEXT_CHARS)
     advertised_claims: list[str] = Field(default_factory=list)
+    # Operator-requested checks (e.g. ["adaptive_cruise_control"]). Never a
+    # seller claim: stored separately and displayed as user-requested.
+    requested_checks: list[str] = Field(default_factory=list)
     expected_photo_count: int | None = None
+
+
+class LatestAuditOut(Schema):
+    job_id: uuid.UUID
+    status: str
+    current_stage: str
+    # Finding state for the adaptive-cruise-control claim in the latest job,
+    # or None when the job has no ACC finding yet. Presentation mapping to
+    # PASS / INCONCLUSIVE / FAIL lives in the mother app (accVerdict helper);
+    # the production five-state taxonomy is preserved here unchanged.
+    acc_state: str | None = None
+    spend_usd: str
+    model_calls_made: int
+    updated_at: datetime
 
 
 class ListingOut(Schema):
@@ -47,11 +64,37 @@ class ListingOut(Schema):
     title: str
     description: str
     advertised_claims: list
+    requested_checks: list = Field(default_factory=list)
     expected_photo_count: int | None
     failed_upload_count: int
     photo_count: int = 0
     import_status: str
+    latest_audit: LatestAuditOut | None = None
     created_at: datetime
+
+
+def _latest_audit_summary(listing: Listing) -> dict | None:
+    """Latest audit job for a listing plus its ACC finding state, if any."""
+    from audits.adas_evidence import normalize_feature
+    from audits.models import AuditFinding, AuditJob
+
+    job = AuditJob.objects.filter(listing_id=listing.pk).order_by("-created_at").first()
+    if job is None:
+        return None
+    acc_state = None
+    for finding in AuditFinding.objects.filter(job=job):
+        if normalize_feature(finding.claim_text or "") == "adaptive_cruise_control":
+            acc_state = finding.state
+            break
+    return {
+        "job_id": job.id,
+        "status": job.status,
+        "current_stage": job.current_stage,
+        "acc_state": acc_state,
+        "spend_usd": str(job.spend_usd),
+        "model_calls_made": job.model_calls_made,
+        "updated_at": job.updated_at,
+    }
 
 
 def _serialize(listing: Listing) -> dict:
@@ -67,10 +110,12 @@ def _serialize(listing: Listing) -> dict:
         "title": listing.title,
         "description": listing.description,
         "advertised_claims": listing.advertised_claims,
+        "requested_checks": list(getattr(listing, "requested_checks", None) or []),
         "expected_photo_count": listing.expected_photo_count,
         "failed_upload_count": listing.failed_upload_count,
         "photo_count": listing.photos.count(),
         "import_status": listing.import_status,
+        "latest_audit": _latest_audit_summary(listing),
         "created_at": listing.created_at,
     }
 

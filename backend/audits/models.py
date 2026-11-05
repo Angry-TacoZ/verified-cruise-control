@@ -32,8 +32,7 @@ class Stage(models.TextChoices):
 
 
 class Provider(models.TextChoices):
-    BASETEN = "baseten", "Baseten (Muse Spark)"
-    META = "meta", "Meta (SAM)"
+    META = "meta", "Meta (Muse Spark + SAM)"
     LOCAL = "local", "Local (no provider call)"
 
 

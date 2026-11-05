@@ -10,6 +10,7 @@ from django.db import models
 class Provenance(models.TextChoices):
     EXTENSION = "extension", "Browser extension upload"
     MANUAL = "manual", "Manual mother-app upload"
+    USER_SUPPLIED = "user_supplied", "Operator-supplied local file"
 
 
 class UploadStatus(models.TextChoices):

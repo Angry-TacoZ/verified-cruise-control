@@ -143,16 +143,30 @@ def _serialize_job(job: AuditJob) -> dict:
     }
 
 
+class QueueIn(Schema):
+    scope: str | None = None
+
+
 @app_router.post("/listings/{listing_id}/audits", response={202: QueueOut})
-def app_queue_audit(request, listing_id: uuid.UUID):
+def app_queue_audit(request, listing_id: uuid.UUID, payload: QueueIn):
     """Queue an audit (manual activation). Reuses an in-flight job for the
-    same listing. Only persists the queued job; the standalone
-    ``run_audit_worker`` process picks it up (no in-request threads)."""
+    same listing and claim scope. Only persists the queued job; the
+    standalone ``run_audit_worker`` process picks it up (no in-request
+    threads). ``scope="acc"`` audits only ACC-matching claims."""
     get_object_or_404(Listing, pk=listing_id)
     try:
-        job, created = services.queue_audit(listing_id, requested_by="operator")
+        job, created = services.queue_audit(
+            listing_id, requested_by="operator", scope=payload.scope
+        )
     except services.InferenceDisabledError as exc:
         raise HttpError(403, str(exc)) from exc
+    except services.NoEvidenceError as exc:
+        # No usable photographs: refuse before any provider spending.
+        raise HttpError(422, str(exc)) from exc
+    except services.UnknownClaimError as exc:
+        raise HttpError(422, str(exc)) from exc
+    except services.ConflictingAuditError as exc:
+        raise HttpError(409, str(exc)) from exc
     return Status(202, {"job": _serialize_job(job), "created": created})
 
 

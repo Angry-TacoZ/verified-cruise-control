@@ -1,8 +1,7 @@
 """Provider contracts: identifiers, config, payloads, strict validators.
 
 No test here touches the network: live paths run against httpx
-MockTransport. The 6-call live smoke test is separate (test_live_smoke.py,
-explicitly gated, never in CI).
+MockTransport. Live calls are explicitly gated and never run in CI.
 """
 
 from __future__ import annotations
@@ -13,13 +12,15 @@ import httpx
 import pytest
 
 from providers import (
-    BASETEN_API_BASE,
-    BASETEN_MODEL_ID,
     META_API_BASE,
+    META_MUSE_MODEL_ID,
+    META_MUSE_PRICING_VERSION,
     SAM31_MODEL_ID,
-    BasetenMuseAdapter,
     ImageAttachment,
+    MetaMuseAdapter,
     MetaSamAdapter,
+    MuseObservationResult,
+    MuseRequest,
     ProviderAuthError,
     ProviderError,
     ProviderNotConfigured,
@@ -27,11 +28,6 @@ from providers import (
     ProviderResponseError,
     UsageLedger,
     UsageRecord,
-)
-from providers.baseten import (
-    BASETEN_PRICING_VERSION,
-    MuseObservationResult,
-    MuseRequest,
     validate_observation_payload,
 )
 from providers.meta import (
@@ -81,45 +77,42 @@ def mock_client(handler) -> httpx.Client:
 
 
 def test_exact_model_identifiers():
-    assert BASETEN_MODEL_ID == "meta-models/muse-spark-open-1026"
-    assert BASETEN_API_BASE == "https://inference.baseten.co/v1"
-    assert SAM31_MODEL_ID == "sam-3.1"
+    assert META_MUSE_MODEL_ID == "muse-spark-1.3-contributor"
     assert META_API_BASE == "https://api.meta.ai/v1"
-    assert BasetenMuseAdapter.model_id == BASETEN_MODEL_ID
+    assert SAM31_MODEL_ID == "sam-3.1"
+    assert MetaMuseAdapter.model_id == META_MUSE_MODEL_ID
+    assert MetaMuseAdapter.api_base == META_API_BASE
     assert MetaSamAdapter.model_id == SAM31_MODEL_ID
 
 
 def test_adapters_unconfigured_without_keys(monkeypatch):
-    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
     monkeypatch.delenv("META_API_KEY", raising=False)
-    assert BasetenMuseAdapter().is_configured is False
+    assert MetaMuseAdapter().is_configured is False
     assert MetaSamAdapter().is_configured is False
 
 
 def test_adapters_read_env_keys(monkeypatch):
-    monkeypatch.setenv("BASETEN_API_KEY", "bt-test")
     monkeypatch.setenv("META_API_KEY", "meta-test")
-    assert BasetenMuseAdapter().is_configured is True
+    assert MetaMuseAdapter().is_configured is True
     assert MetaSamAdapter().is_configured is True
 
 
 def test_live_analysis_refuses_without_key(monkeypatch):
-    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
     monkeypatch.delenv("META_API_KEY", raising=False)
-    with pytest.raises(ProviderNotConfigured, match="BASETEN_API_KEY"):
-        BasetenMuseAdapter().analyze(muse_request(), client=mock_client(lambda r: None))
+    with pytest.raises(ProviderNotConfigured, match="META_API_KEY"):
+        MetaMuseAdapter().analyze(muse_request(), client=mock_client(lambda r: None))
     with pytest.raises(ProviderNotConfigured, match="META_API_KEY"):
         MetaSamAdapter().analyze(sam_request(), client=mock_client(lambda r: None))
 
 
 def test_require_configured_raises_without_key(monkeypatch):
-    monkeypatch.delenv("BASETEN_API_KEY", raising=False)
+    monkeypatch.delenv("META_API_KEY", raising=False)
     with pytest.raises(ProviderNotConfigured):
-        BasetenMuseAdapter().require_configured()
+        MetaMuseAdapter().require_configured()
 
 
 def test_http_error_mapping():
-    adapter = BasetenMuseAdapter(api_key="x")
+    adapter = MetaMuseAdapter(api_key="x")
     assert isinstance(adapter.map_http_error(401, "bad"), ProviderAuthError)
     assert isinstance(adapter.map_http_error(429, "slow"), ProviderRateLimitError)
     assert adapter.map_http_error(500, "boom").status == 500
@@ -136,8 +129,9 @@ def test_image_attachment_rejects_bad_inputs():
 
 def test_request_payload_builders_are_pure():
     muse = muse_request().to_payload()
-    assert muse["model"] == BASETEN_MODEL_ID
-    assert muse["metadata"]["photo_ids"] == "p1"
+    # The model is injected at send time; no provider metadata rides along.
+    assert "model" not in muse
+    assert "metadata" not in muse
     assert muse["response_format"] == {"type": "json_object"}
     parts = muse["messages"][1]["content"]
     assert parts[0] == {"type": "text", "text": "u"}
@@ -236,12 +230,13 @@ def test_muse_analyze_success_records_usage():
 
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/chat/completions"
-        assert request.headers["authorization"] == "Bearer bt-test"
+        assert request.headers["authorization"] == "Bearer mk-test"
         payload = json.loads(request.content)
-        assert payload["model"] == BASETEN_MODEL_ID
+        assert payload["model"] == META_MUSE_MODEL_ID
+        assert "metadata" not in payload
         return httpx.Response(200, json=body)
 
-    adapter = BasetenMuseAdapter(api_key="bt-test")
+    adapter = MetaMuseAdapter(api_key="mk-test")
     result = adapter.analyze(
         muse_request(), client=mock_client(handler), sleep=lambda s: None
     )
@@ -253,9 +248,9 @@ def test_muse_analyze_success_records_usage():
     assert record.input_tokens == 1000
     assert record.output_tokens == 100
     assert record.estimated_cost_usd == pytest.approx(
-        1000 / 1e6 * 1.25 + 100 / 1e6 * 4.25
+        1000 / 1e6 * 0.10 + 100 / 1e6 * 0.20
     )
-    assert record.pricing_version == BASETEN_PRICING_VERSION
+    assert record.pricing_version == META_MUSE_PRICING_VERSION
     assert record.retries == 0
 
 
@@ -263,7 +258,7 @@ def test_muse_analyze_rejects_malformed_content():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": "nope"}}]})
 
-    adapter = BasetenMuseAdapter(api_key="bt-test")
+    adapter = MetaMuseAdapter(api_key="mk-test")
     with pytest.raises(ProviderResponseError, match="not JSON"):
         adapter.analyze(
             muse_request(), client=mock_client(handler), sleep=lambda s: None
@@ -413,7 +408,7 @@ def test_muse_analyze_rejects_truncated_output():
             },
         )
 
-    adapter = BasetenMuseAdapter(api_key="bt-test")
+    adapter = MetaMuseAdapter(api_key="mk-test")
     with pytest.raises(ProviderResponseError, match="output-token limit"):
         adapter.analyze(
             muse_request(), client=mock_client(handler), sleep=lambda s: None
@@ -442,7 +437,7 @@ def test_adapter_tracks_last_attempts():
             },
         )
 
-    adapter = BasetenMuseAdapter(api_key="bt-test")
+    adapter = MetaMuseAdapter(api_key="mk-test")
     assert adapter.last_attempts == 0
     adapter.analyze(muse_request(), client=mock_client(handler), sleep=lambda s: None)
     assert adapter.last_attempts == 2
@@ -464,7 +459,7 @@ def test_muse_analyze_retries_rate_limit_then_succeeds():
             },
         )
 
-    adapter = BasetenMuseAdapter(api_key="bt-test")
+    adapter = MetaMuseAdapter(api_key="mk-test")
     result = adapter.analyze(
         muse_request(), client=mock_client(handler), sleep=lambda s: None
     )
@@ -477,7 +472,7 @@ def test_muse_analyze_does_not_retry_auth_errors():
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, text="bad key")
 
-    adapter = BasetenMuseAdapter(api_key="bad")
+    adapter = MetaMuseAdapter(api_key="bad")
     with pytest.raises(ProviderAuthError):
         adapter.analyze(
             muse_request(), client=mock_client(handler), sleep=lambda s: None
@@ -573,8 +568,8 @@ def test_ledger_keeps_provider_costs_separate():
     ledger = UsageLedger()
     ledger.record(
         UsageRecord(
-            provider="baseten",
-            model_id=BASETEN_MODEL_ID,
+            provider="meta",
+            model_id=META_MUSE_MODEL_ID,
             prompt_version="v1",
             photo_ids=("a",),
             status="ok",
@@ -591,4 +586,4 @@ def test_ledger_keeps_provider_costs_separate():
             estimated_cost_usd=0.02,
         )
     )
-    assert ledger.cost_by_provider() == {"baseten": 0.05, "meta": 0.02}
+    assert ledger.cost_by_provider() == {"meta": 0.07}

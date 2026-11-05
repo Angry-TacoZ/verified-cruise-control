@@ -398,4 +398,4 @@ def read_bounded_upload(file, limit: int) -> bytes:
     return data
 
 
-PROVENANCE_VALUES = {Provenance.EXTENSION, Provenance.MANUAL}
+PROVENANCE_VALUES = {Provenance.EXTENSION, Provenance.MANUAL, Provenance.USER_SUPPLIED}

@@ -68,7 +68,7 @@
 <section aria-labelledby="setup-title" class="max-w-xl">
   <h1 id="setup-title" class="text-2xl font-semibold">Operator setup</h1>
   {#if initialized === null && !error}
-    <p class="mt-4 text-slate-500">Loading…</p>
+    <p class="mt-4 text-[#8a7660]">Loading…</p>
   {:else if error && initialized === null}
     <div class="mt-4 rounded-md border border-red-200 bg-red-50 p-4 text-red-800" role="alert">
       {error}
@@ -80,7 +80,7 @@
       or <a class="underline" href="#/">open the dashboard</a>.
     </div>
   {:else}
-    <p class="mt-2 text-sm text-slate-600">
+    <p class="mt-2 text-sm text-[#6f5f4c]">
       {#if initialized}
         This browser is not signed in. Mint a single-use re-entry token in your terminal (<code
           class="rounded bg-slate-200 px-1">python backend/manage.py setup_token --regenerate</code
@@ -129,7 +129,7 @@
         be recovered (you can rotate it later).
       </p>
       <div class="mt-2 flex items-center gap-2">
-        <code class="flex-1 break-all rounded bg-white px-2 py-1 font-mono text-xs">
+        <code class="flex-1 break-all rounded bg-[#fff8ef] px-2 py-1 font-mono text-xs">
           {pairingToken}
         </code>
         <button

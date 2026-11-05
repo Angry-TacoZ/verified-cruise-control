@@ -3,10 +3,15 @@ import { ExtensionApiError, sha256HexBytes } from './api';
 import type { ExtractedListing } from './protocol';
 import {
   abandonImport,
+  applyListingOverrides,
   classifyFailure,
+  dataUrlToBlob,
+  listingFromManualEntry,
   normalizeProgress,
   retryFailedPhotos,
   runImport,
+  sanitizeUserFilename,
+  toListingPayload,
   type FailureReport,
   type ImportDeps,
   type ImportProgress,
@@ -139,6 +144,16 @@ function depsFor(
 }
 
 describe('runImport', () => {
+  it('translates a rejected pairing token into actionable guidance', async () => {
+    const denied = vi.fn(
+      async () => new Response(JSON.stringify({ detail: 'Unauthorized' }), { status: 401 }),
+    );
+    await expect(
+      runImport('bad-token', listingWithPhotos([]), depsFor(memoryStore(), denied)),
+    ).rejects.toThrow(/Re-issue a token on the mother-app Extension pairing page/);
+    expect(denied).toHaveBeenCalledTimes(1);
+  });
+
   it('imports a listing and uploads every photo once', async () => {
     const uploads = new Map<string, number>();
     const reports: FailureReport[] = [];
@@ -741,6 +756,118 @@ describe('retryFailedPhotos', () => {
     expect(retried.listingId).toBe('L1');
     expect(creates.count).toBe(1);
     expect(retried.status).toBe('partial');
+  });
+});
+
+describe('toListingPayload', () => {
+  it('sends no requested check by default', () => {
+    expect(toListingPayload(listingWithPhotos([])).requested_checks).toEqual([]);
+  });
+
+  it('keeps the operator-requested ACC check separate from seller claims', () => {
+    const listing = listingWithPhotos([]);
+    listing.advertisedClaims = ['leather seats'];
+    const payload = toListingPayload(listing, 'adaptive_cruise_control');
+    expect(payload.requested_checks).toEqual(['adaptive_cruise_control']);
+    // Never merged into the seller's advertised claims.
+    expect(payload.advertised_claims).toEqual(['leather seats']);
+  });
+});
+
+describe('applyListingOverrides', () => {
+  function detected(): ExtractedListing {
+    return {
+      ...listingWithPhotos(['http://127.0.0.1:8901/photos/a.jpg']),
+      title: 'Detected Title',
+      year: 2019,
+      make: 'Honda',
+      model: 'Accord',
+      trim: 'LX',
+      advertisedClaims: ['cruise control'],
+      extraction: {
+        confidence: 'medium',
+        reasons: ['r'],
+        fieldSources: { title: 'dom', year: 'dom' },
+      },
+    };
+  }
+
+  it('overrides whitelisted scalars and marks them operator-sourced', () => {
+    const next = applyListingOverrides(detected(), { year: 2021, make: 'Toyota' });
+    expect(next.year).toBe(2021);
+    expect(next.make).toBe('Toyota');
+    expect(next.model).toBe('Accord');
+    expect(next.extraction?.fieldSources['year']).toBe('operator');
+    expect(next.extraction?.fieldSources['title']).toBe('dom');
+  });
+
+  it('clears a field to null and never touches claims', () => {
+    const next = applyListingOverrides(detected(), { year: null });
+    expect(next.year).toBeNull();
+    expect(next.extraction?.fieldSources['year']).toBe('operator');
+    expect(next.advertisedClaims).toEqual(['cruise control']);
+  });
+
+  it('ignores absent keys and rejects out-of-range years', () => {
+    expect(applyListingOverrides(detected(), {}).year).toBe(2019);
+    expect(() => applyListingOverrides(detected(), { year: 1800 })).toThrow(/out of range/);
+    expect(() => applyListingOverrides(detected(), { year: 2200 })).toThrow(/out of range/);
+  });
+});
+
+describe('listingFromManualEntry', () => {
+  it('builds an operator-sourced listing with no seller claims', () => {
+    const listing = listingFromManualEntry(
+      {
+        title: '2018 Mazda 3',
+        year: 2018,
+        make: 'Mazda',
+        model: '3',
+        trim: '',
+        description: '',
+      },
+      'https://dealer.example/inventory/42?ref=search',
+    );
+    expect(listing.sourceSite).toBe('dealer.example');
+    expect(listing.sourceUrl).toBe('https://dealer.example/inventory/42?ref=search');
+    expect(listing.extractorId).toBe('manual-entry');
+    expect(listing.advertisedClaims).toEqual([]);
+    expect(listing.photos).toEqual([]);
+    expect(listing.extraction?.confidence).toBe('low');
+  });
+
+  it('leaves blank fields unknown and rejects bad years', () => {
+    const listing = listingFromManualEntry(
+      { title: 'Mystery car', year: null, make: '', model: '', trim: '', description: '' },
+      'https://dealer.example/x',
+    );
+    expect(listing.year).toBeNull();
+    expect(listing.make).toBe('');
+    expect(() =>
+      listingFromManualEntry(
+        { title: 't', year: 1500, make: '', model: '', trim: '', description: '' },
+        'https://dealer.example/x',
+      ),
+    ).toThrow(/out of range/);
+  });
+});
+
+describe('user-supplied file helpers', () => {
+  it('decodes a base64 image data URL and rejects non-images', () => {
+    const bytes = new Uint8Array([1, 2, 3, 4]);
+    let binary = '';
+    for (const b of bytes) binary += String.fromCharCode(b);
+    const blob = dataUrlToBlob(`data:image/jpeg;base64,${btoa(binary)}`);
+    expect(blob.type).toBe('image/jpeg');
+    expect(blob.size).toBe(4);
+    expect(() => dataUrlToBlob('data:text/plain;base64,AAAA')).toThrow(/not a base64 image/);
+    expect(() => dataUrlToBlob('https://example.com/a.jpg')).toThrow(/not a base64 image/);
+  });
+
+  it('sanitizes operator filenames to a safe multipart name', () => {
+    expect(sanitizeUserFilename('C:\\fakepath\\wheel photo (1).JPG')).toBe('wheel_photo_1_.JPG');
+    expect(sanitizeUserFilename('../../etc/passwd')).toBe('passwd');
+    expect(sanitizeUserFilename('')).toBe('photo');
   });
 });
 

@@ -5,7 +5,10 @@ import { execFileSync } from 'node:child_process';
 import path from 'node:path';
 
 export const repoRoot = path.resolve(import.meta.dirname, '..', '..', '..');
-export const e2eRuntimeDir = path.join(repoRoot, 'backend', 'runtime-data-e2e');
+// Isolated per run when VCC_E2E_RUNTIME_DIR is set: the shared e2e database
+// accumulates listings across runs, which confuses first-match assertions.
+export const e2eRuntimeDir =
+  process.env.VCC_E2E_RUNTIME_DIR ?? path.join(repoRoot, 'backend', 'runtime-data-e2e');
 
 const apiPort = process.env.VCC_E2E_API_PORT ?? '8000';
 const webPort = process.env.VCC_E2E_WEB_PORT ?? '5173';

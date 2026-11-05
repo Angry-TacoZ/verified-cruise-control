@@ -38,6 +38,34 @@ def normalize_claims(claims: list[str] | None) -> list[str]:
     return cleaned
 
 
+# Operator-requested verification checks. Single-value allowlist for the
+# real-listing milestone: only adaptive cruise control is supported.
+ALLOWED_REQUESTED_CHECKS = frozenset({"adaptive_cruise_control"})
+
+# Canonical display text for a requested check. The parenthetical suffix is
+# preserved by audits.normalize_feature, so the snapshot claim still maps to
+# the right catalog feature.
+REQUESTED_CHECK_LABELS = {
+    "adaptive_cruise_control": "Adaptive cruise control (user-requested check)",
+}
+
+
+def normalize_requested_checks(checks: list[str] | None) -> list[str]:
+    checks = checks or []
+    if len(checks) > 4:
+        raise HttpError(422, "at most 4 requested checks")
+    cleaned = []
+    for check in checks:
+        text = str(check).strip().lower()
+        if not text:
+            continue
+        if text not in ALLOWED_REQUESTED_CHECKS:
+            raise HttpError(422, f"unsupported requested check: {check}")
+        if text not in cleaned:
+            cleaned.append(text)
+    return cleaned
+
+
 def normalize_vin(vin: str | None) -> str | None:
     if vin is None:
         return None
@@ -76,5 +104,8 @@ def create_listing(payload) -> Listing:
         title=payload.title.strip(),
         description=description,
         advertised_claims=normalize_claims(payload.advertised_claims),
+        requested_checks=normalize_requested_checks(
+            getattr(payload, "requested_checks", None)
+        ),
         expected_photo_count=expected,
     )
