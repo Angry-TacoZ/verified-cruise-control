@@ -74,6 +74,34 @@ function Invoke-Child($scriptPath) {
   }
 }
 
+# Minimal .env reader (stdlib only): KEY=value lines, # comments and
+# blanks skipped, single/double quotes stripped. backend/.env is the
+# documented config path (see backend/.env.example), but Django reads raw
+# os.environ and nothing loads the file -- so the launcher injects it
+# into the backend/worker environments it starts. Ambient process
+# variables always win, which keeps test overrides (VCC_API_PORT, ...)
+# and real user environment working.
+function Get-DotEnv($path) {
+  $vars = @{}
+  if (-not (Test-Path $path)) { return $vars }
+  foreach ($line in (Get-Content $path)) {
+    $t = $line.Trim()
+    if ($t -eq '' -or $t.StartsWith('#')) { continue }
+    if ($t.StartsWith('export ')) { $t = $t.Substring(7).Trim() }
+    $eq = $t.IndexOf('=')
+    if ($eq -le 0) { continue }
+    $key = $t.Substring(0, $eq).Trim()
+    $val = $t.Substring($eq + 1).Trim()
+    if ($val.Length -ge 2 -and (($val.StartsWith('"') -and $val.EndsWith('"')) -or ($val.StartsWith("'") -and $val.EndsWith("'")))) {
+      $val = $val.Substring(1, $val.Length - 2)
+    }
+    if ($key -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { continue }
+    if ($val -eq '') { continue }
+    $vars[$key] = $val
+  }
+  return $vars
+}
+
 function Get-Services {
   if (-not (Test-Path $stateFile)) { return @() }
   try {
@@ -251,11 +279,16 @@ function Show-SetupToken {
   Write-Host '     Verified Cruise Control popup in Chrome.'
 }
 
-function Show-InferenceStatus {
-  $enabled = $env:VCC_INFERENCE_ENABLED -eq '1'
-  $hasBaseten = -not [string]::IsNullOrEmpty($env:BASETEN_API_KEY)
-  $hasMeta = -not [string]::IsNullOrEmpty($env:META_API_KEY)
+function Show-InferenceStatus($serviceEnv) {
+  # Effective config: ambient environment first, backend/.env as fallback.
   # Presence only -- values are never printed.
+  $flag = $env:VCC_INFERENCE_ENABLED
+  if ([string]::IsNullOrEmpty($flag) -and $serviceEnv.ContainsKey('VCC_INFERENCE_ENABLED')) {
+    $flag = $serviceEnv['VCC_INFERENCE_ENABLED']
+  }
+  $enabled = $flag -eq '1'
+  $hasBaseten = -not [string]::IsNullOrEmpty($env:BASETEN_API_KEY) -or $serviceEnv.ContainsKey('BASETEN_API_KEY')
+  $hasMeta = -not [string]::IsNullOrEmpty($env:META_API_KEY) -or $serviceEnv.ContainsKey('META_API_KEY')
   Write-Host ''
   if ($enabled -and $hasBaseten -and $hasMeta) {
     Write-Host '  Inference: ENABLED (VCC_INFERENCE_ENABLED=1 with provider keys present).'
@@ -369,6 +402,21 @@ function Invoke-Start {
   }
   Write-Ok 'setup markers present'
 
+  # backend/.env fills gaps only: anything already in this process's
+  # environment (user exports, test overrides) takes precedence.
+  # VCC_LAUNCHER_DOTENV points at another file for integration tests.
+  $dotEnvPath = if ($env:VCC_LAUNCHER_DOTENV) { $env:VCC_LAUNCHER_DOTENV } else { Join-Path $root 'backend/.env' }
+  $dotEnv = Get-DotEnv $dotEnvPath
+  $serviceEnv = @{}
+  foreach ($key in $dotEnv.Keys) {
+    if ([string]::IsNullOrEmpty([System.Environment]::GetEnvironmentVariable($key, 'Process'))) {
+      $serviceEnv[$key] = $dotEnv[$key]
+    }
+  }
+  if ($dotEnv.Count -gt 0) {
+    Write-Ok "backend/.env supplies $($serviceEnv.Count) variable(s) (ambient env wins; values never shown)"
+  }
+
   $services = @(Get-Services)
   $live = @()
   foreach ($svc in $services) {
@@ -409,7 +457,7 @@ function Invoke-Start {
   if ($needBackend) {
     Write-Step "Starting Django backend ($apiBase)"
     $svc = Start-TrackedService 'backend' $venvPython `
-      @('backend/manage.py', 'runserver', "127.0.0.1:$apiPort", '--noreload') $root @{}
+      @('backend/manage.py', 'runserver', "127.0.0.1:$apiPort", '--noreload') $root $serviceEnv
     # Marker + repo-path check together prove launcher ownership on Stop.
     $svc.marker = 'manage.py runserver'
     $live += $svc
@@ -421,7 +469,7 @@ function Invoke-Start {
   if ($needWorker) {
     Write-Step 'Starting audit worker'
     $svc = Start-TrackedService 'worker' $venvPython `
-      @('backend/manage.py', 'run_audit_worker') $root @{}
+      @('backend/manage.py', 'run_audit_worker') $root $serviceEnv
     $svc.marker = 'manage.py run_audit_worker'
     $live += $svc
     Write-Ok "worker PID $($svc.pid) (log: $($svc.outLog))"
@@ -470,7 +518,7 @@ function Invoke-Start {
     Write-Warn 'Could not reach the backend setup endpoint; continuing anyway.'
   }
 
-  Show-InferenceStatus
+  Show-InferenceStatus $serviceEnv
 
   if (-not $env:VCC_NO_BROWSER) {
     Write-Step 'Opening the mother app'

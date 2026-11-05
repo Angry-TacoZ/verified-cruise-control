@@ -31,12 +31,13 @@ function Assert($condition, $label) {
   }
 }
 
-function Invoke-Launcher($action, $apiPort, $webPort, $stateDir) {
+function Invoke-Launcher($action, $apiPort, $webPort, $stateDir, $dotEnvPath) {
   $env:VCC_API_PORT = "$apiPort"
   $env:VCC_WEB_PORT = "$webPort"
   $env:VCC_NO_BROWSER = '1'
   $env:VCC_LAUNCHER_STATE_DIR = $stateDir
   $env:VCC_LAUNCHER_WAIT_SEC = '25'
+  if ($dotEnvPath) { $env:VCC_LAUNCHER_DOTENV = $dotEnvPath }
   try {
     # Capture the information stream (Write-Host) only: merging stderr
     # (2>&1) would promote informational native stderr (uv, npm, vite) to
@@ -50,6 +51,7 @@ function Invoke-Launcher($action, $apiPort, $webPort, $stateDir) {
     Remove-Item Env:VCC_NO_BROWSER -ErrorAction SilentlyContinue
     Remove-Item Env:VCC_LAUNCHER_STATE_DIR -ErrorAction SilentlyContinue
     Remove-Item Env:VCC_LAUNCHER_WAIT_SEC -ErrorAction SilentlyContinue
+    Remove-Item Env:VCC_LAUNCHER_DOTENV -ErrorAction SilentlyContinue
   }
 }
 
@@ -143,6 +145,27 @@ $sleeperAlive = $null -ne (Get-Process -Id $sleeper.Id -ErrorAction SilentlyCont
 Assert $sleeperAlive 'unrelated sleeper process survives Stop'
 Stop-Process -Id $sleeper.Id -Force
 Assert (-not (Test-Path (Join-Path $testStateDir 'services.json'))) 'state file cleaned after full stop'
+
+Write-Host ''
+Write-Host '== 7b. backend/.env is injected into services (isolated file)'
+$fakeDotEnv = Join-Path $env:TEMP 'vcc-launcher-dotenv-test'
+Set-Content $fakeDotEnv @'
+# comment line
+
+VCC_INFERENCE_ENABLED=1
+BASETEN_API_KEY=fake-test-key
+META_API_KEY="quoted-test-key"
+EMPTY_IGNORED=
+BAD LINE WITHOUT EQUALS IGNORED
+'@ -Encoding UTF8
+$dotenvStart = Invoke-Launcher 'Start' $testApiPort $testWebPort $testStateDir $fakeDotEnv
+Assert ($dotenvStart.code -eq 0 -or $dotenvStart.code -eq 2) "Start with test .env exits 0/2 (got $($dotenvStart.code))"
+Assert ($dotenvStart.output -match 'backend/.env supplies 3 variable\(s\)') '.env parsing skips comments, blanks, empties, bad lines'
+Assert ($dotenvStart.output -match 'Inference: ENABLED') '.env flag and keys reach the effective inference report'
+Assert ($dotenvStart.output -notmatch 'fake-test-key|quoted-test-key') '.env values are never printed'
+$finalStop = Invoke-Launcher 'Stop' $testApiPort $testWebPort $testStateDir
+Assert ($finalStop.code -eq 0) 'Stop after .env run exits 0'
+Remove-Item $fakeDotEnv -Force -ErrorAction SilentlyContinue
 
 Write-Host ''
 Write-Host '== 7. Stale state recovers on next Start'
