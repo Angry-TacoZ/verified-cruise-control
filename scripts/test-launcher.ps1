@@ -88,6 +88,7 @@ Assert ($start.code -eq 0 -or $start.code -eq 2) "Start exits 0 (or 2 for first-
 Assert ($start.output -match 'backend ready') 'backend readiness reported'
 Assert ($start.output -match 'mother app ready') 'mother readiness reported'
 Assert ($start.output -match 'Inference: DISABLED') 'inference reported disabled by default'
+Assert ($start.output -notmatch 'NativeCommandError|CategoryInfo|FullyQualifiedErrorId') 'no raw error records leak into launcher output'
 $pids1 = Get-OwnedPids $testStateDir
 Assert ($pids1.Count -eq 3) "three services tracked (got $($pids1.Count))"
 $httpOk = $false

@@ -212,16 +212,29 @@ function Show-SetupToken {
   # Prints the one-time operator setup token when setup is incomplete.
   # Read-only unless no token exists yet (same as scripts/start-backend).
   # Never written to any log file -- console only, for James to type in.
+  # Never display raw command output here: on failure Django's stderr
+  # arrives as fully-formatted error records, which is the wall of red
+  # text this used to print. Classify instead and speak plainly.
   $oldPref = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   try {
     $out = & $venvPython backend/manage.py setup_token 2>&1 | Out-String
+    $code = $LASTEXITCODE
   } catch {
-    Write-Warn 'Could not retrieve the setup token automatically.'
-    Write-Host '  Mint one any time with:  .venv/Scripts/python backend/manage.py setup_token --regenerate'
-    return
+    $code = 1
+    $out = ''
   } finally {
     $ErrorActionPreference = $oldPref
+  }
+  if ($code -ne 0) {
+    # A token was minted by an earlier run, missed, and now cannot be
+    # re-displayed (the server stores a hash, not the token). This is
+    # the normal state of re-running Start before finishing setup.
+    Write-Warn 'A setup token was already issued in an earlier run and cannot be shown again.'
+    Write-Host '  If you saved it, enter it on the mother-app setup page now.'
+    Write-Host '  Otherwise mint a fresh one (this invalidates the lost one) and re-run Start:'
+    Write-Host '    .venv/Scripts/python backend/manage.py setup_token --regenerate'
+    return
   }
   if ($out -match 'already initialized') {
     Write-Ok 'Operator setup already complete.'
