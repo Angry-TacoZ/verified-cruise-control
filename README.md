@@ -366,6 +366,48 @@ re-firing completed calls (exactly-once billing is not claimed).
   operator review, bot-walled or gallery-blocked sites need the manual
   fallbacks, and no claim is made that every vehicle website works.
 
+### What live testing taught us (PR #6)
+
+Failed and over-budget runs are recorded here as evaluation data, not
+hidden. All runs below used a real 2024 MINI listing (31 imported photos,
+66–72 site claims) with paid Meta inference explicitly enabled:
+
+| Audit (prefix) | Outcome | Root cause |
+|---|---|---|
+| `9fe14a2d` | paused at 59/60 calls (`call_cap`) | Full-claim scope: 66 claims x 31 photos with per-photo Muse calls burns the 60-call cap. This run motivated ACC-only scope. |
+| `290051bc` | cancelled at 26/60 | Same full-scope call burn, cancelled by operator. |
+| `dc40c1dc` | cancelled at 17/60 | Same full-scope call burn, cancelled by operator. |
+| `d8f62471` | failed at 2/60 (`ProviderAuthError`) | Baseten 401 auth failure era; adapter since removed. |
+| `8917df5a` | cancelled at 31/60 | Stale worker: backend/worker processes predated the triage + ACC-scope deploy, so no filename filter and no triage ran. The muse stage sent one 27-photo batch (failed: `ProviderResponseError`), then retried 29 photos one call each. |
+| `1fb7afbd` | cancelled at 15/60 | Same stale-code full-scope job; cancelled before the service restart. |
+
+Lessons applied:
+
+- **Restart after pipeline changes.** The worker loads pipeline code at
+  startup. After any `backend/audits/` change, run the launcher
+  Stop + Start before queueing a live audit, or the running worker
+  silently executes the old pipeline (no triage, no scope filter).
+- **ACC scope is the budget.** Queueing with `scope=acc` reduces the
+  snapshot to ACC-matching claims (1 claim when the site does not
+  advertise ACC, with the finding framed as a requested check). Full
+  scope cannot fit 31 photos in a 60-call cap; ACC scope targets ~6–8
+  calls: filename filter ($0) -> triage (1 cheap call on thumbnails)
+  -> Muse on wheel/dash survivors -> SAM -> recheck -> reconcile.
+- **Batch-then-singles fallback is expensive.** A failed all-photo Muse
+  call retries every photo individually. ACC scope keeps the batch
+  small so the first call succeeds instead of failing into 29 retries.
+- **SAM-first triage was considered and rejected.** SAM 3.1 localizes
+  one concept in one image per call — it cannot survey 9 photos in a
+  single call. The existing triage (one Muse call over small thumbnails
+  to keep wheel/dash views) is already the cheapest correct gate, so
+  no SAM pre-pass was added.
+- **Reconcile v4 goldens are stale, not broken by this branch.** `evals/run.py
+  reconcile` scores 9/13 on v4: the four cross-brand-borrow cases now
+  return `visually_supported` under the newer general-pattern catalog
+  behavior, while v4 expects `insufficient_evidence`. Verified identical
+  (9/13) on pristine HEAD without these changes; updating goldens is
+  out of scope for this PR.
+
 ## Repository layout
 
 ```
