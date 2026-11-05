@@ -397,11 +397,21 @@ export async function runImport(
     }
     active = stored;
   } else {
-    const created = await createListing(
-      token,
-      toListingPayload(listing, requestedCheck),
-      fetchImpl,
-    );
+    let created;
+    try {
+      created = await createListing(token, toListingPayload(listing, requestedCheck), fetchImpl);
+    } catch (err) {
+      // A bare "Unauthorized" here means the stored pairing token is
+      // unknown to the backend (revoked, or a different token was
+      // pasted). Say so plainly instead of surfacing the status text.
+      if (err instanceof ExtensionApiError && (err.status === 401 || err.status === 403)) {
+        throw new Error(
+          'Backend rejected the extension pairing (401). Re-issue a token on the mother-app Extension pairing page, paste it into the extension popup, then retry.',
+          { cause: err },
+        );
+      }
+      throw err;
+    }
     active = {
       runId: `${Date.now()}`,
       listingId: created.id,

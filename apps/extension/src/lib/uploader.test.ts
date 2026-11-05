@@ -144,6 +144,16 @@ function depsFor(
 }
 
 describe('runImport', () => {
+  it('translates a rejected pairing token into actionable guidance', async () => {
+    const denied = vi.fn(
+      async () => new Response(JSON.stringify({ detail: 'Unauthorized' }), { status: 401 }),
+    );
+    await expect(
+      runImport('bad-token', listingWithPhotos([]), depsFor(memoryStore(), denied)),
+    ).rejects.toThrow(/Re-issue a token on the mother-app Extension pairing page/);
+    expect(denied).toHaveBeenCalledTimes(1);
+  });
+
   it('imports a listing and uploads every photo once', async () => {
     const uploads = new Map<string, number>();
     const reports: FailureReport[] = [];
