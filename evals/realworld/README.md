@@ -34,6 +34,11 @@ independently confirmed; `interpretation`: `supports`/`generic`/
 `insufficient`/`unknown`; `expected_state` one of the five taxonomy
 states; `verification_method`; `ambiguity`).
 
+Optional `source_group` (opaque id shared by all cases from one
+physical vehicle) is tolerated by the schema and REQUIRED by pilot
+admission. See `INTAKE.md` for the operator checklist and
+`docs/realworld-labeling-rubric.md` for the labeling rules.
+
 Manifests must not contain VINs, plates, owner data, or image bytes —
 validation rejects them.
 
@@ -56,6 +61,21 @@ validation rejects them.
 ```sh
 # Zero inference, always safe (validates + scores recorded outputs):
 python evals/run.py realworld-dryrun --manifest fixtures/realworld-sample/manifest.json
+
+# Zero-inference intake validation (schema, value-level privacy scan,
+# SHA-256 verification, cross-split/duplicate checks, holdout freeze
+# check, quality reports; no provider calls):
+python evals/run.py realworld-validate --manifest fixtures/realworld-sample/manifest.json
+
+# With a linked private register and a second split (dev vs holdout):
+python evals/run.py realworld-validate --manifest evals/realworld/manifest.pilot.json \
+  --other-manifest evals/realworld/manifest.dev.json --register <private>/register.json \
+  --enforce-freeze --public-report
+
+# Freezing a holdout (refuses fail-open freezes; needs dev + photos):
+python evals/run.py realworld-freeze --manifest <holdout>.json \
+  --other-manifest <dev>.json --reviewer-role dataset-reviewer
+```
 
 # Live (needs explicit James Lane approval + VCC_LIVE_SMOKE=1):
 python evals/run.py realworld-live --manifest evals/realworld/manifest.pilot.json --max-spend 5.00
