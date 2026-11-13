@@ -20,6 +20,7 @@ from pathlib import Path
 
 from audits.models import Observation
 from audits.pipeline import control_extra, sam_target_for
+from audits.realworld_intake import scan_values
 
 MANIFEST_VERSION = "realworld-v1"
 
@@ -96,6 +97,7 @@ def validate_case(case: dict) -> dict:
     if not isinstance(case, dict):
         raise TypeError("case must be an object")
     _no_forbidden(case, "case")
+    scan_values(case, "case")
     for key in ("id", "vehicle", "claim", "photo", "ground_truth"):
         if key not in case:
             raise ValueError(f"case missing required key {key!r}")
@@ -180,6 +182,7 @@ def validate_manifest(manifest, photos_root=None) -> list:
     if not isinstance(manifest, dict):
         raise TypeError("manifest must be an object")
     _no_forbidden(manifest, "manifest")
+    scan_values(manifest, "manifest")
     if manifest.get("manifest_version") != MANIFEST_VERSION:
         raise ValueError(
             f"unsupported manifest_version {manifest.get('manifest_version')!r}, "

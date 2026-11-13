@@ -87,6 +87,11 @@ evals/realworld/photos/*
 !evals/realworld/photos/.gitignore
 evals/realworld/manifest.*.json
 !evals/realworld/manifest.example.json
+# Private intake register + associated evidence (PR #5, never commit).
+# The register holds rights/privacy records; override location with
+# VCC_REALWORLD_PRIVATE_DIR. .gitignore never protects tracked files,
+# so a regression test asserts these paths stay ignored and untracked.
+evals/realworld/private/
 evals/results/*-realworld-*.json
 # Live spend ledgers (any filename: custom renames stay local) + lock files
 evals/results/*.jsonl

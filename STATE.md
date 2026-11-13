@@ -145,3 +145,23 @@ Work on `feat/003-real-world-adas-evaluation`; no paid inference; no catalog/RSA
 - [x] F2 (HIGH, production parity) — `build_eval_observation()` builds unsaved `Observation`s with the production-identical extra (`supports_localization`/`needs_crop`/`needs_other_view` + `control_extra()` projection: symbols, locations, dedicated, manufacturer context, nested `controls`); `_control_extra` renamed public for reuse. Live runner reconciles these instead of `visible_object`-only rows; empty model output records `missing-observation`, never a fabricated row. Regression test: nested ACC diagnostic control flips `insufficient_evidence` to `visually_supported` on a Forte 2021 ACC claim. Baseline m2 / reference m3 versions unchanged.
 - [x] F3 (MEDIUM, SAM metric) — split into `sam_target_selected` (text agreement via `control_matches`, labeled selection-only) and `sam_localization_correct` (scored only against optional independent `ground_truth.localization.verified_outcome` label + `verified_by`; otherwise `None` → report renders "not measured"). Markdown shows both rows. Committed fixtures carry no GT labels, so localization reads not measured.
 - [x] F4 (MEDIUM, control-match) — `control_matches()`: normalized exact match, else equal substantive token sets, else subset with ≥2 shared tokens; empties and generic-only overlap (`button`, `control`, `icon`, … stopwords) never match. 3 regression tests (empty GT, single-generic-token, case/whitespace/subset/near-miss).
+
+## PR #5 � Real-world dataset intake and validation (this branch)
+
+Branch: feat/005-realworld-intake. Zero inference, zero spend. Phase A complete with zero genuine photographs: private register (intake-v1, gitignored, VCC_REALWORLD_PRIVATE_DIR override), value-level privacy scan wired into validate_manifest, source groups + cross-split/duplicate gates, EXIF-aware evaluation copies, photo-only admission semantics, holdout freeze + manual log, private/public quality reports, realworld-validate command. Phase C not started: no rights-cleared photos supplied yet. PR #5 open as draft, unmerged.
+
+
+## PR #5 Phase B � candidate-source research (2026-11-04)
+
+8 Commons candidates in evals/realworld/private/candidate-sources.json (gitignored, metadata only, zero bytes downloaded). All license-verified (CC BY 2.0/4.0, CC BY-SA 4.0, 1x public domain), all pending: equipment proof and privacy review outstanding for every one; no accepted cases. Claims are researcher-authored. Coverage: LKA, cruise x3, ACC, assistance menu, lane-centering, LDW cluster. Gaps: ACC Stop & Go, ambiguous-symbol, stalk-specific. Nothing supplied yet; Phase C blocked on James's rights-cleared photos + equipment evidence.
+
+
+## PR #5 Phase C � readiness audit (2026-11-04, NOT complete)
+
+audit_phase_c_readiness over the 8 private candidates: 0 ready, 8 blocked. Every candidate is missing the same five items: rights-holder confirmation for this evaluation; manual privacy review of actual bytes; vehicle-specific equipment evidence; original SHA-256; evaluation-copy SHA-256. Licenses verified on all 8 (CC BY 2.0/4.0, CC BY-SA 4.0, public domain). No bytes downloaded, no cases admitted, no labels assigned. Phase C stays open pending James's evidence per INTAKE.md.
+
+
+## PR #5 review fixes 1-8 (2026-11-04, head 5d5eec6, unmerged)
+
+Closed the privacy bypass (list-depth scan), the register-to-manifest gap (hash/group/vehicle linkage), and the fail-open freeze (required dev+photos, split checks, sha verify, overwrite archive, realworld-freeze CLI). Printed admission status, RGB pixel-identity check, JPEG/PNG/WEBP allowlist. Suite 548 passed / 10 skipped x3; 14/14 mutations fail behaviorally; dry-run identical; e2e validate+freeze verified on synthetic tmp data. Edited existing tests (setup-only freeze tests + license setup alignment + coverage message pin) listed in the PR body. No genuine photographs admitted; no accuracy established.
+
