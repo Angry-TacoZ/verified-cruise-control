@@ -1,0 +1,3 @@
+# Historical VIN-shaped test fixtures used to verify value-free errors.
+d21a37c8d12db8f560e1f17e335d0e0b60ae0798:backend/tests/test_realworld_intake.py:generic-api-key:242
+7e34012e72b7e23af5a00db5638e17fd2cffdb46:backend/tests/test_realworld_intake.py:generic-api-key:212
