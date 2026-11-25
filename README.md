@@ -27,68 +27,14 @@ presentation layer over the five-state taxonomy. Reference-assisted
 recognition is experimental and unvalidated against live inference; no
 live model comparison has been authorized.
 
-## Install and Run on Windows
+## Visual evidence & at a glance
 
-No terminal needed for everyday use. Three double-clickable files in the
-repo root do everything; the app itself runs locally on your PC.
+- **Architecture & workflow:** Multimodal ADAS verification architecture comparing advertised vehicle features against listing photos and vehicle documentation via Meta Muse Spark, SAM 3.1, deterministic five-state reconciliation, and enforced spend caps, with **adaptive cruise control (ACC)** as the current real-listing verification workflow ([PR #6](https://github.com/Angry-TacoZ/verified-cruise-control/pull/6)).
+- **Evaluation boundary:** Offline reconciliation evaluation is validated in CI (`v2`, `v4`, and `v5` goldens in `backend/tests/test_eval_goldens.py`). Reference-assisted live inference remains unvalidated, and the default launcher keeps paid inference **OFF**.
 
-**One-time installation.** Double-click `Install Verified Cruise
-Control.cmd`. It checks for Python 3.13+ and Node.js 20+ (with download
-links if either is missing), installs what is missing, prepares the
-database, and builds the Chrome extension. Re-running it later is safe:
-it only fills gaps and never deletes anything.
-
-**Load the extension into Chrome (once).** The installer prints the exact
-extension folder (`apps/extension/.output/chrome-mv3` under the repo)
-and offers to open it. Then: visit `chrome://extensions`, enable
-Developer mode, choose Load unpacked, select that folder, and pin
-Verified Cruise Control to the toolbar. The installed extension stays
-put across restarts; rebuilding later only replaces its files and never
-clears pairing or permissions.
-
-**Daily use.** Double-click `Start Verified Cruise Control.cmd`. It
-verifies setup, starts the backend, the audit worker, and the local app
-(exactly once each -- a second double-click just reuses what is already
-running), waits until everything answers, then opens the dashboard in
-your browser. The synthetic photo server developers use is not needed
-for real listings and is never started by the launcher.
-
-**First run only: pairing.** The launcher shows a one-time operator
-token. Enter it on the mother-app setup page, copy the extension pairing
-token shown there into the extension popup in Chrome, and you are done --
-later starts skip pairing entirely unless credentials are revoked.
-
-**Analyze a vehicle listing.** Open any individual vehicle listing page,
-click the extension, choose Review listing, confirm or correct the
-vehicle and photos (attach your own images if the site blocks downloads
--- they are labelled user-supplied), then Verify Adaptive Cruise
-Control. Back in the mother app, open the listing and click Run ACC
-Audit, then inspect the result and its evidence.
-
-**Inference costs nothing by default.** The launcher starts with paid
-inference OFF and says so on every start. Audits you queue will wait
-with an "Inference is disabled" note until you deliberately enable it
-(see `backend/.env.example`) and authorize each run yourself. A green
-startup report means the local app works -- it does NOT mean live model
-calls work.
-
-**Stopping.** Double-click `Stop Verified Cruise Control.cmd`. It stops
-only the services the launcher started (tracked by process id and
-verified before stopping) and cleans up. Unrelated Python, Node, or
-browser processes are never touched. If you also ran the developer
-scripts, stop those separately with `./scripts/stop-dev.ps1`.
-
-**Updating the extension after code changes.** Run
-`./scripts/build-extension.ps1`, then press the reload button for the
-extension in `chrome://extensions`. No re-pairing needed.
-
-**Troubleshooting.** If a port (default 8000 for the backend, 5173 for
-the app) is already in use, the launcher names the port and the owning
-program and stops -- it never kills anything. Free the port or close the
-other program and start again. Service logs live under
-`%LOCALAPPDATA%\VerifiedCruiseControl\logs`. If the launcher reports
-missing setup pieces, re-run the installer. Windows integration coverage
-for the launchers lives in `scripts/test-launcher.ps1`.
+| Mother app ACC dashboard (scripted E2E, $0) | Listing audit detail & evidence packet |
+|---|---|
+| ![ACC audit dashboard](docs/demo/acc-dashboard.png) | ![ACC audit detail](docs/demo/acc-detail.png) |
 
 ## Why this is more than an image describer (hackathon context)
 
@@ -220,6 +166,69 @@ only describe one picture.
 - **Docs**: [architecture](docs/architecture.md) ·
   [API contracts](docs/api-contracts.md) · [security](docs/security.md) ·
   [stack decision](docs/decisions/001-stack.md) · [evals](evals/README.md)
+
+## Install and Run on Windows
+
+No terminal needed for everyday use. Three double-clickable files in the
+repo root do everything; the app itself runs locally on your PC.
+
+**One-time installation.** Double-click `Install Verified Cruise
+Control.cmd`. It checks for Python 3.13+ and Node.js 20+ (with download
+links if either is missing), installs what is missing, prepares the
+database, and builds the Chrome extension. Re-running it later is safe:
+it only fills gaps and never deletes anything.
+
+**Load the extension into Chrome (once).** The installer prints the exact
+extension folder (`apps/extension/.output/chrome-mv3` under the repo)
+and offers to open it. Then: visit `chrome://extensions`, enable
+Developer mode, choose Load unpacked, select that folder, and pin
+Verified Cruise Control to the toolbar. The installed extension stays
+put across restarts; rebuilding later only replaces its files and never
+clears pairing or permissions.
+
+**Daily use.** Double-click `Start Verified Cruise Control.cmd`. It
+verifies setup, starts the backend, the audit worker, and the local app
+(exactly once each -- a second double-click just reuses what is already
+running), waits until everything answers, then opens the dashboard in
+your browser. The synthetic photo server developers use is not needed
+for real listings and is never started by the launcher.
+
+**First run only: pairing.** The launcher shows a one-time operator
+token. Enter it on the mother-app setup page, copy the extension pairing
+token shown there into the extension popup in Chrome, and you are done --
+later starts skip pairing entirely unless credentials are revoked.
+
+**Analyze a vehicle listing.** Open any individual vehicle listing page,
+click the extension, choose Review listing, confirm or correct the
+vehicle and photos (attach your own images if the site blocks downloads
+-- they are labelled user-supplied), then Verify Adaptive Cruise
+Control. Back in the mother app, open the listing and click Run ACC
+Audit, then inspect the result and its evidence.
+
+**Inference costs nothing by default.** The launcher starts with paid
+inference OFF and says so on every start. Audits you queue will wait
+with an "Inference is disabled" note until you deliberately enable it
+(see `backend/.env.example`) and authorize each run yourself. A green
+startup report means the local app works -- it does NOT mean live model
+calls work.
+
+**Stopping.** Double-click `Stop Verified Cruise Control.cmd`. It stops
+only the services the launcher started (tracked by process id and
+verified before stopping) and cleans up. Unrelated Python, Node, or
+browser processes are never touched. If you also ran the developer
+scripts, stop those separately with `./scripts/stop-dev.ps1`.
+
+**Updating the extension after code changes.** Run
+`./scripts/build-extension.ps1`, then press the reload button for the
+extension in `chrome://extensions`. No re-pairing needed.
+
+**Troubleshooting.** If a port (default 8000 for the backend, 5173 for
+the app) is already in use, the launcher names the port and the owning
+program and stops -- it never kills anything. Free the port or close the
+other program and start again. Service logs live under
+`%LOCALAPPDATA%\VerifiedCruiseControl\logs`. If the launcher reports
+missing setup pieces, re-run the installer. Windows integration coverage
+for the launchers lives in `scripts/test-launcher.ps1`.
 
 ## Prerequisites
 
@@ -479,7 +488,4 @@ in CI.
 
 ## Fixture provenance & license
 
-All images and listings under `fixtures/` are generated in-repo (`fixtures/generate.py`)
-and watermarked SYNTHETIC. No real dealership data, no stock photos, no
-tracking pixels. Licensed for public hackathon distribution — see
-[CHANGELOG](CHANGELOG.md) for PR history.
+Code in this repository is released under the [MIT License](LICENSE). All images and listings under `fixtures/` are generated in-repo (`fixtures/generate.py`) and watermarked SYNTHETIC — no real dealership data, stock photos, or tracking pixels. See [CHANGELOG](CHANGELOG.md) for PR history.
